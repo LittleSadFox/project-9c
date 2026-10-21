@@ -46,7 +46,10 @@ def test_entrypoint_generates_host_keys_and_starts_sshd() -> None:
     text = ENTRYPOINT.read_text(encoding="utf-8")
     assert "ssh-keygen -A" in text
     assert "CC_SSH_DIR" in text
+    assert "test-only override" in text
+    assert "skips sshd" in text
     assert "CC_SSH_HOME" in (ROOT / "scripts" / "gpu" / "lib.sh").read_text(encoding="utf-8")
+    assert "test-only override" in (ROOT / "scripts" / "gpu" / "lib.sh").read_text(encoding="utf-8")
     assert "ssh_host_*" in text
     assert "/usr/sbin/sshd" in text
     assert "cc_require_job_or_interactive" in text
@@ -56,6 +59,13 @@ def test_entrypoint_generates_host_keys_and_starts_sshd() -> None:
     keys = text.index("ssh-keygen -A")
     wipe = text.index('rm -f "${ssh_dir}"/ssh_host_*')
     assert wipe < keys < sshd < job_exec
+
+
+def test_ci_runs_gpu_tests_from_tmp_cc_src() -> None:
+    text = CI.read_text(encoding="utf-8")
+    assert "/tmp/cc-src" in text
+    assert 'pytest backend/tests -m "not macos"' in text
+    assert "pod-layout" in text
 
 
 def test_dockerfile_uses_ci_ffmpeg_pin() -> None:

@@ -149,7 +149,8 @@ if [[ "${CC_RUN_JOB_READY:-}" != "1" ]]; then
       "CC_REPO_TOKEN was not resolved"
   fi
   echo "Clone LittleSadFox/project-9c at ${CC_GIT_REF}" | tee -a "$RUN_DIR/log.txt"
-  SRC="$(cc_safe_wipe_dir "$SRC" "$SCRIPT_DIR")"
+  SRC="$(cc_safe_wipe_dir "$SRC" "$SCRIPT_DIR" "$VOLUME" "$SCRATCH")" || cc_fail "Refuse to rm -rf ${SRC}."
+  [[ -n "$SRC" ]] || cc_fail "Refuse to rm -rf an empty path."
   mkdir -p "$SRC"
   cc_run_logged git init "$SRC"
   cc_run_logged git -C "$SRC" remote add origin "https://github.com/LittleSadFox/project-9c.git"

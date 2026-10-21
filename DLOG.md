@@ -181,8 +181,11 @@ The second live `gpu_tests` pod at `73be826` used an RTX 4090, driver 595.91.07,
 
 Tests now default `CC_SRC_DIR` and `CC_LIBRARY_DIR` under pytest `tmp_path`.
 The default clone dir is `/tmp/cc-src`.
-`run_job.sh` only removes a resolved path whose basename matches `cc-src`, that sits under `/tmp` or `$TMPDIR`, and that is not a symlink or a live checkout, volume, or HOME path.
+`run_job.sh` only removes a resolved path whose basename matches `cc-src`, whose parent is exactly `/tmp` or a trusted `$TMPDIR`, and that is not a symlink or a live checkout, volume, scratch, HOME, or working-directory path.
+`$TMPDIR` is untrusted when it resolves inside the volume, scratch, repo, or HOME.
 A wipe refusal also goes to `log.txt`.
+The remaining check-to-rm race needs `/tmp` write access on the pod.
+CI copies the repo to `/tmp/cc-src` and runs the `gpu_tests` pytest selection from there.
 
 `wait_job` did not see `status=failed` from S3. `aws s3 cp ... -` returned `SignatureDoesNotMatch` on all four retries. `aws s3api get-object` with the same profile worked on the first try. The wait ended when the pod returned 404.
 

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
 import tempfile
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -115,6 +117,16 @@ exit 1
         encoding="utf-8",
     )
     aws.chmod(0o755)
+    nvidia = _SHIM_DIR / "nvidia-smi"
+    nvidia.write_text(
+        f"""#!/usr/bin/env bash
+printf '%s %s\\n' nvidia-smi "$*" >> "{log}"
+echo "ERROR: shim nvidia-smi blocked GPU" >&2
+exit 1
+""",
+        encoding="utf-8",
+    )
+    nvidia.chmod(0o755)
     return _SHIM_DIR
 
 
@@ -129,6 +141,7 @@ def _payload(stdout: str) -> dict[str, object]:
 
 _BASETEMP: Path | None = None
 _ISOLATION_ROOT: Path | None = None
+_TMP_CC_SRC_DIRS: list[Path] = []
 
 
 @pytest.fixture(autouse=True)
@@ -136,15 +149,23 @@ def _cc_isolation_root(tmp_path_factory: pytest.TempPathFactory) -> None:
     global _BASETEMP, _ISOLATION_ROOT
     _BASETEMP = Path(tmp_path_factory.getbasetemp()).resolve()
     _ISOLATION_ROOT = tmp_path_factory.mktemp("cc-isolate")
+    created = _TMP_CC_SRC_DIRS
+    created.clear()
     yield
+    for path in created:
+        shutil.rmtree(path, ignore_errors=True)
+    created.clear()
     _ISOLATION_ROOT = None
     _BASETEMP = None
 
 
-def _job_dirs(tmp_path: Path) -> dict[str, str]:
-    src = tmp_path / "cc-src"
+def _job_dirs(tmp_path: Path, src: Path | None = None) -> dict[str, str]:
+    if src is None:
+        src = Path(tempfile.mkdtemp(prefix="cc-src-", dir="/tmp"))
+        _TMP_CC_SRC_DIRS.append(src)
+    else:
+        src.mkdir(parents=True, exist_ok=True)
     library = tmp_path / "cc-lib"
-    src.mkdir(parents=True, exist_ok=True)
     library.mkdir(parents=True, exist_ok=True)
     return {"CC_SRC_DIR": str(src), "CC_LIBRARY_DIR": str(library)}
 
@@ -190,6 +211,15 @@ _FORBIDDEN_JOB_DIRS = {
 }
 
 
+def _is_tmp_cc_src(resolved: Path) -> bool:
+    tmp_root = Path("/tmp").resolve()
+    if resolved.parent != tmp_root:
+        return False
+    if resolved.name == "cc-src":
+        return False
+    return bool(re.fullmatch(r"cc-src-[A-Za-z0-9._-]+", resolved.name))
+
+
 def _require_isolated_job_dirs(extra: dict[str, str]) -> dict[str, str]:
     if _ISOLATION_ROOT is None or _BASETEMP is None:
         raise AssertionError("pytest isolation root is not bound")
@@ -216,7 +246,8 @@ def _require_isolated_job_dirs(extra: dict[str, str]) -> dict[str, str]:
         repo = ROOT.resolve()
         if resolved == repo or repo.is_relative_to(resolved):
             raise AssertionError(f"{key} must not be the live checkout or a parent of it")
-        if not resolved.is_relative_to(_BASETEMP):
+        under_base = resolved.is_relative_to(_BASETEMP)
+        if not under_base and not (key == "CC_SRC_DIR" and _is_tmp_cc_src(resolved)):
             raise AssertionError(f"{key} must be under pytest basetemp")
         Path(raw).mkdir(parents=True, exist_ok=True)
     return extra
@@ -256,12 +287,16 @@ def _run(
     env: dict[str, str] | None = None,
     *,
     bin_dir: Path | None = None,
+    cwd: str | Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     extra = dict(env) if env else {}
     _require_isolated_job_dirs(extra)
+    for arg in args:
+        if "/opt/cc/" in str(arg) or str(arg).rstrip("/") == "/opt/cc":
+            raise AssertionError(f"tests must not exec /opt/cc: {arg}")
     return subprocess.run(
         args,
-        cwd=str(ROOT),
+        cwd=str(cwd or ROOT),
         env=_isolated_env(env, bin_dir=bin_dir),
         check=False,
         capture_output=True,
@@ -275,7 +310,10 @@ def _wipe(
     *,
     env: dict[str, str] | None = None,
     script_dir: str | None = None,
+    volume: str | None = None,
+    scratch: str | None = None,
     wipe: bool = False,
+    cwd: str | Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     extra = {
         "CC_VOLUME_DIR": str(tmp_path / "cc-vol"),
@@ -284,11 +322,35 @@ def _wipe(
     if env:
         extra.update(env)
     cmd = "cc_safe_wipe_dir" if wipe else "cc_assert_safe_wipe_dir"
-    sd = script_dir or str(LIB.parent)
+    sd = script_dir or str(tmp_path / "fake-repo" / "scripts" / "gpu")
+    Path(sd).mkdir(parents=True, exist_ok=True)
+    vol = volume or extra.get("CC_VOLUME_DIR") or str(tmp_path / "cc-vol")
+    lib = scratch or extra.get("CC_LIBRARY_DIR") or str(tmp_path / "cc-lib")
+    Path(vol).mkdir(parents=True, exist_ok=True)
+    Path(lib).mkdir(parents=True, exist_ok=True)
     return _run(
-        ["bash", "-c", f'source {LIB} && {cmd} "$1" "$2"', "wipe", target, sd],
+        [
+            "bash",
+            "-c",
+            f'source {LIB} && {cmd} "$1" "$2" "$3" "$4"',
+            "wipe",
+            target,
+            sd,
+            vol,
+            lib,
+        ],
         env=extra,
+        cwd=cwd or tmp_path,
     )
+
+
+@pytest.fixture
+def tmp_cc_src() -> Iterator[Path]:
+    path = Path(tempfile.mkdtemp(prefix="cc-src-", dir="/tmp"))
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def _fake_aws_get_object(
@@ -1165,9 +1227,27 @@ def test_run_job_skips_finished_status(tmp_path: Path) -> None:
 
 
 def test_entrypoint_early_failure_writes_status(tmp_path: Path) -> None:
+    stub_job = tmp_path / "run_job.sh"
+    stub_job.write_text("#!/usr/bin/env bash\necho STUB_JOB\nexit 1\n", encoding="utf-8")
+    stub_job.chmod(0o755)
+    nvidia = tmp_path / "nvidia-smi"
+    nvidia.write_text(
+        "#!/usr/bin/env bash\necho 'ERROR: nvidia-smi shim fail' >&2\nexit 1\n",
+        encoding="utf-8",
+    )
+    nvidia.chmod(0o755)
     script = tmp_path / "entrypoint.sh"
     text = ENTRYPOINT.read_text(encoding="utf-8")
     patched = text.replace('LIB="/opt/cc/scripts/gpu/lib.sh"', f'LIB="{LIB}"')
+    patched = patched.replace(
+        'source "$LIB"\nelse',
+        'source "$LIB"\ncc_watchdog_start() { :; }\nelse',
+    )
+    patched = patched.replace(
+        "exec /opt/cc/scripts/gpu/run_job.sh",
+        f"exec {stub_job}",
+    )
+    assert "/opt/cc/" not in patched
     script.write_text(patched, encoding="utf-8")
     script.chmod(0o755)
     ssh_dir = tmp_path / "ssh"
@@ -1175,6 +1255,7 @@ def test_entrypoint_early_failure_writes_status(tmp_path: Path) -> None:
     isolated_key = ssh_dir / "ssh_host_test"
     isolated_key.write_text("probe\n", encoding="utf-8")
     etc_before = sorted(p.name for p in Path("/etc/ssh").glob("ssh_host_*"))
+    started = time.monotonic()
     result = _run(
         [str(script)],
         env={
@@ -1185,13 +1266,17 @@ def test_entrypoint_early_failure_writes_status(tmp_path: Path) -> None:
             "CC_SSH_DIR": str(ssh_dir),
             **_job_dirs(tmp_path),
         },
+        bin_dir=tmp_path,
     )
+    assert time.monotonic() - started < 20
     assert result.returncode != 0
     status = tmp_path / "runs" / "job-early" / "status"
     assert status.is_file()
     assert status.read_text(encoding="utf-8").strip() == "failed"
     assert not isolated_key.exists(), result.stdout + result.stderr
     assert sorted(p.name for p in Path("/etc/ssh").glob("ssh_host_*")) == etc_before
+    assert "STUB_JOB" not in result.stdout
+    assert "nvidia-smi" in result.stderr or "nvidia-smi" in result.stdout
 
 
 def test_wait_job_pod_id_requires_value() -> None:
@@ -1426,8 +1511,8 @@ def test_run_logged_streams_before_exit(tmp_path: Path) -> None:
             proc.wait(timeout=5)
 
 
-def test_run_job_rerun_after_clone_reaches_ml_jobs(tmp_path: Path) -> None:
-    src = tmp_path / "cc-src"
+def test_run_job_rerun_after_clone_reaches_ml_jobs(tmp_cc_src: Path, tmp_path: Path) -> None:
+    src = tmp_cc_src
     git = tmp_path / "git"
     git.write_text(
         f"""#!/usr/bin/env bash
@@ -1724,6 +1809,11 @@ def test_safe_wipe_refuses_empty_relative_and_tmp(tmp_path: Path) -> None:
     tmp = _wipe(tmp_path, "/tmp")
     assert tmp.returncode != 0
     assert "/tmp" in tmp.stderr
+    nested = tmp_path / "nested" / "cc-src"
+    nested.mkdir(parents=True)
+    parent = _wipe(tmp_path, str(nested))
+    assert parent.returncode != 0
+    assert "Parent must be /tmp" in parent.stderr
 
 
 def test_safe_wipe_refuses_workspace_home_and_checkout(tmp_path: Path) -> None:
@@ -1737,34 +1827,119 @@ def test_safe_wipe_refuses_workspace_home_and_checkout(tmp_path: Path) -> None:
     assert usr.returncode != 0
     backend = _wipe(tmp_path, str(ROOT / "backend"))
     assert backend.returncode != 0
-    repo = _wipe(tmp_path, str(ROOT))
+    repo = _wipe(tmp_path, str(ROOT), script_dir=str(LIB.parent))
     assert repo.returncode != 0
+    if ROOT.resolve() == Path("/tmp/cc-src").resolve():
+        assert "It is the checkout" in repo.stderr
     parent = _wipe(tmp_path, str(ROOT.parent))
     assert parent.returncode != 0
     dash = _wipe(tmp_path, "-cc-src")
     assert dash.returncode != 0
 
 
-def test_safe_wipe_refuses_home_when_unset(tmp_path: Path) -> None:
-    result = _wipe(tmp_path, str(Path.home()), env={"HOME": ""})
+def test_safe_wipe_refuses_home_cc_src(tmp_cc_src: Path, tmp_path: Path) -> None:
+    (tmp_cc_src / "keep").write_text("home\n", encoding="utf-8")
+    result = _wipe(tmp_path, str(tmp_cc_src), env={"HOME": str(tmp_cc_src)})
     assert result.returncode != 0
+    assert "It is HOME" in result.stderr
+    assert (tmp_cc_src / "keep").is_file()
 
 
-def test_safe_wipe_refuses_volume_and_scratch(tmp_path: Path) -> None:
-    src = tmp_path / "cc-src"
-    src.mkdir()
-    inside_volume = _wipe(
-        tmp_path,
-        str(src),
-        env={"CC_VOLUME_DIR": str(tmp_path)},
+def test_safe_wipe_refuses_home_when_empty(tmp_cc_src: Path, tmp_path: Path) -> None:
+    (tmp_cc_src / "keep").write_text("home\n", encoding="utf-8")
+    getent = tmp_path / "getent"
+    getent.write_text(
+        f"""#!/usr/bin/env bash
+if [[ "$1" == "passwd" ]]; then
+  printf '%s\\n' "user:x:1000:1000::{tmp_cc_src}:"
+  exit 0
+fi
+exit 1
+""",
+        encoding="utf-8",
     )
-    assert inside_volume.returncode != 0
-    inside_scratch = _wipe(
-        tmp_path,
-        str(src),
-        env={"CC_LIBRARY_DIR": str(tmp_path)},
+    getent.chmod(0o755)
+    (tmp_path / "fake-repo" / "scripts" / "gpu").mkdir(parents=True)
+    (tmp_path / "cc-vol").mkdir()
+    (tmp_path / "cc-lib").mkdir()
+    result = _run(
+        [
+            "bash",
+            "-c",
+            f'source {LIB} && cc_assert_safe_wipe_dir "$1" "$2" "$3" "$4"',
+            "wipe",
+            str(tmp_cc_src),
+            str(tmp_path / "fake-repo" / "scripts" / "gpu"),
+            str(tmp_path / "cc-vol"),
+            str(tmp_path / "cc-lib"),
+        ],
+        env={"HOME": ""},
+        bin_dir=tmp_path,
+        cwd=tmp_path,
     )
-    assert inside_scratch.returncode != 0
+    assert result.returncode != 0
+    assert "It is HOME" in result.stderr
+    assert (tmp_cc_src / "keep").is_file()
+
+
+def test_safe_wipe_refuses_volume_cc_src(tmp_cc_src: Path, tmp_path: Path) -> None:
+    (tmp_cc_src / "keep").write_text("vol\n", encoding="utf-8")
+    result = _wipe(tmp_path, str(tmp_cc_src), volume=str(tmp_cc_src))
+    assert result.returncode != 0
+    assert "It is the volume" in result.stderr
+    assert (tmp_cc_src / "keep").is_file()
+
+
+def test_safe_wipe_refuses_scratch_cc_src(tmp_cc_src: Path, tmp_path: Path) -> None:
+    (tmp_cc_src / "keep").write_text("lib\n", encoding="utf-8")
+    result = _wipe(tmp_path, str(tmp_cc_src), scratch=str(tmp_cc_src))
+    assert result.returncode != 0
+    assert "It is scratch" in result.stderr
+    assert (tmp_cc_src / "keep").is_file()
+
+
+def test_safe_wipe_refuses_checkout_cc_src(tmp_cc_src: Path, tmp_path: Path) -> None:
+    gpu = tmp_cc_src / "scripts" / "gpu"
+    gpu.mkdir(parents=True)
+    (tmp_cc_src / "KEEP").write_text("checkout-alive\n", encoding="utf-8")
+    result = _wipe(tmp_path, str(tmp_cc_src), script_dir=str(gpu), wipe=True)
+    assert result.returncode != 0
+    assert "It is the checkout" in result.stderr
+    assert (tmp_cc_src / "KEEP").read_text(encoding="utf-8") == "checkout-alive\n"
+
+
+def test_safe_wipe_refuses_working_directory_cc_src(tmp_cc_src: Path, tmp_path: Path) -> None:
+    (tmp_cc_src / "keep").write_text("cwd\n", encoding="utf-8")
+    result = _wipe(tmp_path, str(tmp_cc_src), cwd=tmp_cc_src)
+    assert result.returncode != 0
+    assert "It is the working directory" in result.stderr
+    assert (tmp_cc_src / "keep").is_file()
+
+
+def test_safe_wipe_refuses_tmpdir_inside_volume(tmp_path: Path) -> None:
+    volume = tmp_path / "workspace"
+    target = volume / "cc-src"
+    target.mkdir(parents=True)
+    (target / "keep").write_text("vol\n", encoding="utf-8")
+    result = _wipe(
+        tmp_path,
+        str(target),
+        volume=str(volume),
+        env={"TMPDIR": str(volume)},
+    )
+    assert result.returncode != 0
+    assert "Parent must be /tmp" in result.stderr
+    assert (target / "keep").is_file()
+
+
+def test_safe_wipe_refuses_symlinked_parent(tmp_cc_src: Path, tmp_path: Path) -> None:
+    alias = tmp_path / "alias-tmp"
+    alias.symlink_to(Path("/tmp"))
+    target = alias / tmp_cc_src.name
+    result = _wipe(tmp_path, str(target))
+    assert result.returncode != 0
+    assert "Parent is a symlink" in result.stderr
+    assert tmp_cc_src.is_dir()
 
 
 def test_safe_wipe_refuses_symlink_and_trailing_slash_link(tmp_path: Path) -> None:
@@ -1784,19 +1959,17 @@ def test_safe_wipe_refuses_symlink_and_trailing_slash_link(tmp_path: Path) -> No
     assert (ROOT / "scripts" / "gpu" / "run_job.sh").is_file()
 
 
-def test_safe_wipe_allows_tmp_cc_src(tmp_path: Path) -> None:
-    safe = tmp_path / "cc-src"
-    safe.mkdir()
-    (safe / "old").write_text("gone\n", encoding="utf-8")
-    slashed = _wipe(tmp_path, f"{safe}/")
+def test_safe_wipe_allows_tmp_cc_src(tmp_cc_src: Path, tmp_path: Path) -> None:
+    (tmp_cc_src / "old").write_text("gone\n", encoding="utf-8")
+    slashed = _wipe(tmp_path, f"{tmp_cc_src}/")
     assert slashed.returncode == 0, slashed.stderr
-    assert slashed.stdout.strip() == str(safe.resolve())
-    wiped = _wipe(tmp_path, str(safe), wipe=True)
+    assert slashed.stdout.strip() == str(tmp_cc_src.resolve())
+    wiped = _wipe(tmp_path, str(tmp_cc_src), wipe=True)
     assert wiped.returncode == 0, wiped.stderr
-    assert not (safe / "old").exists()
+    assert not (tmp_cc_src / "old").exists()
 
 
-def test_safe_wipe_default_src_when_unset() -> None:
+def test_safe_wipe_default_src_when_unset(tmp_path: Path) -> None:
     assert 'SRC="${CC_SRC_DIR:-/tmp/cc-src}"' in RUN_JOB.read_text(encoding="utf-8")
     result = _run(
         [
@@ -1810,15 +1983,27 @@ def test_safe_wipe_default_src_when_unset() -> None:
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "/tmp/cc-src"
+    fake_scripts = tmp_path / "fake-repo" / "scripts" / "gpu"
+    fake_scripts.mkdir(parents=True)
+    volume = tmp_path / "cc-vol"
+    scratch = tmp_path / "cc-lib"
+    volume.mkdir()
+    scratch.mkdir()
     allowed = _run(
         [
             "bash",
             "-c",
             (
                 f"source {LIB} && unset CC_SRC_DIR && "
-                f'cc_assert_safe_wipe_dir /tmp/cc-src "{LIB.parent}"'
+                'SRC="${CC_SRC_DIR:-/tmp/cc-src}" && '
+                'cc_assert_safe_wipe_dir "$SRC" "$1" "$2" "$3"'
             ),
-        ]
+            "wipe",
+            str(fake_scripts),
+            str(volume),
+            str(scratch),
+        ],
+        cwd=tmp_path,
     )
     assert allowed.returncode == 0, allowed.stderr
 
@@ -1827,43 +2012,65 @@ def test_safe_wipe_parent_swap_does_not_follow_new_link(tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "secret").write_text("keep\n", encoding="utf-8")
-    stage = tmp_path / "stage"
+    stage = Path(tempfile.mkdtemp(prefix="cc-wipe-stage-", dir="/tmp"))
     src = stage / "cc-src"
-    src.mkdir(parents=True)
-    result = _run(
-        [
-            "bash",
-            "-c",
-            f"""
+    src.mkdir()
+    fake_scripts = tmp_path / "fake-repo" / "scripts" / "gpu"
+    fake_scripts.mkdir(parents=True)
+    volume = tmp_path / "cc-vol"
+    scratch = tmp_path / "cc-lib"
+    volume.mkdir()
+    scratch.mkdir()
+    try:
+        result = _run(
+            [
+                "bash",
+                "-c",
+                f"""
 source {LIB}
 target="$1"
 outside="$2"
-resolved="$(cc_assert_safe_wipe_dir "$target" "{LIB.parent}")"
+scripts="$3"
+volume="$4"
+scratch="$5"
+export TMPDIR="$(dirname "$target")"
+resolved="$(cc_assert_safe_wipe_dir "$target" "$scripts" "$volume" "$scratch")" || exit 1
 rm -rf "$(dirname "$target")"
 ln -s "$outside" "$(dirname "$target")"
-if cc_safe_wipe_dir "$target" "{LIB.parent}"; then
+if cc_safe_wipe_dir "$target" "$scripts" "$volume" "$scratch"; then
   echo WIPED
   exit 0
 fi
 echo REFUSED
 exit 1
 """,
-            "swap",
-            str(src),
-            str(outside),
-        ],
-        env={
-            "CC_VOLUME_DIR": str(tmp_path / "cc-vol"),
-            "CC_LIBRARY_DIR": str(tmp_path / "cc-lib"),
-        },
-    )
-    assert "secret" not in (result.stdout + result.stderr)
-    assert (outside / "secret").read_text(encoding="utf-8") == "keep\n"
+                "swap",
+                str(src),
+                str(outside),
+                str(fake_scripts),
+                str(volume),
+                str(scratch),
+            ],
+            env={
+                "CC_VOLUME_DIR": str(volume),
+                "CC_LIBRARY_DIR": str(scratch),
+                "TMPDIR": str(stage),
+            },
+            cwd=tmp_path,
+        )
+        assert "secret" not in (result.stdout + result.stderr)
+        assert (outside / "secret").read_text(encoding="utf-8") == "keep\n"
+        assert result.returncode != 0
+    finally:
+        if stage.is_dir() and not stage.is_symlink():
+            shutil.rmtree(stage, ignore_errors=True)
+        elif stage.is_symlink():
+            stage.unlink(missing_ok=True)
 
 
-def test_run_job_refuses_to_wipe_pod_checkout(tmp_path: Path) -> None:
+def test_run_job_refuses_to_wipe_cc_src_checkout(tmp_cc_src: Path, tmp_path: Path) -> None:
     assert 'SRC="${CC_SRC_DIR:-/tmp/cc-src}"' in RUN_JOB.read_text(encoding="utf-8")
-    pod = tmp_path / "climbing-coach"
+    pod = tmp_cc_src
     gpu = pod / "scripts" / "gpu"
     gpu.mkdir(parents=True)
     shutil.copy2(RUN_JOB, gpu / "run_job.sh")
@@ -1891,9 +2098,11 @@ def test_run_job_refuses_to_wipe_pod_checkout(tmp_path: Path) -> None:
             "CC_SRC_DIR": str(pod),
             "CC_LIBRARY_DIR": str(tmp_path / "cc-lib"),
         },
+        cwd=tmp_path,
     )
     assert result.returncode != 0
     assert "Refuse to rm -rf" in result.stderr
+    assert "It is the checkout" in result.stderr
     log = (tmp_path / "vol" / "runs" / "job-wipe" / "log.txt").read_text(encoding="utf-8")
     assert "Refuse to rm -rf" in log
     assert marker.is_file()
@@ -1929,6 +2138,62 @@ def test_isolation_defaults_job_dirs_under_basetemp(tmp_path: Path) -> None:
         )
 
 
+def test_s3_cp_stdout_does_not_leak_return_trap(tmp_path: Path) -> None:
+    _fake_aws_get_object(tmp_path)
+    result = _run(
+        [
+            "bash",
+            "-c",
+            f"""
+source {LIB}
+outer() {{
+  err="$(mktemp)"
+  echo KEEP >"$err"
+  printf '%s\\n' "$err"
+  cc_s3_cp_stdout s3://vol/runs/job-1/status EU-RO-1 \\
+    https://s3api-eu-ro-1.runpod.io >/dev/null || true
+}}
+path="$(outer)"
+if [[ -f "$path" ]]; then
+  echo "outer_kept=$(cat "$path")"
+else
+  echo "outer_missing"
+fi
+trap -p RETURN || true
+""",
+        ],
+        bin_dir=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "outer_kept=KEEP" in result.stdout
+    assert "RETURN" not in result.stdout
+
+
+def test_cc_fail_redacts_log_txt(tmp_path: Path) -> None:
+    log = tmp_path / "log.txt"
+    token = "rpa_secretlogtoken"
+    result = _run(
+        [
+            "bash",
+            "-c",
+            f'source {LIB} && cc_fail "token={token} key=$RUNPOD_API_KEY"',
+        ],
+        env={
+            "CC_RUN_LOG": str(log),
+            "RUNPOD_API_KEY": token,
+        },
+    )
+    assert result.returncode != 0
+    text = log.read_text(encoding="utf-8")
+    assert token not in text
+    assert "REDACTED" in text
+
+
+def test_run_rejects_opt_cc_paths(tmp_path: Path) -> None:
+    with pytest.raises(AssertionError, match="/opt/cc"):
+        _run(["/opt/cc/scripts/gpu/run_job.sh"], env=_job_dirs(tmp_path))
+
+
 def test_s3_get_object_is_used_not_cp_stdout() -> None:
     text = LIB.read_text(encoding="utf-8")
     assert "s3api get-object" in text
@@ -1940,6 +2205,7 @@ def test_run_logged_fifo_uses_mktemp_dir() -> None:
     assert 'fifo_dir="$(mktemp -d)"' in text
     assert "mktemp -u" not in text
     assert "cc_redact_oneline" in text
+    assert "trap 'rm -f" not in text
     assert "jq -c" in WAIT_JOB.read_text(encoding="utf-8")
     curl_fn = LIB.read_text(encoding="utf-8").split("cc_curl_post_json()")[1]
     curl_fn = curl_fn.split("cc_realpath")[0]

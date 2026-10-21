@@ -159,6 +159,7 @@ Before every first `pod_up`, the Runpod bot must verify the GHCR registry creden
 A complete setup does not skip that check.
 The first live `gpu_tests` pod at `bd99ed3` failed at clone, wrote `status=failed`, and self-terminated.
 The second live `gpu_tests` pod at `73be826` used CUDA and then failed after a test deleted `/tmp/climbing-coach`.
+The clone dir is `/tmp/cc-src`. The wipe guard allowlists that basename under `/tmp` or a trusted `$TMPDIR`. The remaining check-to-rm race needs `/tmp` write access on the pod. CI copies the repo to `/tmp/cc-src` and runs the `gpu_tests` pytest selection from there.
 `allowedCudaVersions` is opt-in via `CC_ALLOWED_CUDA` (unset by default). The image CUDA ≥12.8 guard is the real floor.
 
 Phase 0 needs only a small sample upload.

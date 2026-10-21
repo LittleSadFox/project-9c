@@ -62,8 +62,8 @@ Copy this block for a new entry.
 - Symptom: The second live `gpu_tests` pod at `73be826` used CUDA and `CUDAExecutionProvider`. Pytest reported 82 passed, 28 failed, and 1 skipped. Many of the failures were missing repo files.
 - Where it failed: pod
 - Cause: `test_run_job_logs_redacted_clone_stderr` ran `run_job.sh` with `CC_SRC_DIR` unset. `SRC` defaulted to `/tmp/climbing-coach`. `rm -rf "$SRC"` deleted the live checkout.
-- Fix: Tests now default `CC_SRC_DIR` and `CC_LIBRARY_DIR` under pytest `tmp_path`. The default clone dir is `/tmp/cc-src`. `run_job.sh` only removes a resolved path whose basename matches `cc-src`, that sits under `/tmp` or `$TMPDIR`, and that is not a symlink or a live checkout, volume, or HOME path.
-- Prevention: Keep destructive paths on `tmp_path`. Do not run `run_job.sh` against the live checkout.
+- Fix: Tests now default `CC_SRC_DIR` and `CC_LIBRARY_DIR` under pytest `tmp_path`. The default clone dir is `/tmp/cc-src`. `run_job.sh` only removes a resolved path whose basename matches `cc-src`, whose parent is exactly `/tmp` or a trusted `$TMPDIR`, and that is not a symlink or a live checkout, volume, scratch, HOME, or working-directory path. `$TMPDIR` is untrusted when it resolves inside the volume, scratch, repo, or HOME. CI copies the repo to `/tmp/cc-src` and runs the `gpu_tests` pytest selection from there.
+- Prevention: Keep destructive paths on `tmp_path`. Do not run `run_job.sh` against the live checkout. The remaining check-to-rm race needs `/tmp` write access on the pod; do not give extra writers access to `/tmp` on a job pod.
 
 ### 2026-10-21 — wait_job S3 cp-to-stdout failed
 

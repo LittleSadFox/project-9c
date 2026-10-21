@@ -7,7 +7,11 @@
 cc_fail() {
   echo "ERROR: $*" >&2
   if [[ -n "${CC_RUN_LOG:-}" ]]; then
-    printf 'ERROR: %s\n' "$*" >> "$CC_RUN_LOG"
+    local line="$*"
+    if command -v python3 >/dev/null 2>&1; then
+      line="$(cc_redact_oneline "$*")"
+    fi
+    printf 'ERROR: %s\n' "$line" >> "$CC_RUN_LOG"
   fi
   exit 1
 }
@@ -572,16 +576,41 @@ cc_path_inside() {
   [[ "$resolved" == "$protected"/* ]]
 }
 
+cc_real_home() {
+  local home=""
+  if [[ -n "${HOME:-}" ]]; then
+    home="$(cc_realpath "$HOME" 2>/dev/null || true)"
+    if [[ -n "$home" ]]; then
+      printf '%s\n' "$home"
+      return 0
+    fi
+  fi
+  if command -v getent >/dev/null 2>&1; then
+    home="$(getent passwd "$(id -un)" 2>/dev/null | awk -F: '{print $6}')"
+    if [[ -n "$home" ]]; then
+      home="$(cc_realpath "$home" 2>/dev/null || true)"
+      if [[ -n "$home" ]]; then
+        printf '%s\n' "$home"
+        return 0
+      fi
+    fi
+  fi
+  home="$(python3 -c 'import os; print(os.path.realpath(os.path.expanduser("~")))' 2>/dev/null || true)"
+  printf '%s\n' "$home"
+}
+
 cc_assert_safe_wipe_dir() {
   local target="${1:-}"
   local script_dir="${2:-}"
+  local volume="${3:-${CC_VOLUME_DIR:-/workspace}}"
+  local scratch="${4:-${CC_LIBRARY_DIR:-/tmp/cc-library}}"
   target="$(cc_trim "$target")"
   [[ -n "$target" ]] || cc_fail "Refuse to rm -rf an empty path."
   [[ "$target" == /* ]] || cc_fail "Refuse to rm -rf a relative path ${target}."
   if [[ -L "${target%/}" ]]; then
     cc_fail "Refuse to rm -rf symlink ${target}."
   fi
-  local resolved base tmp_root tmpdir_root under_tmp
+  local resolved base tmp_root tmpdir_root parent raw_parent
   resolved="$(cc_realpath "$target")"
   [[ -n "$resolved" ]] || cc_fail "Refuse to rm -rf an empty path."
   [[ "$resolved" == /* ]] || cc_fail "Refuse to rm -rf a relative path ${resolved}."
@@ -594,58 +623,70 @@ cc_assert_safe_wipe_dir() {
     cc_fail "Refuse to rm -rf ${target}. Basename must match cc-src."
   fi
   tmp_root="$(cc_realpath /tmp)"
-  tmpdir_root=""
-  if [[ -n "${TMPDIR:-}" ]]; then
-    tmpdir_root="$(cc_realpath "$TMPDIR")"
-  fi
-  under_tmp=0
-  if [[ "$resolved" == "$tmp_root"/* ]]; then
-    under_tmp=1
-  fi
-  if [[ -n "$tmpdir_root" && "$resolved" == "$tmpdir_root"/* ]]; then
-    under_tmp=1
-  fi
-  if [[ "$resolved" == "$tmp_root" || ( -n "$tmpdir_root" && "$resolved" == "$tmpdir_root" ) ]]; then
-    cc_fail "Refuse to rm -rf ${target}. It is /tmp."
-  fi
-  [[ "$under_tmp" == "1" ]] || cc_fail "Refuse to rm -rf ${target}. It is not under /tmp."
-  local here repo_root home real_home volume scratch protected
+  local here repo_root home
   here="$(pwd -P)"
-  if cc_path_equals_or_contains "$resolved" "$here"; then
-    cc_fail "Refuse to rm -rf ${target}. It is a live checkout path or a parent of one."
-  fi
   repo_root=""
   if [[ -n "$script_dir" ]]; then
     repo_root="$(cc_realpath "${script_dir}/../..")"
     script_dir="$(cc_realpath "$script_dir")"
   fi
-  home=""
-  if [[ -n "${HOME:-}" ]]; then
-    home="$(cc_realpath "$HOME")"
+  home="$(cc_real_home)"
+  volume="$(cc_realpath "$volume")"
+  scratch="$(cc_realpath "$scratch")"
+  tmpdir_root=""
+  if [[ -n "${TMPDIR:-}" ]]; then
+    tmpdir_root="$(cc_realpath "$TMPDIR")"
+    local protected
+    for protected in "$volume" "$scratch" "$repo_root" "$home"; do
+      if [[ -n "$protected" && -n "$tmpdir_root" ]]; then
+        if [[ "$tmpdir_root" == "$protected" || "$tmpdir_root" == "$protected"/* ]]; then
+          tmpdir_root=""
+          break
+        fi
+      fi
+    done
   fi
-  real_home="$(python3 -c 'import os; print(os.path.realpath(os.path.expanduser("~")))' 2>/dev/null || true)"
-  volume=""
-  if [[ -n "${CC_VOLUME_DIR:-}" ]]; then
-    volume="$(cc_realpath "$CC_VOLUME_DIR")"
+  parent="${resolved%/*}"
+  if [[ "$resolved" == "$tmp_root" || ( -n "$tmpdir_root" && "$resolved" == "$tmpdir_root" ) ]]; then
+    cc_fail "Refuse to rm -rf ${target}. It is /tmp."
   fi
-  scratch=""
-  if [[ -n "${CC_LIBRARY_DIR:-}" ]]; then
-    scratch="$(cc_realpath "$CC_LIBRARY_DIR")"
+  if [[ "$parent" != "$tmp_root" && ( -z "$tmpdir_root" || "$parent" != "$tmpdir_root" ) ]]; then
+    cc_fail "Refuse to rm -rf ${target}. Parent must be /tmp."
   fi
-  for protected in "$script_dir" "$repo_root" "$home" "$real_home" "$volume" "$scratch"; do
-    [[ -n "$protected" ]] || continue
-    if cc_path_equals_or_contains "$resolved" "$protected" || cc_path_inside "$resolved" "$protected"; then
-      cc_fail "Refuse to rm -rf ${target}. It is a live checkout path or a parent of one."
-    fi
-  done
+  raw_parent="${target%/}"
+  raw_parent="${raw_parent%/*}"
+  if [[ -L "$raw_parent" && "$raw_parent" != "/tmp" ]]; then
+    cc_fail "Refuse to rm -rf ${target}. Parent is a symlink."
+  fi
+  if cc_path_equals_or_contains "$resolved" "$here" || cc_path_inside "$resolved" "$here"; then
+    cc_fail "Refuse to rm -rf ${target}. It is the working directory."
+  fi
+  if [[ -n "$script_dir" ]] && { cc_path_equals_or_contains "$resolved" "$script_dir" || cc_path_inside "$resolved" "$script_dir"; }; then
+    cc_fail "Refuse to rm -rf ${target}. It is the checkout."
+  fi
+  if [[ -n "$repo_root" ]] && { cc_path_equals_or_contains "$resolved" "$repo_root" || cc_path_inside "$resolved" "$repo_root"; }; then
+    cc_fail "Refuse to rm -rf ${target}. It is the checkout."
+  fi
+  if [[ -n "$home" ]] && { cc_path_equals_or_contains "$resolved" "$home" || cc_path_inside "$resolved" "$home"; }; then
+    cc_fail "Refuse to rm -rf ${target}. It is HOME."
+  fi
+  if [[ -n "$volume" ]] && { cc_path_equals_or_contains "$resolved" "$volume" || cc_path_inside "$resolved" "$volume"; }; then
+    cc_fail "Refuse to rm -rf ${target}. It is the volume."
+  fi
+  if [[ -n "$scratch" ]] && { cc_path_equals_or_contains "$resolved" "$scratch" || cc_path_inside "$resolved" "$scratch"; }; then
+    cc_fail "Refuse to rm -rf ${target}. It is scratch."
+  fi
   printf '%s\n' "$resolved"
 }
 
 cc_safe_wipe_dir() {
   local target="${1:-}"
   local script_dir="${2:-}"
+  local volume="${3:-${CC_VOLUME_DIR:-/workspace}}"
+  local scratch="${4:-${CC_LIBRARY_DIR:-/tmp/cc-library}}"
   local resolved check
-  resolved="$(cc_assert_safe_wipe_dir "$target" "$script_dir")"
+  resolved="$(cc_assert_safe_wipe_dir "$target" "$script_dir" "$volume" "$scratch")" || return 1
+  [[ -n "$resolved" ]] || return 1
   check="$(cc_realpath "$target")"
   if [[ "$check" != "$resolved" || -L "${target%/}" || -L "${resolved%/}" ]]; then
     cc_fail "Refuse to rm -rf ${target}. Path changed or is a symlink."
@@ -765,8 +806,6 @@ cc_s3_cp_stdout() {
   fi
   err="$(mktemp)"
   dest="$(mktemp)"
-  # shellcheck disable=SC2064
-  trap 'rm -f "$err" "$dest"' RETURN
   for attempt in 1 2 3 4; do
     # shellcheck disable=SC2046
     if aws s3api get-object \
@@ -777,9 +816,11 @@ cc_s3_cp_stdout() {
       $(cc_aws_args) \
       "$dest" >/dev/null 2>"$err"; then
       cat "$dest"
+      rm -f "$err" "$dest"
       return 0
     fi
     if grep -qiE 'NoSuchKey|Not Found|404' "$err"; then
+      rm -f "$err" "$dest"
       return 1
     fi
     if grep -qiE 'SignatureDoesNotMatch|403 Forbidden|Status Code: 403|HTTPStatusCode: 403|\(403\)' "$err"; then
@@ -793,9 +834,11 @@ cc_s3_cp_stdout() {
       continue
     fi
     echo "ERROR: S3 get-object ${uri} failed. $(cc_s3_err_summary "$err" "$key")" >&2
+    rm -f "$err" "$dest"
     return 1
   done
   echo "ERROR: S3 get-object ${uri} failed after ${attempt} attempts. $(cc_s3_err_summary "$err" "$key")" >&2
+  rm -f "$err" "$dest"
   return 1
 }
 
@@ -860,6 +903,7 @@ cc_aws_args() {
 }
 
 cc_setup_ssh() {
+  # CC_SSH_HOME is a test-only override. On the pod it stays unset.
   local ssh_home="${CC_SSH_HOME:-/root/.ssh}"
   mkdir -p "$ssh_home"
   chmod 700 "$ssh_home"
