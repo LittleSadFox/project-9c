@@ -44,7 +44,9 @@ ping_webhook() {
   local body
   body="$(jq -nc --arg id "$CC_JOB_ID" --arg status "$status" --argjson metrics "$summary" \
     '{job_id: $id, status: $status, metrics: $metrics}')"
-  cc_curl_post_json "$CC_WEBHOOK_URL" "$body" >/dev/null || echo "Webhook ping failed."
+  local ping=""
+  ping="$(cc_curl_post_json "$CC_WEBHOOK_URL" "$body")" || true
+  cc_log_webhook_ping "$ping"
 }
 
 # Invoked from trap EXIT INT TERM HUP.
@@ -100,7 +102,8 @@ cc_require_ttl
 RUN_DIR="${VOLUME}/runs/${CC_JOB_ID}"
 
 mkdir -p "$RUN_DIR/artifacts" "$VOLUME/models" "$VOLUME/cache/pip" "$SCRATCH"
-export CC_RUN_LOG="${RUN_DIR}/log.txt"
+CC_RUN_LOG="${RUN_DIR}/log.txt"
+export CC_RUN_LOG
 export GIT_TERMINAL_PROMPT=0
 export GIT_TRACE_REDACT=1
 cc_git_sanitize_env

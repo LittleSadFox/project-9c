@@ -81,6 +81,22 @@ Copy this block for a new entry.
 - Fix: Read objects with `aws s3api get-object`. Keep the 403 and `SignatureDoesNotMatch` retry. Print one summary line per poll.
 - Prevention: Do not use `aws s3 cp ... -` against the Runpod S3 endpoint.
 
+### 2026-10-21 — image shellcheck flagged SC2031
+
+- Symptom: The fourth live `gpu_tests` pod at `2078682a` failed only `test_gpu_scripts_pass_shellcheck`. CI did not flag the same scripts.
+- Where it failed: pod
+- Cause: The image installed apt `shellcheck`. CI installed a different apt `shellcheck`. The watchdog subshell exported `CC_RUN_LOG`. That is SC2031.
+- Fix: Stop exporting `CC_RUN_LOG` in the watchdog subshell. Pin shellcheck 0.11.0 in CI and in the GPU image.
+- Prevention: Keep the same shellcheck tarball and sha256 in `.github/workflows/ci.yml` and `docker/gpu/Dockerfile`. Do not lower severity.
+
+### 2026-10-21 — webhook ping hid HTTP failures
+
+- Symptom: The fourth live `gpu_tests` webhook probably never arrived. The job log had no HTTP status.
+- Where it failed: pod / webhook
+- Cause: `curl` returned 0 for a non-2xx reply. The ping discarded stdout. Curl stderr can contain the host or the URL.
+- Fix: Read `%{http_code}` and the curl exit. Log `webhook ping ok status=<code> curl_rc=<n>` only for HTTP 2xx. Log `webhook ping failed status=<code> curl_rc=<n>` otherwise. Discard curl stderr. Set `--max-time 15`.
+- Prevention: Do not write curl stderr, the webhook URL, or the token to `log.txt` or the run folder.
+
 ### 2026-10-21 — Shared SSH host keys in the GPU image
 
 - Symptom: Every pod would have used the same SSH host private keys.

@@ -2,7 +2,7 @@
 # CUDA 12.8 + cuDNN 9 on Ubuntu 24.04. System Python is 3.12.
 # No PyTorch. No MMPose. Those belong in docker/train (Phase 6).
 #
-# ffmpeg URL and sha256 match .github/workflows/ci.yml.
+# ffmpeg and shellcheck URL and sha256 match .github/workflows/ci.yml.
 # Host keys are created at container start, not during the image build.
 
 FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04@sha256:ac55d124da4882b497f732d8dfd9a702d5447a5f29d08d56da6f64f0a1eb34bc
@@ -22,6 +22,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # Same pinned static ffmpeg 7 build as CI.
 ARG FFMPEG_URL=https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-31-14-10/ffmpeg-n7.1.5-12-g1fdbca85aa-linux64-gpl-7.1.tar.xz
 ARG FFMPEG_SHA256=c1e6caf48923dd8e6bc5e54d51ba70c321175b8162ae9c414c392990e72f0e79
+ARG SHELLCHECK_URL=https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz
+ARG SHELLCHECK_SHA256=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
 ARG RUNPODCTL_URL=https://github.com/runpod/runpodctl/releases/download/v3.0.1/runpodctl-linux-amd64
 ARG RUNPODCTL_SHA256=b66d11eca8cacbf18a2de6943c6e18a79ffbdc8a3c30aa13a49dc6cfc15d4239
 
@@ -37,7 +39,6 @@ RUN apt-get update \
         python3 \
         python3-pip \
         python3-venv \
-        shellcheck \
         tini \
         xz-utils \
         zlib1g \
@@ -54,6 +55,13 @@ RUN apt-get update \
     && install -m 0755 "${bin_dir}/ffprobe" /usr/local/bin/ffprobe \
     && rm -rf /tmp/ffmpeg /tmp/ffmpeg.tar.xz \
     && ffmpeg -version | head -n 1 | grep -E 'ffmpeg version n?[7-9]\.' \
+    && curl -fsSL -o /tmp/shellcheck.tar.xz "$SHELLCHECK_URL" \
+    && echo "${SHELLCHECK_SHA256}  /tmp/shellcheck.tar.xz" | sha256sum -c - \
+    && mkdir -p /tmp/shellcheck \
+    && tar -xJf /tmp/shellcheck.tar.xz -C /tmp/shellcheck \
+    && install -m 0755 /tmp/shellcheck/shellcheck-v0.11.0/shellcheck /usr/local/bin/shellcheck \
+    && rm -rf /tmp/shellcheck /tmp/shellcheck.tar.xz \
+    && shellcheck --version | grep -F '0.11.0' \
     && curl -fsSL -o /tmp/runpodctl "$RUNPODCTL_URL" \
     && echo "${RUNPODCTL_SHA256}  /tmp/runpodctl" | sha256sum -c - \
     && install -m 0755 /tmp/runpodctl /usr/local/bin/runpodctl \

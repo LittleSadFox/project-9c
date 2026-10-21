@@ -149,6 +149,17 @@ def gpu_tests(run_dir: Path, *, pytest_args: list[str] | None = None, require_cu
             raise JobError(f"CUDA session check failed: {exc}") from exc
         cuda_metrics = {"error": str(exc), "used_cuda": False}
 
+    providers = cuda_metrics.get("session_providers") or []
+    if not isinstance(providers, list):
+        providers = []
+    used = "true" if cuda_metrics.get("used_cuda") else "false"
+    with (run_dir / "log.txt").open("a", encoding="utf-8") as log:
+        log.write(
+            "ort_providers="
+            + ",".join(str(item) for item in providers)
+            + f" used_cuda={used}\n"
+        )
+
     status = "passed"
     if proc.returncode != 0 or pytest_metrics["failed"] or pytest_metrics["error"]:
         status = "failed"

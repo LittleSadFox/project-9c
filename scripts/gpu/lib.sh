@@ -391,8 +391,10 @@ cc_early_cleanup() {
       '{job: $job, status: "failed", error: $err}' >"${run_dir}/metrics.json"
   fi
   if [[ -n "${CC_WEBHOOK_URL:-}" && "${CC_WEBHOOK_URL}" != *"{{"* ]]; then
-    cc_curl_post_json "$CC_WEBHOOK_URL" \
-      "{\"job_id\":\"${CC_JOB_ID:-unknown}\",\"status\":\"failed\"}" >/dev/null || true
+    local ping=""
+    ping="$(cc_curl_post_json "$CC_WEBHOOK_URL" \
+      "{\"job_id\":\"${CC_JOB_ID:-unknown}\",\"status\":\"failed\"}")" || true
+    cc_log_webhook_ping "$ping"
   fi
   cc_terminate_self
   return 0
@@ -556,9 +558,12 @@ sys.stdout.write(text[:400])
 cc_curl_post_json() {
   local url="$1"
   local body="$2"
-  local cfg
+  local cfg http ec
+  http=""
+  ec=0
   if ! command -v python3 >/dev/null 2>&1; then
     echo "ERROR: python3 is required to post JSON." >&2
+    printf 'status=0 curl_rc=1\n'
     return 1
   fi
   cfg="$(mktemp)"
@@ -568,10 +573,59 @@ url = sys.argv[1].replace("\\", "\\\\").replace("\"", "\\\"")
 sys.stdout.write("url = \"%s\"\n" % url)
 ' "$url" >"$cfg"
   chmod 600 "$cfg"
-  local ec=0
-  curl -sS --max-time 15 -X POST -H "Content-Type: application/json" -d "$body" --config "$cfg" || ec=$?
+  # Keep curl stderr off the log. -S can print the host or the full URL.
+  http="$(curl -sS --max-time 15 -o /dev/null -w '%{http_code}' -X POST \
+    -H "Content-Type: application/json" -d "$body" --config "$cfg" 2>/dev/null)" || ec=$?
   rm -f "$cfg"
-  return "$ec"
+  case "$http" in
+    *[!0-9]*|"")
+      http="0"
+      ;;
+  esac
+  printf 'status=%s curl_rc=%s\n' "$http" "$ec"
+  case "$http" in
+    2[0-9][0-9])
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+cc_log_webhook_ping() {
+  local raw="$1"
+  local http="0"
+  local rc="1"
+  local token
+  # Word-split our own status= and curl_rc= tokens only.
+  # shellcheck disable=SC2086
+  for token in $raw; do
+    case "$token" in
+      status=*)
+        http="${token#status=}"
+        ;;
+      curl_rc=*)
+        rc="${token#curl_rc=}"
+        ;;
+    esac
+  done
+  case "$http" in
+    *[!0-9]*|"")
+      http="0"
+      ;;
+  esac
+  case "$rc" in
+    *[!0-9]*|"")
+      rc="1"
+      ;;
+  esac
+  case "$http" in
+    2[0-9][0-9])
+      cc_log "webhook ping ok status=${http} curl_rc=${rc}"
+      ;;
+    *)
+      cc_log "webhook ping failed status=${http} curl_rc=${rc}"
+      ;;
+  esac
 }
 
 cc_realpath() {
@@ -1138,8 +1192,8 @@ cc_watchdog_start() {
     fi
     sleep "$remain"
     echo "TTL ${CC_TTL_S}s expired. Terminate the pod."
-    if [[ -n "$run_dir" ]]; then
-      export CC_RUN_LOG="${run_dir}/log.txt"
+    if [[ -n "$run_dir" && -z "${CC_RUN_LOG:-}" ]]; then
+      printf '%s\n' "TTL ${CC_TTL_S}s expired. Terminate the pod." >>"${run_dir}/log.txt"
     fi
     cc_terminate_self
   ) &

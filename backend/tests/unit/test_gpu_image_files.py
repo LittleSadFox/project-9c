@@ -80,6 +80,22 @@ def test_dockerfile_uses_ci_ffmpeg_pin() -> None:
     assert sha in ci
 
 
+def test_dockerfile_uses_ci_shellcheck_pin() -> None:
+    docker = DOCKERFILE.read_text(encoding="utf-8")
+    ci = CI.read_text(encoding="utf-8")
+    url = "https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz"
+    sha = "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198"
+    assert url in docker
+    assert sha in docker
+    assert url in ci
+    assert sha in ci
+    assert "apt-get install" not in docker or "shellcheck" not in docker.split("apt-get install")[1].split("&&")[0]
+    assert "sudo apt-get install -y -qq shellcheck" not in ci
+    assert "shellcheck-v0.11.0/shellcheck" in docker
+    assert "0.11.0" in docker
+    assert "0.11.0" in ci
+
+
 def test_gpu_image_workflow_tags_sha_and_latest() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
     assert "ghcr.io" in text

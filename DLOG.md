@@ -215,3 +215,27 @@ A second terminate after a successful first attempt is skipped only for the curr
 The default GPU list omits Blackwell. ONNX Runtime has never been verified on sm_120 on a pod.
 
 See `TROUBLESHOOTING_LOG.md`.
+
+## 2026-10-21 — fourth live gpu_tests shellcheck and webhook
+
+The fourth live `gpu_tests` pod at `2078682a` used an RTX 4090, driver 595.91.07, and CUDA 13.2. The run folder is `s3://wguvx2347m/runs/cc-gpu_tests-2078682a-20261021T163430Z/`. CUDA used `CUDAExecutionProvider`. Pytest reported 152 passed and 1 failed.
+
+The fail was `test_gpu_scripts_pass_shellcheck`. The image apt `shellcheck` flagged SC2031 at `run_job.sh` `export CC_RUN_LOG=...`. CI used a different apt `shellcheck`. The watchdog subshell exported `CC_RUN_LOG`. That write does not change the parent value.
+
+The watchdog no longer exports `CC_RUN_LOG`.
+It inherits the parent value.
+CI and the GPU image now install the same pinned shellcheck 0.11.0 tarball.
+The shellcheck severity stays at the default.
+`gpu_tests` writes `ort_providers=<list> used_cuda=<true|false>` to `log.txt`.
+
+The webhook ping used to hide the HTTP code.
+A non-2xx reply looked like success.
+Curl stderr can contain the host or the URL.
+
+The ping now uses `curl -sS --max-time 15 -o /dev/null -w '%{http_code}'`.
+It discards curl stderr.
+It logs `webhook ping ok status=<code> curl_rc=<n>` only for HTTP 2xx.
+It logs `webhook ping failed status=<code> curl_rc=<n>` for any other code or curl exit.
+The log does not store the URL, the token, or curl error text.
+
+See `TROUBLESHOOTING_LOG.md`.
