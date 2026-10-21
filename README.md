@@ -161,7 +161,7 @@ Before every first `pod_up`, the Runpod bot must verify the GHCR registry creden
 A complete setup does not skip that check.
 The first live `gpu_tests` pod at `bd99ed3` failed at clone, wrote `status=failed`, and self-terminated.
 The second live `gpu_tests` pod at `73be826` used CUDA and then failed after a test deleted `/tmp/climbing-coach`.
-The clone dir is `/tmp/cc-src`. The wipe guard allowlists that basename under `/tmp` or a trusted `$TMPDIR`. `$TMPDIR` under `/tmp/cc-src` is untrusted. The remaining check-to-rm race needs `/tmp` write access on the pod. CI copies the repo to `/tmp/cc-src` and runs the `gpu_tests` pytest selection from there. Tests set `CC_PYTHON` so they do not use `/opt/cc/venv/bin/python`. `gpu_tests` refuses a nested run when `CC_IN_GPU_TESTS` is set.
+The clone dir is `/tmp/cc-src`. The wipe guard allowlists that basename under `/tmp` or a trusted `$TMPDIR`. `$TMPDIR` under `/tmp/cc-src` is untrusted. The remaining check-to-rm race needs `/tmp` write access on the pod. CI copies the repo to `/tmp/cc-src` and runs the `gpu_tests` pytest selection from there. Tests set `CC_PYTHON` so they do not use `/opt/cc/venv/bin/python`. `CC_PYTHON` is a test hook. A pod uses `/opt/cc/venv/bin/python` unless that file is missing. `run_job.sh` writes `python=<path>` to the job log. `gpu_tests` refuses a nested run when `CC_IN_GPU_TESTS` is set. The refuse line goes to the job `log.txt`. The terminate stamp is `/tmp/.cc_terminated.$RUNPOD_POD_ID`.
 `allowedCudaVersions` is opt-in via `CC_ALLOWED_CUDA` (unset by default). The image CUDA ≥12.8 guard is the real floor.
 
 Phase 0 needs only a small sample upload.

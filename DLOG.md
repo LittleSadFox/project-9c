@@ -205,9 +205,11 @@ The third live `gpu_tests` pod at `1af17806` used an L4, driver 595.91.07, and C
 
 `run_job.sh` prefers `/opt/cc/venv/bin/python` when that file exists. The tests only stubbed `python3` on `PATH`, so the real `ml.jobs gpu_tests` ran pytest on `/tmp/cc-src` again. Processes nested about once every 7s.
 
-Tests now set `CC_PYTHON` to the stub. `_run()` times out after 30s. `gpu_tests` sets `CC_IN_GPU_TESTS=1` in the pytest child only. `run_job.sh` and `python -m ml.jobs gpu_tests` refuse a nested `gpu_tests` when that flag is set. The CI pod-layout job installs a fake `/opt/cc/venv/bin/python`.
+Tests now set `CC_PYTHON` to the stub. That hook is a test override. A pod uses `/opt/cc/venv/bin/python` unless that file is missing. `run_job.sh` writes `python=<path>` to `log.txt`.
+`_run()` starts a new session and kills the process group after 30s.
+`gpu_tests` sets `CC_IN_GPU_TESTS=1` in the pytest child only. Tests keep that flag unless a case clears it. `run_job.sh` and `python -m ml.jobs gpu_tests` refuse a nested `gpu_tests` when that flag is set. The refuse line goes to stderr and to the job `log.txt`. The CI pod-layout job installs a fake `/opt/cc/venv/bin/python`.
 
-A second terminate after a successful first attempt is skipped. That avoids a later 401/403 on an expired pod token.
+A second terminate after a successful first attempt is skipped only for the current pod. The stamp is `/tmp/.cc_terminated.$RUNPOD_POD_ID`. A volume stamp or a stamp for another pod does not skip terminate or the TTL watchdog.
 
 The default GPU list omits Blackwell. ONNX Runtime has never been verified on sm_120 on a pod.
 

@@ -104,6 +104,7 @@ cc_require_job_or_interactive() {
 
 cc_refuse_nested_gpu_tests() {
   if [[ "${CC_JOB:-}" == "gpu_tests" && "${CC_IN_GPU_TESTS:-}" == "1" ]]; then
+    cc_log "ERROR: Refuse to start nested gpu_tests. CC_IN_GPU_TESTS is already set."
     cc_fail "Refuse to start nested gpu_tests. CC_IN_GPU_TESTS is already set."
   fi
 }
@@ -989,15 +990,28 @@ cc_log() {
   fi
 }
 
+cc_terminate_stamp() {
+  local pod="${RUNPOD_POD_ID:-}"
+  if [[ -z "$pod" ]]; then
+    return 1
+  fi
+  case "$pod" in
+    *[!A-Za-z0-9._-]*)
+      return 1
+      ;;
+  esac
+  printf '%s\n' "/tmp/.cc_terminated.${pod}"
+}
+
 cc_terminate_mark() {
-  local stamp="${CC_VOLUME_DIR:-/workspace}/runs/${CC_JOB_ID:-unknown}/.cc_terminated"
-  mkdir -p "$(dirname "$stamp")"
+  local stamp
+  stamp="$(cc_terminate_stamp)" || return 0
   printf 'ok\n' >"$stamp"
 }
 
 cc_terminate_self() {
-  local stamp="${CC_VOLUME_DIR:-/workspace}/runs/${CC_JOB_ID:-unknown}/.cc_terminated"
-  if [[ -f "$stamp" ]]; then
+  local stamp
+  if stamp="$(cc_terminate_stamp)" && [[ -f "$stamp" ]]; then
     return 0
   fi
   if [[ -z "${RUNPOD_POD_ID:-}" ]]; then

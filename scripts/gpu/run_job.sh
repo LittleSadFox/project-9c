@@ -91,12 +91,13 @@ trap cleanup HUP
 
 cc_require_ttl
 [[ -n "${CC_JOB:-}" ]] || cc_fail "CC_JOB is required inside run_job.sh."
-cc_refuse_nested_gpu_tests
 [[ -n "${CC_GIT_REF:-}" ]] || cc_fail "CC_GIT_REF is required. Pods run only pushed commits."
 [[ -n "${CC_JOB_ID:-}" ]] || cc_fail "CC_JOB_ID is required."
 RUN_DIR="${VOLUME}/runs/${CC_JOB_ID}"
 
 mkdir -p "$RUN_DIR/artifacts" "$VOLUME/models" "$VOLUME/cache/pip" "$SCRATCH"
+export CC_RUN_LOG="${RUN_DIR}/log.txt"
+cc_refuse_nested_gpu_tests
 export GIT_TERMINAL_PROMPT=0
 export GIT_TRACE_REDACT=1
 cc_git_sanitize_env
@@ -117,7 +118,6 @@ if [[ -f "$RUN_DIR/status" ]]; then
   esac
 fi
 echo running >"$RUN_DIR/status"
-export CC_RUN_LOG="${RUN_DIR}/log.txt"
 
 {
   echo "job=${CC_JOB}"
@@ -174,6 +174,7 @@ export CC_VOLUME_DIR="$VOLUME"
 export PYTHONPATH="${SRC}/backend:${SRC}${PYTHONPATH:+:$PYTHONPATH}"
 
 PY="$(cc_resolve_python)"
+echo "python=${PY}" | tee -a "$RUN_DIR/log.txt"
 
 echo "Install pins from cache" | tee -a "$RUN_DIR/log.txt"
 cc_run_logged --wait "$PY" -m pip install --cache-dir "$VOLUME/cache/pip" -r "$SRC/backend/requirements-gpu.txt"
