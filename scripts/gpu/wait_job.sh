@@ -49,6 +49,39 @@ VOLUME="$(cc_volume_id)"
 ENDPOINT="$(cc_s3_endpoint)"
 REGION="${CC_VOLUME_DC:-${CC_RUNPOD_DATACENTER:-}}"
 KEY="runs/${JOB_ID}/status"
+
+resolve_ttl() {
+  if [[ -n "${CC_WAIT_TIMEOUT_S:-}" || -n "${CC_TTL_S:-}" ]]; then
+    return 0
+  fi
+  if [[ "$DRY_RUN" == "1" ]]; then
+    cc_fail "CC_TTL_S is required for wait_job. It will not default to 3600."
+  fi
+  local body ttl log
+  if [[ -n "$POD_ID" ]]; then
+    if body="$(cc_rest GET "/pods/${POD_ID}")"; then
+      ttl="$(cc_ttl_from_pod_body "$body")"
+      if [[ -n "$ttl" ]]; then
+        CC_TTL_S="$ttl"
+        export CC_TTL_S
+        return 0
+      fi
+    fi
+  fi
+  command -v aws >/dev/null 2>&1 || cc_fail "CC_TTL_S is required for wait_job. It will not default to 3600."
+  # shellcheck disable=SC2046
+  if log="$(aws s3 cp "s3://${VOLUME}/runs/${JOB_ID}/log.txt" - --region "$REGION" --endpoint-url "$ENDPOINT" $(cc_aws_args) 2>/dev/null)"; then
+    ttl="$(printf '%s\n' "$log" | sed -n 's/^ttl_s=//p' | head -n 1)"
+    if [[ -n "$ttl" ]]; then
+      CC_TTL_S="$ttl"
+      export CC_TTL_S
+      return 0
+    fi
+  fi
+  cc_fail "CC_TTL_S is required for wait_job. Pass it, or use --pod-id / a run log that records ttl_s."
+}
+
+resolve_ttl
 TIMEOUT="$(cc_wait_timeout_s)"
 SLEEP_S="${CC_WAIT_POLL_S:-15}"
 
@@ -118,7 +151,12 @@ pod_gone() {
 finish_wait() {
   local ec="$1"
   if [[ -n "$POD_ID" ]]; then
-    "$ROOT/scripts/gpu/pod_down.sh" "$POD_ID" || true
+    if ! "$ROOT/scripts/gpu/pod_down.sh" "$POD_ID"; then
+      echo "ERROR: pod ${POD_ID} still exists after pod_down." >&2
+      if (( ec == 0 )); then
+        ec=1
+      fi
+    fi
   fi
   exit "$ec"
 }

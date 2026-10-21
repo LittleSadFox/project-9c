@@ -144,7 +144,7 @@ The Dockerfile deletes `/etc/ssh/ssh_host_*` after apt install.
 I did not confirm that `onnxruntime-gpu==1.23.2` (CUDA 12) supports Blackwell `sm_120`.
 The default GPU list keeps RTX PRO 4500/4000 Blackwell and RTX 5090 at the end.
 
-The create payload sends `allowedCudaVersions` `12.8` through `13.2`.
+The create payload sends `allowedCudaVersions` `12.8`, `12.9`, `13.0`. The live API rejects `13.1` and `13.2`. The image CUDA driver guard (>=12.8, fail closed) is the real floor. If the filter excludes 13.x hosts in practice, drop the field.
 An early entrypoint failure writes `status=failed`, pings, and terminates the pod.
 `run_job.sh` skips a finished job on restart and only retries terminate.
 `--ref` must be a 40-character sha, or the bot box resolves it to one.

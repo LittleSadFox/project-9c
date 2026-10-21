@@ -108,7 +108,10 @@ cc_default_gpu_csv() {
 }
 
 cc_allowed_cuda_versions() {
-  printf '%s' '["12.8","12.9","13.0","13.1","13.2"]'
+  # Live Runpod POST /pods enum is 13.0, 12.9, … 12.0, 11.8. 13.1/13.2 return 400.
+  # The image's CUDA driver guard (>=12.8, fail closed) is the real floor.
+  # If this filter excludes 13.x hosts in practice, drop the field.
+  printf '%s' '["12.8","12.9","13.0"]'
 }
 
 cc_load_defaults() {
@@ -265,12 +268,29 @@ cc_verify_registry_auth() {
   fi
 }
 
+cc_ttl_from_pod_body() {
+  local body="$1"
+  jq -r '
+    if (.env | type) == "object" then .env.CC_TTL_S // empty
+    elif (.env | type) == "array" then
+      [
+        .env[]
+        | select((.key // .name // "") == "CC_TTL_S")
+        | .value // empty
+      ]
+      | first // empty
+    else empty end
+  ' <<<"$body"
+}
+
 cc_wait_timeout_s() {
   if [[ -n "${CC_WAIT_TIMEOUT_S:-}" ]]; then
     printf '%s' "$CC_WAIT_TIMEOUT_S"
     return 0
   fi
-  local ttl="${CC_TTL_S:-3600}"
+  [[ -n "${CC_TTL_S:-}" ]] || cc_fail "CC_TTL_S is required for wait_job. It will not default to 3600."
+  local ttl
+  ttl="$(cc_parse_ttl "$CC_TTL_S")"
   printf '%s' "$((ttl + 300))"
 }
 
@@ -285,13 +305,21 @@ cc_early_cleanup() {
   local volume="${CC_VOLUME_DIR:-/workspace}"
   local run_dir="${volume}/runs/${CC_JOB_ID:-unknown}"
   mkdir -p "${run_dir}/artifacts"
+  local existing=""
+  if [[ -f "${run_dir}/status" ]]; then
+    existing="$(tr -d '[:space:]' <"${run_dir}/status")"
+  fi
+  if [[ "$existing" == "passed" ]]; then
+    cc_terminate_self
+    return 0
+  fi
   printf 'failed\n' >"${run_dir}/status"
   if [[ ! -f "${run_dir}/metrics.json" ]]; then
     jq -n --arg job "${CC_JOB:-unknown}" --arg err "entrypoint failed before the job started" \
       '{job: $job, status: "failed", error: $err}' >"${run_dir}/metrics.json"
   fi
   if [[ -n "${CC_WEBHOOK_URL:-}" && "${CC_WEBHOOK_URL}" != *"{{"* ]]; then
-    curl -sS -X POST -H "Content-Type: application/json" \
+    curl -sS --max-time 15 -X POST -H "Content-Type: application/json" \
       -d "{\"job_id\":\"${CC_JOB_ID:-unknown}\",\"status\":\"failed\"}" \
       "$CC_WEBHOOK_URL" >/dev/null || true
   fi
@@ -319,13 +347,13 @@ cc_rest() {
   # Bash 3.2 + set -u cannot expand an empty array.
   if [[ -n "$body" ]]; then
     code="$(
-      curl -sS --fail-with-body -o "$tmp" -w '%{http_code}' -X "$method" \
+      curl -sS --max-time 30 --fail-with-body -o "$tmp" -w '%{http_code}' -X "$method" \
         -H "@${hdr}" -H "Content-Type: application/json" \
         -d "$body" "$url" || true
     )"
   else
     code="$(
-      curl -sS --fail-with-body -o "$tmp" -w '%{http_code}' -X "$method" \
+      curl -sS --max-time 30 --fail-with-body -o "$tmp" -w '%{http_code}' -X "$method" \
         -H "@${hdr}" -H "Content-Type: application/json" \
         "$url" || true
     )"

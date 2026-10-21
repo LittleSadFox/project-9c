@@ -44,12 +44,12 @@ ping_webhook() {
   local body
   body="$(jq -n --arg id "$CC_JOB_ID" --arg status "$status" --argjson metrics "$summary" \
     '{job_id: $id, status: $status, metrics: $metrics}')"
-  curl -sS -X POST -H "Content-Type: application/json" -d "$body" "$CC_WEBHOOK_URL" \
+  curl -sS --max-time 15 -X POST -H "Content-Type: application/json" -d "$body" "$CC_WEBHOOK_URL" \
     >/dev/null || echo "Webhook ping failed."
 }
 
 # Invoked from trap EXIT INT TERM HUP.
-# shellcheck disable=SC2317
+# shellcheck disable=SC2317,SC2329
 cleanup() {
   local ec=$?
   if [[ "$CLEANING" == "1" ]]; then

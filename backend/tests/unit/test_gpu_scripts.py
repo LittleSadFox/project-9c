@@ -179,8 +179,9 @@ def test_pod_up_dry_run_sets_ttl_and_secret_refs() -> None:
     assert payload["imageName"] == "ghcr.io/littlesadfox/climbing-coach-gpu:latest"
     cuda = payload["allowedCudaVersions"]
     assert isinstance(cuda, list)
-    assert "12.8" in cuda
-    assert "13.2" in cuda
+    assert cuda == ["12.8", "12.9", "13.0"]
+    assert "13.1" not in cuda
+    assert "13.2" not in cuda
     gpus = payload["gpuTypeIds"]
     assert isinstance(gpus, list)
     for name in EXPECTED_GPUS:
@@ -257,7 +258,7 @@ def test_pod_down_rejects_invalid_id() -> None:
 def test_wait_job_dry_run_uses_volume_env() -> None:
     result = _run(
         [str(WAIT_JOB), "job-1", "--dry-run"],
-        env={"CC_VOLUME_ID": "vol-1", "CC_VOLUME_DC": "EU-RO-1"},
+        env={"CC_VOLUME_ID": "vol-1", "CC_VOLUME_DC": "EU-RO-1", "CC_TTL_S": "3600"},
     )
     assert result.returncode == 0, result.stderr
     assert "s3://vol-1/runs/job-1/status" in result.stdout
@@ -265,10 +266,20 @@ def test_wait_job_dry_run_uses_volume_env() -> None:
     assert "timeout_s=3900" in result.stdout
 
 
+def test_wait_job_refuses_without_ttl() -> None:
+    result = _run(
+        [str(WAIT_JOB), "job-1", "--dry-run"],
+        env={"CC_VOLUME_ID": "vol-1", "CC_VOLUME_DC": "EU-RO-1"},
+    )
+    assert result.returncode != 0
+    assert "CC_TTL_S" in result.stderr
+    assert "3600" in result.stderr
+
+
 def test_wait_job_dry_run_pod_id() -> None:
     result = _run(
         [str(WAIT_JOB), "job-1", "--pod-id", "pod-abc", "--dry-run"],
-        env={"CC_VOLUME_ID": "vol-1", "CC_VOLUME_DC": "EU-RO-1"},
+        env={"CC_VOLUME_ID": "vol-1", "CC_VOLUME_DC": "EU-RO-1", "CC_TTL_S": "3600"},
     )
     assert result.returncode == 0, result.stderr
     assert "pod_id=pod-abc" in result.stdout
@@ -556,6 +567,59 @@ def test_wait_job_timeout_uses_ttl_plus_margin() -> None:
     )
     assert result.returncode == 0, result.stderr
     assert "timeout_s=400" in result.stdout
+
+
+def test_wait_job_passed_does_not_exit_zero_if_pod_remains(tmp_path: Path) -> None:
+    aws = tmp_path / "aws"
+    aws.write_text(
+        """#!/usr/bin/env bash
+if [[ "$1" == "s3" && "$2" == "cp" ]]; then
+  printf 'passed\\n'
+  exit 0
+fi
+exit 1
+""",
+        encoding="utf-8",
+    )
+    aws.chmod(0o755)
+    _fake_curl(tmp_path, "200", '{"id":"pod-abc","desiredStatus":"RUNNING"}')
+    result = _run(
+        [str(WAIT_JOB), "job-1", "--pod-id", "pod-abc"],
+        env={
+            "CC_VOLUME_ID": "vol-1",
+            "CC_VOLUME_DC": "EU-RO-1",
+            "CC_TTL_S": "60",
+            "CC_WAIT_POLL_S": "1",
+            "RUNPOD_API_KEY": "broken-key",
+        },
+        bin_dir=tmp_path,
+    )
+    assert result.returncode != 0
+    assert "still exists" in result.stderr or "still present" in result.stderr
+
+
+def test_early_cleanup_keeps_passed_status(tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs" / "job-ok"
+    run_dir.mkdir(parents=True)
+    (run_dir / "status").write_text("passed\n", encoding="utf-8")
+    result = _run(
+        [
+            "bash",
+            "-c",
+            f"source {LIB} && cc_early_cleanup",
+        ],
+        env={"CC_VOLUME_DIR": str(tmp_path), "CC_JOB_ID": "job-ok"},
+    )
+    assert (run_dir / "status").read_text(encoding="utf-8").strip() == "passed"
+    assert result.returncode == 0
+
+
+def test_lib_curl_calls_set_max_time() -> None:
+    text = LIB.read_text(encoding="utf-8")
+    assert text.count("--max-time") >= 3
+    assert '"13.1"' not in text
+    assert '"13.2"' not in text
+    assert "drop the field" in text
 
 
 def test_pod_ls_exits_3_when_pods_exist(tmp_path: Path) -> None:

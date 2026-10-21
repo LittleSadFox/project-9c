@@ -54,17 +54,25 @@ if [[ "$deleted" != "1" ]]; then
   cc_rest DELETE "/pods/${POD_ID}" >/dev/null || true
 fi
 
+delay=2
+if [[ "${CC_TERMINATE_NO_SLEEP:-}" == "1" ]]; then
+  delay=0
+fi
 attempt=0
 while [[ "$attempt" -lt 8 ]]; do
   attempt=$((attempt + 1))
   if cc_rest GET "/pods/${POD_ID}" >/dev/null; then
-    sleep 2
+    if (( delay > 0 )); then
+      sleep "$delay"
+    fi
     continue
   fi
   if [[ "${CC_LAST_HTTP_CODE:-}" == "404" ]]; then
     echo "terminated=${POD_ID}"
     exit 0
   fi
-  sleep 2
+  if (( delay > 0 )); then
+    sleep "$delay"
+  fi
 done
 cc_fail "Pod ${POD_ID} is still present after delete."
