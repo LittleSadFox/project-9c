@@ -14,7 +14,7 @@ if [[ -f "$ROOT/.venv/bin/activate" ]]; then
   source "$ROOT/.venv/bin/activate"
 fi
 
-export PYTHONPATH="$ROOT/backend${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$ROOT/backend:$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
 if [[ "$ALL" == "1" ]]; then
   if [[ "$(uname -s)" == "Darwin" ]]; then

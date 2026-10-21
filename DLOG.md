@@ -85,3 +85,9 @@ Out of scope:
 Set `pythonpath = . ..` in `backend/pytest.ini`.
 CI collects tests with that file.
 The repo-root `scripts` package is then visible.
+`scripts/check.sh` now puts the repo root on `PYTHONPATH` as well.
+
+## 2026-10-21 — SPA path confinement
+
+`spa_target` joins under `frontend/dist` with `safe_join`.
+A `..` or absolute path that leaves that folder returns 400.

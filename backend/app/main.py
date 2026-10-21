@@ -20,9 +20,16 @@ from app.pose.estimator import FixtureEstimator, PoseEstimator
 from app.routes import jobs as jobs_routes
 from app.routes import system as system_routes
 from app.security import HostAllowlistMiddleware
-from app.storage import LibraryPaths
+from app.storage import LibraryPaths, safe_join
 
 FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+
+
+def spa_target(full_path: str, dist: Path = FRONTEND_DIST) -> Path:
+    """Resolve a SPA path. Raise AppError if the result leaves dist."""
+    if not full_path:
+        return safe_join(dist, "index.html")
+    return safe_join(dist, full_path)
 
 
 def create_app(
@@ -89,10 +96,11 @@ def _install_spa(app: FastAPI) -> None:
         reserved = {"health", "auth/launch", "docs", "openapi.json"}
         if full_path.startswith("api/") or full_path in reserved:
             raise AppError("not_found", 404, "The page is not here.")
-        index = FRONTEND_DIST / "index.html"
-        candidate = FRONTEND_DIST / full_path if full_path else index
-        if candidate.is_file():
-            return FileResponse(candidate)
+        index = spa_target("", FRONTEND_DIST)
+        if full_path:
+            candidate = spa_target(full_path, FRONTEND_DIST)
+            if candidate.is_file():
+                return FileResponse(candidate)
         if index.is_file():
             return FileResponse(index)
         raise AppError("not_found", 404, "The frontend build is not here.")
