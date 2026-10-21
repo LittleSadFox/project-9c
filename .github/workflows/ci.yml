@@ -1,0 +1,129 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+            backend/requirements-nodeps.txt
+
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install pinned static ffmpeg 7
+        if: runner.os == 'Linux'
+        env:
+          FFMPEG_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-31-14-10/ffmpeg-n7.1.5-12-g1fdbca85aa-linux64-gpl-7.1.tar.xz
+          FFMPEG_SHA256: c1e6caf48923dd8e6bc5e54d51ba70c321175b8162ae9c414c392990e72f0e79
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/ffmpeg.tar.xz "$FFMPEG_URL"
+          echo "$FFMPEG_SHA256  /tmp/ffmpeg.tar.xz" | sha256sum -c -
+          mkdir -p "$HOME/.local"
+          tar -xJf /tmp/ffmpeg.tar.xz -C "$HOME/.local"
+          bin_dir="$(find "$HOME/.local" -maxdepth 2 -type d -name bin | head -n 1)"
+          echo "$bin_dir" >> "$GITHUB_PATH"
+
+      - name: Install ffmpeg from Homebrew
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          brew list ffmpeg >/dev/null 2>&1 || brew install ffmpeg
+
+      - name: Install Python pins
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -r backend/requirements.txt
+          python -m pip install -r backend/requirements-dev.txt
+          python -m pip install --no-deps -r backend/requirements-nodeps.txt
+
+      - name: Install frontend pins
+        working-directory: frontend
+        run: npm ci
+
+      - name: Check pins
+        run: python .github/workflows/check_pins.py
+
+      - name: Check ffmpeg 7
+        run: |
+          set -euo pipefail
+          ffmpeg -version
+          ffprobe -version
+          ffmpeg -version | head -n 1 | grep -E 'ffmpeg version n?[7-9]\.'
+
+      - name: Ruff
+        if: hashFiles('backend/app/**/*.py') != ''
+        run: ruff check backend
+
+      - name: Mypy
+        if: hashFiles('backend/app/**/*.py') != ''
+        run: mypy backend/app
+
+      - name: Pytest unmarked and media
+        if: hashFiles('backend/tests/**/*.py') != ''
+        run: >
+          pytest backend/tests
+          -m "not model and not gpu and not macos and not golden and not slow"
+
+      - name: Vitest
+        if: hashFiles('frontend/src/**/*') != ''
+        working-directory: frontend
+        run: npm test
+
+      - name: Frontend build
+        if: hashFiles('frontend/src/**/*') != ''
+        working-directory: frontend
+        run: npm run build
+
+      - name: Playwright browsers
+        if: hashFiles('frontend/e2e/**/*') != ''
+        working-directory: frontend
+        run: |
+          set -euo pipefail
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            npx playwright install --with-deps chromium webkit
+          else
+            npx playwright install --with-deps chromium
+          fi
+
+      - name: Playwright Chromium
+        if: hashFiles('frontend/e2e/**/*') != ''
+        working-directory: frontend
+        run: npx playwright test --project=chromium
+
+      - name: Playwright WebKit
+        if: runner.os == 'macOS' && hashFiles('frontend/e2e/**/*') != ''
+        working-directory: frontend
+        run: npx playwright test --project=webkit

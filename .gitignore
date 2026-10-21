@@ -1,0 +1,84 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Node
+node_modules/
+frontend/dist/
+frontend/.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Python caches and tooling
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.hypothesis/
+
+# Model weights — never commit
+*.onnx
+*.pt
+*.pth
+*.ckpt
+*.joblib
+*.pkl
+*.pickle
+
+# Videos and golden footage — never commit
+*.mp4
+*.mov
+*.m4v
+*.avi
+*.mkv
+*.hevc
+*.3gp
+golden/
+videos/
+
+# Library folders and local data — never commit
+library/
+library-dev/
+library.sqlite3
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Reports and run output
+reports/
+runs/
+
+# Local app data copies
+Application Support/ClimbingCoach/
+
+# Build and packaging
+build/
+dist/
+*.spec.bak
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Environment files that may hold secrets
+.env
+.env.*
+!.env.example
+
+# Playwright
+frontend/test-results/
+frontend/playwright-report/
+frontend/blob-report/
+frontend/playwright/.cache/

@@ -1,0 +1,6 @@
+# Dev and test tools. Do not put these on the GPU image unless a job needs them.
+pytest==9.1.1
+pytest-cov==7.1.0
+httpx==0.28.1
+ruff==0.17.1
+mypy==2.4.0

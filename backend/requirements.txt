@@ -1,0 +1,10 @@
+# Runtime pins. Keep this file in lockstep with requirements-gpu.txt.
+# The only allowed difference is onnxruntime vs onnxruntime-gpu.
+fastapi==0.156.6
+starlette==1.8.0
+uvicorn[standard]==0.54.0
+pydantic==2.14.1
+numpy==2.5.4
+onnxruntime==1.23.2
+opencv-python-headless==4.14.0.94
+tqdm==4.70.1
