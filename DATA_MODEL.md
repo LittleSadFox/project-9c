@@ -319,6 +319,8 @@ Keys include `pose_mode`, `det_every`, `proxy_fps`, `proxy_long_side`, `pre_roll
 
 Running the migrations twice must change nothing.
 
+Phase 0 applies this schema in `backend/app/migrations/0001_init.sql`.
+
 ## Files on disk, not columns
 
 These artifacts are not SQLite columns.

@@ -51,3 +51,31 @@ Out of scope for this change:
 
 Accept BtbN's `n7.1.5` banner.
 The Ubuntu check now matches `ffmpeg version n?[7-9].`.
+
+## 2026-10-21 — p0-skeleton
+
+Add the application skeleton.
+
+Backend:
+
+- Frozen `Settings` from `CC_*` with a clear error when a path is missing
+- Error envelope, Host allow-list, and `/auth/launch` HttpOnly SameSite=Strict cookie
+- Library paths, SQLite WAL, and `0001_init.sql`
+- Two-lane job queue with a `noop` job and crash recovery
+- `/health`, job routes, and SPA fallback
+- `create_app(settings, media=..., estimator=...)` for test injection
+
+Frontend:
+
+- Vite app with Liquid Glass tokens and `DESIGN_GUIDELINES.md`
+- `AppShell`, empty pages, API client, `useResource`, `useJobs`, job tray, and `t()`
+- `build.target` is `["safari16", "chrome107"]`
+- Vitest theme-token check and Playwright Chromium smoke
+
+Scripts:
+
+- `setup_mac.sh`, `check.sh`, `dev.sh`, `build.sh`, `run_mac.sh`, `download_models.py`
+
+Out of scope:
+
+- Runpod runner, `docker/gpu`, `scripts/gpu`, `gpu-image.yml`, `sync_volume.sh`, and `ml/jobs.py`

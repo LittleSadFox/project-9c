@@ -82,17 +82,7 @@ cd ~/dev/climbing_coach
 scripts/setup_mac.sh
 ```
 
-`scripts/setup_mac.sh` lands in the Phase 0 skeleton todo.
-Until that script exists, do the install by hand:
-
-```text
-python3.12 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r backend/requirements.txt
-python -m pip install -r backend/requirements-dev.txt
-python -m pip install --no-deps -r backend/requirements-nodeps.txt
-cd frontend && npm ci && cd ..
-```
+`scripts/setup_mac.sh` checks the toolchain, creates `.venv`, installs the pins, downloads weights, and creates the library folders.
 
 ### 3.3 Library folders
 
@@ -169,7 +159,6 @@ The golden set of at least 10 videos is a post–Phase 1 todo.
 
 ## 5. Commands
 
-These scripts land in later Phase 0 todos.
 This table is the command map.
 
 | Command | What it does |

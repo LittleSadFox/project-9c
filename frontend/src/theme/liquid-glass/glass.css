@@ -1,0 +1,200 @@
+.lg-glass {
+  background: var(--lg-fill-bar);
+  -webkit-backdrop-filter: var(--lg-blur);
+  backdrop-filter: var(--lg-blur);
+  box-shadow: var(--lg-rim), var(--lg-lift);
+  border: var(--lg-edge);
+}
+
+.lg-glass-sheet {
+  background: var(--lg-fill-sheet);
+  -webkit-backdrop-filter: var(--lg-blur);
+  backdrop-filter: var(--lg-blur);
+  box-shadow: var(--lg-rim), var(--lg-lift);
+  border: var(--lg-edge);
+  border-radius: var(--lg-radius-sheet);
+}
+
+.lg-topbar {
+  display: flex;
+  align-items: center;
+  gap: var(--lg-space-4);
+  min-height: var(--lg-bar-height);
+  padding: var(--lg-space-2) var(--lg-space-4);
+  border-radius: var(--lg-radius-card);
+}
+
+.lg-brand {
+  font-weight: 600;
+  color: var(--lg-label);
+  white-space: nowrap;
+}
+
+.lg-nav {
+  display: flex;
+  gap: var(--lg-space-1);
+  padding: var(--lg-space-1);
+  border-radius: var(--lg-radius-pill);
+}
+
+.lg-nav a,
+.lg-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  padding: 0 var(--lg-space-3);
+  border-radius: var(--lg-radius-pill);
+  color: var(--lg-label-secondary);
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.lg-nav a[aria-current="page"],
+.lg-tab[aria-selected="true"] {
+  color: var(--lg-label);
+  background: var(--lg-color-primary);
+}
+
+.lg-icon-button,
+.lg-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  border: var(--lg-edge);
+  color: var(--lg-label);
+  background: var(--lg-fill-bar);
+  font: inherit;
+  cursor: pointer;
+  transition: transform 160ms var(--lg-ease), opacity 160ms var(--lg-ease);
+}
+
+.lg-icon-button {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--lg-radius-pill);
+}
+
+.lg-button {
+  padding: 0 var(--lg-space-4);
+  border-radius: var(--lg-radius-pill);
+}
+
+.lg-button-primary {
+  background: var(--lg-color-primary);
+  color: rgb(255, 255, 255);
+  border-color: transparent;
+}
+
+.lg-button-danger {
+  background: var(--lg-color-danger);
+  color: rgb(255, 255, 255);
+  border-color: transparent;
+}
+
+.lg-icon-button:active,
+.lg-button:active {
+  transform: scale(var(--lg-press-scale));
+}
+
+.lg-icon-button:focus-visible,
+.lg-button:focus-visible,
+.lg-nav a:focus-visible,
+.lg-tab:focus-visible,
+.lg-switch:focus-visible,
+.lg-slider:focus-visible {
+  outline: var(--lg-focus-ring);
+  outline-offset: 2px;
+}
+
+.lg-switch {
+  width: 46px;
+  height: 28px;
+  border: var(--lg-edge);
+  border-radius: var(--lg-radius-pill);
+  background: var(--lg-fill-sheet);
+  padding: 0;
+  cursor: pointer;
+}
+
+.lg-switch[aria-checked="true"] {
+  background: var(--lg-color-primary);
+}
+
+.lg-slider {
+  width: 100%;
+  accent-color: var(--lg-color-primary);
+}
+
+.lg-panel {
+  background: var(--lg-fill-content);
+  border: var(--lg-edge);
+  border-radius: var(--lg-radius-card);
+  box-shadow: var(--lg-lift);
+  padding: var(--lg-space-4);
+}
+
+.lg-sheet-root {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.lg-dimmer {
+  position: absolute;
+  inset: 0;
+  background: var(--lg-dimmer);
+}
+
+.lg-menu,
+.lg-tooltip {
+  background: var(--lg-fill-sheet);
+  -webkit-backdrop-filter: var(--lg-blur);
+  backdrop-filter: var(--lg-blur);
+  border: var(--lg-edge);
+  box-shadow: var(--lg-rim), var(--lg-lift);
+  color: var(--lg-label);
+}
+
+.lg-menu {
+  border-radius: var(--lg-radius-menu);
+  padding: var(--lg-space-2);
+  min-width: 180px;
+}
+
+.lg-tooltip {
+  border-radius: var(--lg-radius-row);
+  padding: var(--lg-space-1) var(--lg-space-2);
+  font-size: 12px;
+}
+
+.lg-dev-badge {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--lg-color-warn);
+  border: var(--lg-edge);
+  border-radius: var(--lg-radius-row);
+  padding: 2px 6px;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .lg-glass,
+  .lg-glass-sheet,
+  .lg-menu,
+  .lg-tooltip {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lg-icon-button,
+  .lg-button {
+    transition: none;
+  }
+}
