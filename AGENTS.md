@@ -236,7 +236,9 @@ The volume bills continuously, but it is small.
 ### 9.4 GHCR before the first pod
 
 The GPU image `climbing-coach-gpu` is private.
-Before the first `pod_up`, the Runpod account must have a registry credential with GitHub `read:packages`.
+Section 2.2 setup is complete.
+That fact does not skip this check.
+Before every first `pod_up`, the Runpod bot must verify the Runpod registry credential with GitHub `read:packages`.
 The Runpod bot must not start a pod if that credential is missing.
 
 ## 10. Footage and models

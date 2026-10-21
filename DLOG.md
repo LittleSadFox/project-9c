@@ -91,3 +91,60 @@ The repo-root `scripts` package is then visible.
 
 `spa_target` joins under `frontend/dist` with `safe_join`.
 A `..` or absolute path that leaves that folder returns 400.
+
+## 2026-10-21 — p0-runpod-runner
+
+Add the Phase 0 GPU runner.
+
+- `docker/gpu/` builds `climbing-coach-gpu` from `nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04`.
+- The image has Python 3.12, `onnxruntime-gpu==1.23.2`, the CI static ffmpeg 7.1.5 build, sshd, git, curl, jq, and a TTL watchdog.
+- The image has no PyTorch and no MMPose.
+- `.github/workflows/gpu-image.yml` builds the image and pushes it to private GHCR.
+- Tags are the git sha and, on `main`, `latest`.
+- `scripts/gpu/` has `pod_up.sh`, `run_job.sh`, `wait_job.sh`, `pod_down.sh`, and `pod_ls.sh`.
+- The scripts always set `CC_TTL_S`.
+- The scripts refuse to copy the account API key into pod env.
+- `ml/jobs.py` registers `gpu_tests`.
+- `scripts/sync_volume.sh` and `scripts/export_labels.py` copy labels and new golden files.
+
+Section 2.2 setup is complete.
+AGENTS.md section 9.4 still applies.
+Before every first `pod_up`, the Runpod bot must verify the GHCR registry credential.
+A complete setup does not skip that check.
+The first live `pod_up.sh --job gpu_tests` waits on this pull request merging and on green CI plus a green GPU image build.
+After that, the Runpod bot runs it.
+This change does not start a pod.
+
+## 2026-10-21 — Runner review fixes
+
+`gpu_tests` sets `CC_REQUIRE` only in the pytest subprocess.
+Later tests in the same process keep their skip rules.
+
+The GPU image does not generate SSH host keys at build time.
+`entrypoint.sh` generates host keys at start-up, then starts sshd on every pod.
+
+The GPU image workflow frees disk before buildx.
+It does not load the image on the runner.
+It pushes sha and `latest` only from `main`.
+
+Pod scripts use Basic `x-access-token` git auth, the EU-RO-1 GPU list, and retry terminate.
+`wait_job.sh --pod-id` fails if the pod exits before status is `passed`.
+`--spot` is allowed only for `gpu_tests` and `pose_bench`.
+
+Section 2.2 setup is complete.
+AGENTS.md section 9.4 still applies.
+Before every first `pod_up`, the Runpod bot must verify the GHCR registry credential.
+A complete setup does not skip that check.
+The first live `gpu_tests` pod waits on this pull request merging and on green CI plus a green GPU image build.
+
+Live `pod_up` now GETs `/containerregistryauth/<id>` and refuses on a non-200.
+The Dockerfile deletes `/etc/ssh/ssh_host_*` after apt install.
+`entrypoint.sh` always generates new host keys.
+
+I did not confirm that `onnxruntime-gpu==1.23.2` (CUDA 12) supports Blackwell `sm_120`.
+The default GPU list keeps RTX PRO 4500/4000 Blackwell and RTX 5090 at the end.
+
+The create payload sends `allowedCudaVersions` `12.8`, `12.9`, `13.0`. The live API rejects `13.1` and `13.2`. The image CUDA driver guard (>=12.8, fail closed) is the real floor. If the filter excludes 13.x hosts in practice, drop the field.
+An early entrypoint failure writes `status=failed`, pings, and terminates the pod.
+`run_job.sh` skips a finished job on restart and only retries terminate.
+`--ref` must be a 40-character sha, or the bot box resolves it to one.

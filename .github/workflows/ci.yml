@@ -83,13 +83,24 @@ jobs:
           ffprobe -version
           ffmpeg -version | head -n 1 | grep -E 'ffmpeg version n?[7-9]\.'
 
+      - name: Shellcheck
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          shellcheck -x scripts/gpu/*.sh scripts/sync_volume.sh docker/gpu/entrypoint.sh
+
       - name: Ruff
         if: hashFiles('backend/app/**/*.py') != ''
-        run: ruff check backend
+        run: ruff check backend ml scripts/export_labels.py scripts/download_models.py
 
       - name: Mypy
         if: hashFiles('backend/app/**/*.py') != ''
-        run: mypy backend/app
+        run: |
+          set -euo pipefail
+          mypy backend/app
+          mypy --ignore-missing-imports ml
 
       - name: Pytest unmarked and media
         if: hashFiles('backend/tests/**/*.py') != ''

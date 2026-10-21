@@ -144,17 +144,25 @@ Do not write example credentials.
    Create the volume in a datacenter that supports the S3 API.
    Examples: `EU-RO-1`, `EUR-IS-1`, `US-KS-2`, `US-CA-2`.
    See the Runpod S3 API docs for the full list.
-   Pick a datacenter with good RTX 4090, A40, and A100 availability.
+   Pick a datacenter with good L4, RTX 2000 Ada, RTX 4090, A100, RTX PRO Blackwell, and RTX 5090 availability.
 
 The account API key never goes in a pod.
 A pod uses only the pod-scoped key that Runpod injects, plus the two secrets.
 
-The Runpod runner, the GPU image, and `gpu-image.yml` land in the `p0-runpod-runner` todo.
-Do not start a pod until that work exists and the GHCR credential is in place.
+The runner files are in the tree: `docker/gpu/`, `scripts/gpu/`, `ml/jobs.py`, and `.github/workflows/gpu-image.yml`.
+
+Do not start a live pod from a coding agent.
+Only the Runpod bot starts pods.
+Section 2.2 setup is complete.
+AGENTS.md section 9.4 still applies.
+Before every first `pod_up`, the Runpod bot must verify the GHCR registry credential is present.
+A complete setup does not skip that check.
+The first live `scripts/gpu/pod_up.sh --job gpu_tests` waits on this pull request merging and on green CI plus a green GPU image build.
+After that, the Runpod bot runs it.
 
 Phase 0 needs only a small sample upload.
 One or two videos are enough.
-Upload them with `scripts/sync_volume.sh` after that script exists.
+Upload them with `scripts/sync_volume.sh`.
 The golden set of at least 10 videos is a post–Phase 1 todo.
 
 ## 5. Commands
@@ -173,14 +181,17 @@ This table is the command map.
 | `scripts/export_labels.py` | Writes golden labels from the dev library. |
 | `scripts/sync_volume.sh` | Copies new golden videos and labels to the Runpod volume. |
 | `scripts/export_dataset.sh` | Uploads a Phase 4 or Phase 6 dataset. |
-| `scripts/gpu/pod_up.sh` | Creates a GPU pod for a job or an interactive session. |
-| `scripts/gpu/wait_job.sh` | Polls `runs/<id>/status` through the S3 API. |
+| `scripts/gpu/pod_up.sh` | Creates a GPU pod for a job or an interactive session. Use `--dry-run` to print the payload. |
+| `scripts/gpu/run_job.sh` | Runs inside the pod. Clone, install, run `ml/jobs.py`, write the run folder, ping, terminate. |
+| `scripts/gpu/wait_job.sh` | Polls `runs/<id>/status` through the S3 API. Pass `--pod-id` to fail if the pod exits first. |
 | `scripts/gpu/pod_down.sh` | Terminates a pod. |
 | `scripts/gpu/pod_ls.sh` | Lists running pods and their age. |
 
 Only the Runpod bot starts pods.
 Never start a pod without `CC_TTL_S`.
 Never start a pod without `CC_JOB` or `--interactive`.
+The account API key never goes in the pod template or in pod env.
+A job pod terminates itself with the pod-scoped key that Runpod injects.
 
 ## 6. Environment variables
 
@@ -205,6 +216,29 @@ The frozen `Settings` object holds them.
 
 On pods, set `CC_MODELS_DIR=/workspace/models` and `CC_GOLDEN_DIR=/workspace/videos`.
 Point `CC_LIBRARY_DIR` at a scratch folder on the container disk.
+
+Pod scripts also read these names.
+Ryan and the Runpod bot set the values.
+Do not invent the values.
+
+| Name | Meaning |
+| --- | --- |
+| `CC_TTL_S` | Required lifetime backstop in seconds |
+| `CC_JOB` | Job name. Empty for `--interactive` |
+| `CC_GIT_REF` | Pushed commit sha |
+| `CC_JOB_ID` | Run folder name under `/workspace/runs/` |
+| `CC_REPO_TOKEN` | Runpod secret `cc_repo_token`. Do not set this by hand |
+| `CC_WEBHOOK_URL` | Runpod secret `cc_webhook_url`. Do not set this by hand |
+| `RUNPOD_API_KEY` | Account key on the bot computer only. Never copy it into a pod |
+| `CC_RUNPOD_TEMPLATE_ID` | Pod template id |
+| `CC_RUNPOD_VOLUME_ID` / `CC_VOLUME_ID` | Network volume id |
+| `CC_RUNPOD_DATACENTER` / `CC_VOLUME_DC` | Volume datacenter |
+| `CC_RUNPOD_REGISTRY_AUTH_ID` | Registry credential for the private GHCR image |
+| `CC_GPU_IMAGE` | GHCR image name when the template does not set it |
+| `CC_INTERACTIVE` | Set to `1` on interactive pods |
+| `CC_WAIT_TIMEOUT_S` | `wait_job.sh` timeout in seconds. Default is `CC_TTL_S` plus 300 |
+| `CC_WAIT_POLL_S` | `wait_job.sh` poll interval in seconds. Default `15` |
+| `CC_AWS_PROFILE` | Optional AWS CLI profile for the volume S3 API |
 
 Do not put secrets in this file.
 Do not commit `.env` files that hold tokens.
@@ -253,7 +287,15 @@ Bot and CI
 - [ ] `npm run build` and Vitest pass.
 - [ ] A Playwright Chromium smoke test opens the shell.
 
-Pod (after `p0-runpod-runner`)
+Pod (after this pull request merges)
+
+Section 2.2 setup is complete.
+AGENTS.md section 9.4 still applies.
+Before every first `pod_up`, the Runpod bot must verify the GHCR registry credential is present.
+A complete setup does not skip that check.
+The first live `pod_up.sh --job gpu_tests` waits on this pull request merging and on green CI plus a green GPU image build.
+After that, the Runpod bot runs it.
+This repo change does not start a pod.
 
 - [ ] `pod_up.sh --job gpu_tests` clones the commit and runs the suite with real ffmpeg.
 - [ ] A tiny ONNX model runs on `CUDAExecutionProvider`.
@@ -398,8 +440,14 @@ GitHub Actions runs on every push and pull request.
 
 The macOS job proves that every pinned wheel installs on Apple Silicon.
 
-`gpu-image.yml` is not part of this todo.
-That workflow lands with the Runpod runner.
+`gpu-image.yml` builds `climbing-coach-gpu`.
+It runs when `docker/gpu/` or `requirements*.txt` change.
+Pull requests only build the image.
+Pushes to `main` push the git sha tag and `latest` to private GHCR.
+The image is private.
+Section 2.2 setup is complete.
+The Runpod registry credential is already in place.
+AGENTS.md section 9.4 still applies: the Runpod bot must verify that credential before every first `pod_up`.
 
 ## 11. Licence
 

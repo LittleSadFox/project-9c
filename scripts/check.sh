@@ -28,10 +28,16 @@ else
 fi
 
 echo "Ruff"
-ruff check backend
+ruff check backend ml scripts/export_labels.py scripts/download_models.py
+
+if command -v shellcheck >/dev/null 2>&1; then
+  echo "Shellcheck"
+  shellcheck -x scripts/gpu/*.sh scripts/sync_volume.sh docker/gpu/entrypoint.sh
+fi
 
 echo "Mypy"
 mypy backend/app
+mypy --ignore-missing-imports ml
 
 echo "Pytest"
 if [[ -n "$PYTEST_MARK" ]]; then

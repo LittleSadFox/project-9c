@@ -1,0 +1,97 @@
+name: GPU image
+
+on:
+  push:
+    paths:
+      - "docker/gpu/**"
+      - "backend/requirements.txt"
+      - "backend/requirements-gpu.txt"
+      - "backend/requirements-dev.txt"
+      - "backend/requirements-nodeps.txt"
+      - "scripts/gpu/**"
+      - ".github/workflows/gpu-image.yml"
+      - ".dockerignore"
+  pull_request:
+    paths:
+      - "docker/gpu/**"
+      - "backend/requirements.txt"
+      - "backend/requirements-gpu.txt"
+      - "backend/requirements-dev.txt"
+      - "backend/requirements-nodeps.txt"
+      - "scripts/gpu/**"
+      - ".github/workflows/gpu-image.yml"
+      - ".dockerignore"
+  workflow_dispatch:
+
+concurrency:
+  group: gpu-image-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  gpu-image:
+    name: Build climbing-coach-gpu
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Free disk
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune -af
+          df -h /
+
+      - name: Check out the repo
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Image names
+        id: image
+        env:
+          GH_REF: ${{ github.ref }}
+          GH_OWNER: ${{ github.repository_owner }}
+          GH_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          owner="$(printf '%s' "$GH_OWNER" | tr '[:upper:]' '[:lower:]')"
+          name="ghcr.io/${owner}/climbing-coach-gpu"
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          echo "sha_tag=${name}:${GH_SHA}" >> "$GITHUB_OUTPUT"
+          if [[ "$GH_REF" == "refs/heads/main" ]]; then
+            echo "latest_tag=${name}:latest" >> "$GITHUB_OUTPUT"
+            echo "push=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "latest_tag=" >> "$GITHUB_OUTPUT"
+            echo "push=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Log in to GHCR
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: docker/gpu/Dockerfile
+          platforms: linux/amd64
+          load: false
+          push: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+          tags: |
+            ${{ steps.image.outputs.sha_tag }}
+            ${{ steps.image.outputs.latest_tag }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/LittleSadFox/project-9c
+          cache-from: type=gha
+          cache-to: type=gha,mode=min
