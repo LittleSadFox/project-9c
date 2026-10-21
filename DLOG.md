@@ -46,3 +46,8 @@ Out of scope for this change:
 - Backend and frontend application skeleton (`p0-skeleton`)
 - Runpod runner, `docker/gpu`, and `gpu-image.yml` (`p0-runpod-runner`)
 - Phase 4 `requirements-ml.txt`
+
+## 2026-10-21 — CI ffmpeg version check
+
+Accept BtbN's `n7.1.5` banner.
+The Ubuntu check now matches `ffmpeg version n?[7-9].`.

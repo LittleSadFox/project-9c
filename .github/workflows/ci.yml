@@ -81,7 +81,7 @@ jobs:
           set -euo pipefail
           ffmpeg -version
           ffprobe -version
-          ffmpeg -version | head -n 1 | grep -E 'ffmpeg version [7-9]\.'
+          ffmpeg -version | head -n 1 | grep -E 'ffmpeg version n?[7-9]\.'
 
       - name: Ruff
         if: hashFiles('backend/app/**/*.py') != ''
