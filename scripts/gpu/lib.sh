@@ -6,6 +6,13 @@
 
 cc_fail() {
   echo "ERROR: $*" >&2
+  if [[ -n "${CC_RUN_LOG:-}" ]]; then
+    local line="$*"
+    if command -v python3 >/dev/null 2>&1; then
+      line="$(cc_redact_oneline "$*")"
+    fi
+    printf 'ERROR: %s\n' "$line" >> "$CC_RUN_LOG"
+  fi
   exit 1
 }
 
@@ -343,8 +350,11 @@ cc_early_cleanup() {
     if [[ "$existing" != "passed" && "$existing" != "failed" && "$existing" != "stopped" ]]; then
       printf 'stopped\n' >"${run_dir}/status"
     fi
-    cc_terminate_self
-    exit 0
+    if cc_terminate_self; then
+      exit 0
+    fi
+    echo "ERROR: terminate failed after interactive stop." >&2
+    exit 1
   fi
   if [[ "$existing" == "passed" || "$existing" == "failed" || "$existing" == "stopped" ]]; then
     cc_terminate_self
@@ -356,9 +366,8 @@ cc_early_cleanup() {
       '{job: $job, status: "failed", error: $err}' >"${run_dir}/metrics.json"
   fi
   if [[ -n "${CC_WEBHOOK_URL:-}" && "${CC_WEBHOOK_URL}" != *"{{"* ]]; then
-    curl -sS --max-time 15 -X POST -H "Content-Type: application/json" \
-      -d "{\"job_id\":\"${CC_JOB_ID:-unknown}\",\"status\":\"failed\"}" \
-      "$CC_WEBHOOK_URL" >/dev/null || true
+    cc_curl_post_json "$CC_WEBHOOK_URL" \
+      "{\"job_id\":\"${CC_JOB_ID:-unknown}\",\"status\":\"failed\"}" >/dev/null || true
   fi
   cc_terminate_self
   return 0
@@ -490,6 +499,13 @@ def redact(text):
             text = text.replace(b64_nopad, "REDACTED")
     if header:
         text = re.sub(re.escape(header), "AUTHORIZATION: basic REDACTED", text, flags=re.I)
+    pod_key = os.environ.get("RUNPOD_API_KEY") or ""
+    hook = os.environ.get("CC_WEBHOOK_URL") or ""
+    if pod_key:
+        text = text.replace(pod_key, "REDACTED")
+    if hook:
+        text = text.replace(hook, "REDACTED")
+    text = re.sub("rp" + "a_" + r"[A-Za-z0-9]+", "REDACTED", text)
     return text
 
 for line in sys.stdin:
@@ -500,6 +516,183 @@ for line in sys.stdin:
 
 cc_redact_text() {
   printf '%s' "$1" | cc_redact_stream
+}
+
+cc_redact_oneline() {
+  printf '%s' "$1" | cc_redact_stream | python3 -c '
+import sys
+text = sys.stdin.read().replace("\r", " ").replace("\n", " ")
+while "  " in text:
+    text = text.replace("  ", " ")
+sys.stdout.write(text[:400])
+'
+}
+
+cc_curl_post_json() {
+  local url="$1"
+  local body="$2"
+  local cfg
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "ERROR: python3 is required to post JSON." >&2
+    return 1
+  fi
+  cfg="$(mktemp)"
+  python3 -c '
+import sys
+url = sys.argv[1].replace("\\", "\\\\").replace("\"", "\\\"")
+sys.stdout.write("url = \"%s\"\n" % url)
+' "$url" >"$cfg"
+  chmod 600 "$cfg"
+  local ec=0
+  curl -sS --max-time 15 -X POST -H "Content-Type: application/json" -d "$body" --config "$cfg" || ec=$?
+  rm -f "$cfg"
+  return "$ec"
+}
+
+cc_realpath() {
+  local path="$1"
+  command -v python3 >/dev/null 2>&1 || cc_fail "python3 is required to resolve paths."
+  python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$path"
+}
+
+cc_trim() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
+cc_path_equals_or_contains() {
+  local resolved="$1"
+  local protected="$2"
+  [[ -n "$protected" ]] || return 1
+  [[ "$resolved" == "$protected" || "$protected" == "$resolved"/* ]]
+}
+
+cc_path_inside() {
+  local resolved="$1"
+  local protected="$2"
+  [[ -n "$protected" ]] || return 1
+  [[ "$resolved" == "$protected"/* ]]
+}
+
+cc_real_home() {
+  local home=""
+  if [[ -n "${HOME:-}" ]]; then
+    home="$(cc_realpath "$HOME" 2>/dev/null || true)"
+    if [[ -n "$home" ]]; then
+      printf '%s\n' "$home"
+      return 0
+    fi
+  fi
+  if command -v getent >/dev/null 2>&1; then
+    home="$(getent passwd "$(id -un)" 2>/dev/null | awk -F: '{print $6}')"
+    if [[ -n "$home" ]]; then
+      home="$(cc_realpath "$home" 2>/dev/null || true)"
+      if [[ -n "$home" ]]; then
+        printf '%s\n' "$home"
+        return 0
+      fi
+    fi
+  fi
+  home="$(python3 -c 'import os; print(os.path.realpath(os.path.expanduser("~")))' 2>/dev/null || true)"
+  printf '%s\n' "$home"
+}
+
+cc_assert_safe_wipe_dir() {
+  local target="${1:-}"
+  local script_dir="${2:-}"
+  local volume="${3:-${CC_VOLUME_DIR:-/workspace}}"
+  local scratch="${4:-${CC_LIBRARY_DIR:-/tmp/cc-library}}"
+  target="$(cc_trim "$target")"
+  [[ -n "$target" ]] || cc_fail "Refuse to rm -rf an empty path."
+  [[ "$target" == /* ]] || cc_fail "Refuse to rm -rf a relative path ${target}."
+  if [[ -L "${target%/}" ]]; then
+    cc_fail "Refuse to rm -rf symlink ${target}."
+  fi
+  local resolved base tmp_root tmpdir_root parent raw_parent
+  resolved="$(cc_realpath "$target")"
+  [[ -n "$resolved" ]] || cc_fail "Refuse to rm -rf an empty path."
+  [[ "$resolved" == /* ]] || cc_fail "Refuse to rm -rf a relative path ${resolved}."
+  [[ "$resolved" != "/" ]] || cc_fail "Refuse to rm -rf /."
+  if [[ -L "${resolved%/}" ]]; then
+    cc_fail "Refuse to rm -rf symlink ${target}."
+  fi
+  base="${resolved##*/}"
+  if [[ ! "$base" =~ ^cc-src(-[A-Za-z0-9._-]+)?$ ]]; then
+    cc_fail "Refuse to rm -rf ${target}. Basename must match cc-src."
+  fi
+  tmp_root="$(cc_realpath /tmp)"
+  local here repo_root home
+  here="$(pwd -P)"
+  repo_root=""
+  if [[ -n "$script_dir" ]]; then
+    repo_root="$(cc_realpath "${script_dir}/../..")"
+    script_dir="$(cc_realpath "$script_dir")"
+  fi
+  home="$(cc_real_home)"
+  volume="$(cc_realpath "$volume")"
+  scratch="$(cc_realpath "$scratch")"
+  tmpdir_root=""
+  if [[ -n "${TMPDIR:-}" ]]; then
+    tmpdir_root="$(cc_realpath "$TMPDIR")"
+    local protected
+    for protected in "$volume" "$scratch" "$repo_root" "$home"; do
+      if [[ -n "$protected" && -n "$tmpdir_root" ]]; then
+        if [[ "$tmpdir_root" == "$protected" || "$tmpdir_root" == "$protected"/* ]]; then
+          tmpdir_root=""
+          break
+        fi
+      fi
+    done
+  fi
+  parent="${resolved%/*}"
+  if [[ "$resolved" == "$tmp_root" || ( -n "$tmpdir_root" && "$resolved" == "$tmpdir_root" ) ]]; then
+    cc_fail "Refuse to rm -rf ${target}. It is /tmp."
+  fi
+  if [[ "$parent" != "$tmp_root" && ( -z "$tmpdir_root" || "$parent" != "$tmpdir_root" ) ]]; then
+    cc_fail "Refuse to rm -rf ${target}. Parent must be /tmp."
+  fi
+  raw_parent="${target%/}"
+  raw_parent="${raw_parent%/*}"
+  if [[ -L "$raw_parent" && "$raw_parent" != "/tmp" ]]; then
+    cc_fail "Refuse to rm -rf ${target}. Parent is a symlink."
+  fi
+  if cc_path_equals_or_contains "$resolved" "$here" || cc_path_inside "$resolved" "$here"; then
+    cc_fail "Refuse to rm -rf ${target}. It is the working directory."
+  fi
+  if [[ -n "$script_dir" ]] && { cc_path_equals_or_contains "$resolved" "$script_dir" || cc_path_inside "$resolved" "$script_dir"; }; then
+    cc_fail "Refuse to rm -rf ${target}. It is the checkout."
+  fi
+  if [[ -n "$repo_root" ]] && { cc_path_equals_or_contains "$resolved" "$repo_root" || cc_path_inside "$resolved" "$repo_root"; }; then
+    cc_fail "Refuse to rm -rf ${target}. It is the checkout."
+  fi
+  if [[ -n "$home" ]] && { cc_path_equals_or_contains "$resolved" "$home" || cc_path_inside "$resolved" "$home"; }; then
+    cc_fail "Refuse to rm -rf ${target}. It is HOME."
+  fi
+  if [[ -n "$volume" ]] && { cc_path_equals_or_contains "$resolved" "$volume" || cc_path_inside "$resolved" "$volume"; }; then
+    cc_fail "Refuse to rm -rf ${target}. It is the volume."
+  fi
+  if [[ -n "$scratch" ]] && { cc_path_equals_or_contains "$resolved" "$scratch" || cc_path_inside "$resolved" "$scratch"; }; then
+    cc_fail "Refuse to rm -rf ${target}. It is scratch."
+  fi
+  printf '%s\n' "$resolved"
+}
+
+cc_safe_wipe_dir() {
+  local target="${1:-}"
+  local script_dir="${2:-}"
+  local volume="${3:-${CC_VOLUME_DIR:-/workspace}}"
+  local scratch="${4:-${CC_LIBRARY_DIR:-/tmp/cc-library}}"
+  local resolved check
+  resolved="$(cc_assert_safe_wipe_dir "$target" "$script_dir" "$volume" "$scratch")" || return 1
+  [[ -n "$resolved" ]] || return 1
+  check="$(cc_realpath "$target")"
+  if [[ "$check" != "$resolved" || -L "${target%/}" || -L "${resolved%/}" ]]; then
+    cc_fail "Refuse to rm -rf ${target}. Path changed or is a symlink."
+  fi
+  rm -rf -- "$resolved"
+  printf '%s\n' "$resolved"
 }
 
 cc_git_sanitize_env() {
@@ -526,8 +719,9 @@ cc_run_logged() {
     shift
   fi
   cc_git_sanitize_env
-  local fifo reader ec
-  fifo="$(mktemp -u)"
+  local fifo_dir fifo reader ec
+  fifo_dir="$(mktemp -d)"
+  fifo="${fifo_dir}/out.fifo"
   mkfifo "$fifo"
   cc_redact_stream <"$fifo" | tee -a "${CC_RUN_LOG:-/dev/null}" &
   reader=$!
@@ -542,7 +736,7 @@ cc_run_logged() {
   fi
   set -e
   wait "$reader" || true
-  rm -f "$fifo"
+  rm -rf "$fifo_dir"
   return "$ec"
 }
 
@@ -557,22 +751,76 @@ cc_run_timeout() {
   return $?
 }
 
+cc_s3_uri_parts() {
+  local uri="$1"
+  local rest bucket key
+  case "$uri" in
+    s3://*/*) ;;
+    *)
+      echo "ERROR: S3 URI ${uri} is not s3://bucket/key." >&2
+      return 1
+      ;;
+  esac
+  rest="${uri#s3://}"
+  bucket="${rest%%/*}"
+  key="${rest#*/}"
+  if [[ -z "$bucket" || -z "$key" || "$key" == "$rest" || "$bucket" == *" "* ]]; then
+    echo "ERROR: S3 URI ${uri} is not s3://bucket/key." >&2
+    return 1
+  fi
+  printf '%s\n%s\n' "$bucket" "$key"
+}
+
+cc_s3_err_summary() {
+  local errfile="$1"
+  local key="$2"
+  local line code
+  line="$(head -n 1 "$errfile" 2>/dev/null || true)"
+  line="$(cc_redact_oneline "$line")"
+  if grep -qiE 'SignatureDoesNotMatch' "$errfile"; then
+    code="SignatureDoesNotMatch"
+  elif grep -qiE '\(403\)|403 Forbidden|Status Code: 403|HTTPStatusCode: 403' "$errfile"; then
+    code="403"
+  else
+    code="$(sed -n 's/.*(\([^)]*\)).*/\1/p' "$errfile" | head -n 1)"
+    code="$(cc_trim "$code")"
+    : "${code:=error}"
+  fi
+  printf 'code=%s key=%s %s' "$code" "$key" "$line"
+}
+
 cc_s3_cp_stdout() {
   local uri="$1"
   local region="$2"
   local endpoint="$3"
-  local err attempt delay out
+  local err attempt delay dest parts bucket key
   command -v aws >/dev/null 2>&1 || cc_fail "Install AWS CLI v2."
+  if ! parts="$(cc_s3_uri_parts "$uri")"; then
+    return 1
+  fi
+  bucket="$(printf '%s\n' "$parts" | sed -n '1p')"
+  key="$(printf '%s\n' "$parts" | sed -n '2p')"
+  if [[ -z "$bucket" || -z "$key" ]]; then
+    echo "ERROR: S3 URI ${uri} is not s3://bucket/key." >&2
+    return 1
+  fi
   err="$(mktemp)"
+  dest="$(mktemp)"
   for attempt in 1 2 3 4; do
     # shellcheck disable=SC2046
-    if out="$(aws s3 cp "$uri" - --region "$region" --endpoint-url "$endpoint" $(cc_aws_args) 2>"$err")"; then
-      rm -f "$err"
-      printf '%s' "$out"
+    if aws s3api get-object \
+      --bucket "$bucket" \
+      --key "$key" \
+      --region "$region" \
+      --endpoint-url "$endpoint" \
+      $(cc_aws_args) \
+      "$dest" >/dev/null 2>"$err"; then
+      cat "$dest"
+      rm -f "$err" "$dest"
       return 0
     fi
     if grep -qiE 'NoSuchKey|Not Found|404' "$err"; then
-      rm -f "$err"
+      rm -f "$err" "$dest"
       return 1
     fi
     if grep -qiE 'SignatureDoesNotMatch|403 Forbidden|Status Code: 403|HTTPStatusCode: 403|\(403\)' "$err"; then
@@ -580,21 +828,17 @@ cc_s3_cp_stdout() {
         break
       fi
       delay=$((attempt * 2))
-      echo "S3 transient error attempt=${attempt}; sleep ${delay}s" >&2
-      cat "$err" >&2 || true
       if [[ "${CC_TERMINATE_NO_SLEEP:-}" != "1" ]]; then
         sleep "$delay"
       fi
       continue
     fi
-    echo "ERROR: aws s3 cp failed for ${uri}." >&2
-    cat "$err" >&2 || true
-    rm -f "$err"
+    echo "ERROR: S3 get-object ${uri} failed. $(cc_s3_err_summary "$err" "$key")" >&2
+    rm -f "$err" "$dest"
     return 1
   done
-  echo "ERROR: aws s3 cp failed for ${uri} after retries." >&2
-  cat "$err" >&2 || true
-  rm -f "$err"
+  echo "ERROR: S3 get-object ${uri} failed after ${attempt} attempts. $(cc_s3_err_summary "$err" "$key")" >&2
+  rm -f "$err" "$dest"
   return 1
 }
 
@@ -659,11 +903,13 @@ cc_aws_args() {
 }
 
 cc_setup_ssh() {
-  mkdir -p /root/.ssh
-  chmod 700 /root/.ssh
+  # CC_SSH_HOME is a test-only override. On the pod it stays unset.
+  local ssh_home="${CC_SSH_HOME:-/root/.ssh}"
+  mkdir -p "$ssh_home"
+  chmod 700 "$ssh_home"
   if [[ -n "${PUBLIC_KEY:-}" ]]; then
-    printf '%s\n' "$PUBLIC_KEY" > /root/.ssh/authorized_keys
-    chmod 600 /root/.ssh/authorized_keys
+    printf '%s\n' "$PUBLIC_KEY" > "${ssh_home}/authorized_keys"
+    chmod 600 "${ssh_home}/authorized_keys"
   fi
 }
 
@@ -735,7 +981,7 @@ cc_terminate_self() {
         cc_log "terminate ok via runpodctl attempt=${attempt}"
         return 0
       fi
-      cc_log "runpodctl failed attempt=${attempt}: ${ctl}"
+      cc_log "runpodctl failed attempt=${attempt}: $(cc_redact_oneline "$ctl")"
     fi
     if cc_rest DELETE "/pods/${RUNPOD_POD_ID}" >/dev/null; then
       cc_log "terminate ok via curl attempt=${attempt}"

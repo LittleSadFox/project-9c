@@ -328,7 +328,7 @@ Phase 0 image `climbing-coach-gpu`:
 - Python 3.12
 - `onnxruntime-gpu==1.23.2`
 - static ffmpeg 7
-- sshd, git, curl, jq
+- sshd, git, curl, jq, shellcheck
 - No PyTorch
 - No MMPose
 
@@ -345,6 +345,9 @@ AGENTS.md section 9.4 still applies.
 Before every first `pod_up`, the Runpod bot must verify the GHCR registry credential is present.
 A complete setup does not skip that check.
 The first live `gpu_tests` pod at `bd99ed3` wrote `status=failed` at clone and self-terminated.
+The second live `gpu_tests` pod at `73be826` used CUDA and then failed after a test deleted `/tmp/climbing-coach`.
+The clone dir is `/tmp/cc-src`. The wipe guard allowlists that basename under `/tmp` or a trusted `$TMPDIR`, then refuses the checkout, HOME, volume, scratch, and working directory. `$TMPDIR` inside those paths is untrusted. The remaining check-to-rm race needs `/tmp` write access on the pod.
+CI copies the repo to `/tmp/cc-src` and runs the `gpu_tests` pytest selection from there.
 `allowedCudaVersions` is opt-in via `CC_ALLOWED_CUDA` (unset by default). The image CUDA ≥12.8 guard is the real floor.
 Do not put the account API key in the pod template or in pod env.
 

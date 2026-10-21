@@ -172,3 +172,29 @@ The first live `gpu_tests` pod at `bd99ed3` printed `Clone LittleSadFox/project-
 `pod_down` treats only HTTP 404 or `desiredStatus: TERMINATED` as gone. `EXITED` still bills disk. `wait_job` may still treat `EXITED` as an early job exit, then `pod_down` must see 404 or `TERMINATED`.
 
 See `TROUBLESHOOTING_LOG.md` for the allowedCudaVersions 500 and the clone failure.
+
+## 2026-10-21 — second live gpu_tests deleted the checkout
+
+The second live `gpu_tests` pod at `73be826` used an RTX 4090, driver 595.91.07, and CUDA 13.2. `CUDAExecutionProvider` was in use. Pytest reported 82 passed, 28 failed, and 1 skipped. The run folder is `s3://wguvx2347m/runs/cc-gpu_tests-73be8269-20261021T134455Z/`.
+
+`test_run_job_logs_redacted_clone_stderr` ran the real `run_job.sh`. The test helper cleared `CC_*`, so `CC_SRC_DIR` was empty. `SRC` then defaulted to `/tmp/climbing-coach`. The script ran `rm -rf "$SRC"` and deleted the live checkout. Later tests that read repo files failed.
+
+Tests now default `CC_SRC_DIR` and `CC_LIBRARY_DIR` under pytest `tmp_path`.
+The default clone dir is `/tmp/cc-src`.
+`run_job.sh` only removes a resolved path whose basename matches `cc-src`, whose parent is exactly `/tmp` or a trusted `$TMPDIR`, and that is not a symlink or a live checkout, volume, scratch, HOME, or working-directory path.
+`$TMPDIR` is untrusted when it resolves inside the volume, scratch, repo, or HOME.
+A wipe refusal also goes to `log.txt`.
+The remaining check-to-rm race needs `/tmp` write access on the pod.
+CI copies the repo to `/tmp/cc-src` and runs the `gpu_tests` pytest selection from there.
+
+`wait_job` did not see `status=failed` from S3. `aws s3 cp ... -` returned `SignatureDoesNotMatch` on all four retries. `aws s3api get-object` with the same profile worked on the first try. The wait ended when the pod returned 404.
+
+`cc_s3_cp_stdout` now uses `aws s3api get-object` into a temp file.
+It retries 403 and `SignatureDoesNotMatch`.
+It prints one summary line per poll with the error code and key.
+`wait_job` prints `metrics.json` with `jq -c`.
+
+The GPU image now includes `shellcheck`.
+`AGENTS.md` and `coding_plan.md` do not name the clone dir, so they stay unchanged.
+
+See `TROUBLESHOOTING_LOG.md`.

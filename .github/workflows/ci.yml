@@ -138,3 +138,45 @@ jobs:
         if: runner.os == 'macOS' && hashFiles('frontend/e2e/**/*') != ''
         working-directory: frontend
         run: npx playwright test --project=webkit
+
+  pod-layout:
+    name: pod-layout /tmp/cc-src
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+            backend/requirements-nodeps.txt
+
+      - name: Install Python pins
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -r backend/requirements.txt
+          python -m pip install -r backend/requirements-dev.txt
+          python -m pip install --no-deps -r backend/requirements-nodeps.txt
+
+      - name: Install shellcheck
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+
+      - name: Pytest gpu_tests selection from /tmp/cc-src
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/cc-src
+          cp -a "$GITHUB_WORKSPACE" /tmp/cc-src
+          cd /tmp/cc-src
+          while IFS= read -r key; do
+            unset "$key"
+          done < <(env | awk -F= '/^(CC_|RUNPOD_)/ {print $1}')
+          pytest backend/tests -m "not macos" --tb=short

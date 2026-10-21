@@ -21,10 +21,15 @@ cc_require_job_or_interactive
 cc_setup_ssh
 
 # Fresh host keys on every boot. The image must not ship any.
-rm -f /etc/ssh/ssh_host_*
-ssh-keygen -A
-if [[ -x /usr/sbin/sshd ]]; then
-  /usr/sbin/sshd
+# CC_SSH_DIR is a test-only override. On the pod it stays unset.
+# A non-/etc/ssh value wipes keys in that dir and skips sshd.
+ssh_dir="${CC_SSH_DIR:-/etc/ssh}"
+rm -f "${ssh_dir}"/ssh_host_*
+if [[ "$ssh_dir" == "/etc/ssh" ]]; then
+  ssh-keygen -A
+  if [[ -x /usr/sbin/sshd ]]; then
+    /usr/sbin/sshd
+  fi
 fi
 
 if [[ -n "${CC_JOB_ID:-}" ]]; then
