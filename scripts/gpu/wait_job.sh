@@ -18,7 +18,8 @@ DRY_RUN=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --pod-id)
-      POD_ID="${2:-}"
+      cc_require_optarg "$1" "${2:-}"
+      POD_ID="$2"
       shift 2
       ;;
     --dry-run)
@@ -57,20 +58,23 @@ resolve_ttl() {
   if [[ "$DRY_RUN" == "1" ]]; then
     cc_fail "CC_TTL_S is required for wait_job. It will not default to 3600."
   fi
-  local body ttl log
+  local body ttl log tmp
   if [[ -n "$POD_ID" ]]; then
-    if body="$(cc_rest GET "/pods/${POD_ID}")"; then
+    tmp="$(mktemp)"
+    if cc_rest GET "/pods/${POD_ID}" >"$tmp"; then
+      body="$(cat "$tmp")"
+      rm -f "$tmp"
       ttl="$(cc_ttl_from_pod_body "$body")"
       if [[ -n "$ttl" ]]; then
         CC_TTL_S="$ttl"
         export CC_TTL_S
         return 0
       fi
+    else
+      rm -f "$tmp"
     fi
   fi
-  command -v aws >/dev/null 2>&1 || cc_fail "CC_TTL_S is required for wait_job. It will not default to 3600."
-  # shellcheck disable=SC2046
-  if log="$(aws s3 cp "s3://${VOLUME}/runs/${JOB_ID}/log.txt" - --region "$REGION" --endpoint-url "$ENDPOINT" $(cc_aws_args) 2>/dev/null)"; then
+  if log="$(cc_s3_cp_stdout "s3://${VOLUME}/runs/${JOB_ID}/log.txt" "$REGION" "$ENDPOINT")"; then
     ttl="$(printf '%s\n' "$log" | sed -n 's/^ttl_s=//p' | head -n 1)"
     if [[ -n "$ttl" ]]; then
       CC_TTL_S="$ttl"
@@ -104,48 +108,23 @@ fi
 command -v aws >/dev/null 2>&1 || cc_fail "Install AWS CLI v2. wait_job.sh reads the volume through the S3 API."
 
 aws_cp_status() {
-  local err
-  err="$(mktemp)"
-  # shellcheck disable=SC2046
-  if status="$(aws s3 cp "s3://${VOLUME}/${KEY}" - --region "$REGION" --endpoint-url "$ENDPOINT" $(cc_aws_args) 2>"$err")"; then
-    rm -f "$err"
-    printf '%s' "$status" | tr -d '[:space:]'
+  local raw
+  if raw="$(cc_s3_cp_stdout "s3://${VOLUME}/${KEY}" "$REGION" "$ENDPOINT")"; then
+    printf '%s' "$raw" | tr -d '[:space:]'
     return 0
   fi
-  if grep -qiE 'NoSuchKey|Not Found|404' "$err"; then
-    rm -f "$err"
-    return 1
-  fi
-  echo "ERROR: aws s3 cp failed for s3://${VOLUME}/${KEY}." >&2
-  cat "$err" >&2 || true
-  rm -f "$err"
   return 1
 }
 
+aws_cp_metrics() {
+  cc_s3_cp_stdout "s3://${VOLUME}/runs/${JOB_ID}/metrics.json" "$REGION" "$ENDPOINT" || true
+}
+
 pod_gone() {
-  local body=""
   if [[ -z "$POD_ID" ]]; then
     return 1
   fi
-  if body="$(cc_rest GET "/pods/${POD_ID}")"; then
-    local desired
-    desired="$(jq -r '.desiredStatus // .status // empty' <<<"$body")"
-    case "$desired" in
-      EXITED|TERMINATED|DEAD)
-        echo "$desired"
-        return 0
-        ;;
-      *)
-        return 1
-        ;;
-    esac
-  fi
-  if [[ "${CC_LAST_HTTP_CODE:-}" == "404" ]]; then
-    echo "missing"
-    return 0
-  fi
-  echo "ERROR: pod lookup HTTP ${CC_LAST_HTTP_CODE:-unknown}." >&2
-  return 1
+  cc_pod_gone "$POD_ID"
 }
 
 finish_wait() {
@@ -166,8 +145,14 @@ while (( SECONDS < deadline )); do
   if status="$(aws_cp_status)"; then
     echo "status=${status}"
     case "$status" in
-      passed) finish_wait 0 ;;
-      failed) finish_wait 1 ;;
+      passed)
+        aws_cp_metrics >/dev/null
+        finish_wait 0
+        ;;
+      failed)
+        aws_cp_metrics >/dev/null
+        finish_wait 1
+        ;;
       running|"") ;;
       *) echo "Unknown status ${status}" ;;
     esac

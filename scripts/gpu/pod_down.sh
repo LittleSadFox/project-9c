@@ -61,14 +61,9 @@ fi
 attempt=0
 while [[ "$attempt" -lt 8 ]]; do
   attempt=$((attempt + 1))
-  if cc_rest GET "/pods/${POD_ID}" >/dev/null; then
-    if (( delay > 0 )); then
-      sleep "$delay"
-    fi
-    continue
-  fi
-  if [[ "${CC_LAST_HTTP_CODE:-}" == "404" ]]; then
+  if gone="$(cc_pod_gone "$POD_ID")"; then
     echo "terminated=${POD_ID}"
+    echo "pod_state=${gone}"
     exit 0
   fi
   if (( delay > 0 )); then

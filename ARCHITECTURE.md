@@ -344,8 +344,8 @@ Section 2.2 setup is complete.
 AGENTS.md section 9.4 still applies.
 Before every first `pod_up`, the Runpod bot must verify the GHCR registry credential is present.
 A complete setup does not skip that check.
-The first live `gpu_tests` pod waits on this pull request merging and on green CI plus a green GPU image build.
-After that, the Runpod bot runs it.
+The first live `gpu_tests` pod at `bd99ed3` wrote `status=failed` at clone and self-terminated.
+`allowedCudaVersions` is opt-in via `CC_ALLOWED_CUDA` (unset by default). The image CUDA ≥12.8 guard is the real floor.
 Do not put the account API key in the pod template or in pod env.
 
 The Docker files for `climbing-coach-train` land in the Phase 6 todo.

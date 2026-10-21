@@ -177,11 +177,7 @@ def test_pod_up_dry_run_sets_ttl_and_secret_refs() -> None:
     assert payload["dataCenterIds"] == ["EU-RO-1"]
     assert payload["containerRegistryAuthId"] == "cmvhzigy8002b13z5y84jqc73"
     assert payload["imageName"] == "ghcr.io/littlesadfox/climbing-coach-gpu:latest"
-    cuda = payload["allowedCudaVersions"]
-    assert isinstance(cuda, list)
-    assert cuda == ["12.8", "12.9", "13.0"]
-    assert "13.1" not in cuda
-    assert "13.2" not in cuda
+    assert "allowedCudaVersions" not in payload
     gpus = payload["gpuTypeIds"]
     assert isinstance(gpus, list)
     for name in EXPECTED_GPUS:
@@ -617,9 +613,188 @@ def test_early_cleanup_keeps_passed_status(tmp_path: Path) -> None:
 def test_lib_curl_calls_set_max_time() -> None:
     text = LIB.read_text(encoding="utf-8")
     assert text.count("--max-time") >= 3
-    assert '"13.1"' not in text
-    assert '"13.2"' not in text
+    assert "cc_run_timeout 20 runpodctl" in text
     assert "drop the field" in text
+
+
+def test_pod_up_omits_allowed_cuda_by_default() -> None:
+    result = _run(
+        [str(POD_UP), "--job", "gpu_tests", "--ref", SHA40, "--dry-run"],
+    )
+    assert result.returncode == 0, result.stderr
+    payload = _payload(result.stdout)
+    assert "allowedCudaVersions" not in payload
+
+
+def test_pod_up_allowed_cuda_opt_in() -> None:
+    result = _run(
+        [str(POD_UP), "--job", "gpu_tests", "--ref", SHA40, "--dry-run"],
+        env={"CC_ALLOWED_CUDA": "12.8,12.9,13.0"},
+    )
+    assert result.returncode == 0, result.stderr
+    payload = _payload(result.stdout)
+    assert payload["allowedCudaVersions"] == ["12.8", "12.9", "13.0"]
+
+
+def test_pod_up_missing_flag_value_does_not_swallow_next_flag() -> None:
+    missing_job = _run([str(POD_UP), "--job", "--ref", SHA40, "--dry-run"])
+    assert missing_job.returncode != 0
+    assert "--job requires a value" in missing_job.stderr
+    missing_ref = _run([str(POD_UP), "--job", "gpu_tests", "--ref", "--dry-run"])
+    assert missing_ref.returncode != 0
+    assert "--ref requires a value" in missing_ref.stderr
+    missing_ttl = _run(
+        [str(POD_UP), "--job", "gpu_tests", "--ref", SHA40, "--ttl", "--dry-run"],
+    )
+    assert missing_ttl.returncode != 0
+    assert "--ttl requires a value" in missing_ttl.stderr
+    missing_gpu = _run(
+        [str(POD_UP), "--job", "gpu_tests", "--ref", SHA40, "--gpu", "--spot", "--dry-run"],
+    )
+    assert missing_gpu.returncode != 0
+    assert "--gpu requires a value" in missing_gpu.stderr
+
+
+def test_pod_gone_detects_404(tmp_path: Path) -> None:
+    _fake_curl(tmp_path, "404", '{"error":"not found"}')
+    result = _run(
+        ["bash", "-c", f"source {LIB} && cc_pod_gone pod-abc"],
+        env={"RUNPOD_API_KEY": "broken-key"},
+        bin_dir=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "missing" in result.stdout
+    assert "unknown" not in result.stderr
+
+
+def test_pod_gone_detects_terminated(tmp_path: Path) -> None:
+    _fake_curl(tmp_path, "200", '{"id":"pod-abc","desiredStatus":"TERMINATED"}')
+    result = _run(
+        ["bash", "-c", f"source {LIB} && cc_pod_gone pod-abc"],
+        env={"RUNPOD_API_KEY": "ok-key"},
+        bin_dir=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "TERMINATED" in result.stdout
+
+
+def test_s3_cp_retries_signature_mismatch(tmp_path: Path) -> None:
+    aws = tmp_path / "aws"
+    state = tmp_path / "aws-state"
+    aws.write_text(
+        f"""#!/usr/bin/env bash
+n=0
+if [[ -f "{state}" ]]; then
+  n="$(cat "{state}")"
+fi
+n=$((n + 1))
+printf '%s' "$n" > "{state}"
+if [[ "$n" -lt 3 ]]; then
+  echo "SignatureDoesNotMatch" >&2
+  exit 1
+fi
+printf 'passed\\n'
+exit 0
+""",
+        encoding="utf-8",
+    )
+    aws.chmod(0o755)
+    result = _run(
+        [
+            "bash",
+            "-c",
+            f"source {LIB} && cc_s3_cp_stdout s3://vol/runs/job-1/status EU-RO-1 https://s3api-eu-ro-1.runpod.io",
+        ],
+        bin_dir=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "passed" in result.stdout
+    assert state.read_text(encoding="utf-8") == "3"
+
+
+def test_run_job_logs_redacted_clone_stderr(tmp_path: Path) -> None:
+    token = "secret-repo-token-value"
+    git = tmp_path / "git"
+    git.write_text(
+        f"""#!/usr/bin/env bash
+echo "fatal: could not read Username for https://github.com with {token}" >&2
+exit 1
+""",
+        encoding="utf-8",
+    )
+    git.chmod(0o755)
+    result = _run(
+        [str(RUN_JOB)],
+        env={
+            "CC_VOLUME_DIR": str(tmp_path / "vol"),
+            "CC_JOB": "gpu_tests",
+            "CC_GIT_REF": SHA40,
+            "CC_JOB_ID": "job-clone",
+            "CC_TTL_S": "60",
+            "CC_REPO_TOKEN": token,
+        },
+        bin_dir=tmp_path,
+    )
+    assert result.returncode != 0
+    log = tmp_path / "vol" / "runs" / "job-clone" / "log.txt"
+    assert log.is_file()
+    text = log.read_text(encoding="utf-8")
+    assert token not in text
+    assert "REDACTED" in text
+    assert "fatal:" in text
+
+
+def test_interactive_sigterm_is_stopped_not_failed(tmp_path: Path) -> None:
+    result = _run(
+        [
+            "bash",
+            "-c",
+            f"source {LIB} && cc_early_cleanup",
+        ],
+        env={
+            "CC_VOLUME_DIR": str(tmp_path),
+            "CC_JOB_ID": "job-int",
+            "CC_INTERACTIVE": "1",
+            "CC_INTERACTIVE_READY": "1",
+        },
+    )
+    status = tmp_path / "runs" / "job-int" / "status"
+    assert status.is_file()
+    assert status.read_text(encoding="utf-8").strip() == "stopped"
+    assert result.returncode == 0
+
+
+def test_failed_status_rewrite_does_not_ping_webhook(tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs" / "job-fail"
+    run_dir.mkdir(parents=True)
+    (run_dir / "status").write_text("failed\n", encoding="utf-8")
+    hits = tmp_path / "webhook.log"
+    curl = tmp_path / "curl"
+    curl.write_text(
+        f"""#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "{hits}"
+printf '200'
+exit 0
+""",
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+    result = _run(
+        [
+            "bash",
+            "-c",
+            f"source {LIB} && cc_early_cleanup",
+        ],
+        env={
+            "CC_VOLUME_DIR": str(tmp_path),
+            "CC_JOB_ID": "job-fail",
+            "CC_WEBHOOK_URL": "https://example.invalid/hook",
+        },
+        bin_dir=tmp_path,
+    )
+    assert result.returncode == 0
+    assert run_dir.joinpath("status").read_text(encoding="utf-8").strip() == "failed"
+    assert not hits.exists()
 
 
 def test_pod_ls_exits_3_when_pods_exist(tmp_path: Path) -> None:

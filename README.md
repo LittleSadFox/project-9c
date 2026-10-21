@@ -157,8 +157,8 @@ Section 2.2 setup is complete.
 AGENTS.md section 9.4 still applies.
 Before every first `pod_up`, the Runpod bot must verify the GHCR registry credential is present.
 A complete setup does not skip that check.
-The first live `scripts/gpu/pod_up.sh --job gpu_tests` waits on this pull request merging and on green CI plus a green GPU image build.
-After that, the Runpod bot runs it.
+The first live `gpu_tests` pod at `bd99ed3` failed at clone, wrote `status=failed`, and self-terminated.
+`allowedCudaVersions` is opt-in via `CC_ALLOWED_CUDA` (unset by default). The image CUDA ≥12.8 guard is the real floor.
 
 Phase 0 needs only a small sample upload.
 One or two videos are enough.
@@ -237,6 +237,7 @@ Do not invent the values.
 | `CC_GPU_IMAGE` | GHCR image name when the template does not set it |
 | `CC_INTERACTIVE` | Set to `1` on interactive pods |
 | `CC_WAIT_TIMEOUT_S` | `wait_job.sh` timeout in seconds. Default is `CC_TTL_S` plus 300 |
+| `CC_ALLOWED_CUDA` | Optional `allowedCudaVersions` CSV or JSON. Unset by default; the image CUDA ≥12.8 guard is the real floor |
 | `CC_WAIT_POLL_S` | `wait_job.sh` poll interval in seconds. Default `15` |
 | `CC_AWS_PROFILE` | Optional AWS CLI profile for the volume S3 API |
 
@@ -293,9 +294,8 @@ Section 2.2 setup is complete.
 AGENTS.md section 9.4 still applies.
 Before every first `pod_up`, the Runpod bot must verify the GHCR registry credential is present.
 A complete setup does not skip that check.
-The first live `pod_up.sh --job gpu_tests` waits on this pull request merging and on green CI plus a green GPU image build.
-After that, the Runpod bot runs it.
-This repo change does not start a pod.
+The first live `gpu_tests` pod at `bd99ed3` failed at clone and self-terminated.
+This follow-up does not start a pod. The Runpod bot retries after merge and green CI.
 
 - [ ] `pod_up.sh --job gpu_tests` clones the commit and runs the suite with real ffmpeg.
 - [ ] A tiny ONNX model runs on `CUDAExecutionProvider`.

@@ -58,14 +58,24 @@ cleanup() {
   CLEANING=1
   set +e
   if [[ "$FINISHED" != "1" ]]; then
-    STATUS="failed"
-    mkdir -p "$RUN_DIR/artifacts" 2>/dev/null
-    write_status failed
-    if [[ ! -f "$RUN_DIR/metrics.json" ]]; then
-      jq -n --arg job "${CC_JOB:-unknown}" --arg err "run_job.sh exited before the job finished" \
-        '{job: $job, status: "failed", error: $err}' >"$RUN_DIR/metrics.json"
+    local existing=""
+    if [[ -f "$RUN_DIR/status" ]]; then
+      existing="$(tr -d '[:space:]' <"$RUN_DIR/status")"
     fi
-    ping_webhook failed
+    if [[ "$existing" == "failed" ]]; then
+      STATUS="failed"
+    elif [[ "$existing" == "passed" ]]; then
+      STATUS="passed"
+    else
+      STATUS="failed"
+      mkdir -p "$RUN_DIR/artifacts" 2>/dev/null
+      write_status failed
+      if [[ ! -f "$RUN_DIR/metrics.json" ]]; then
+        jq -n --arg job "${CC_JOB:-unknown}" --arg err "run_job.sh exited before the job finished" \
+          '{job: $job, status: "failed", error: $err}' >"$RUN_DIR/metrics.json"
+      fi
+      ping_webhook failed
+    fi
   fi
   cc_terminate_self
   if [[ "$FINISHED" != "1" ]]; then
@@ -121,11 +131,11 @@ if [[ "${CC_RUN_JOB_READY:-}" != "1" ]]; then
   echo "Clone LittleSadFox/project-9c at ${CC_GIT_REF}" | tee -a "$RUN_DIR/log.txt"
   rm -rf "$SRC"
   mkdir -p "$SRC"
-  git init "$SRC" >/dev/null
-  git -C "$SRC" remote add origin "https://github.com/LittleSadFox/project-9c.git"
+  cc_run_logged git init "$SRC"
+  cc_run_logged git -C "$SRC" remote add origin "https://github.com/LittleSadFox/project-9c.git"
   cc_git_auth_setup
-  git -C "$SRC" fetch --depth 1 origin "$CC_GIT_REF"
-  git -C "$SRC" checkout --detach FETCH_HEAD
+  cc_run_logged git -C "$SRC" fetch --depth 1 origin "$CC_GIT_REF"
+  cc_run_logged git -C "$SRC" checkout --detach FETCH_HEAD
   cc_git_auth_clear
   export CC_RUN_JOB_READY=1
   export CC_SRC_DIR="$SRC"
@@ -148,9 +158,9 @@ else
 fi
 
 echo "Install pins from cache" | tee -a "$RUN_DIR/log.txt"
-"$PY" -m pip install --cache-dir "$VOLUME/cache/pip" -r "$SRC/backend/requirements-gpu.txt"
-"$PY" -m pip install --cache-dir "$VOLUME/cache/pip" -r "$SRC/backend/requirements-dev.txt"
-"$PY" -m pip install --cache-dir "$VOLUME/cache/pip" --no-deps -r "$SRC/backend/requirements-nodeps.txt"
+cc_run_logged "$PY" -m pip install --cache-dir "$VOLUME/cache/pip" -r "$SRC/backend/requirements-gpu.txt"
+cc_run_logged "$PY" -m pip install --cache-dir "$VOLUME/cache/pip" -r "$SRC/backend/requirements-dev.txt"
+cc_run_logged "$PY" -m pip install --cache-dir "$VOLUME/cache/pip" --no-deps -r "$SRC/backend/requirements-nodeps.txt"
 
 echo "Run ml.jobs ${CC_JOB}" | tee -a "$RUN_DIR/log.txt"
 set +e

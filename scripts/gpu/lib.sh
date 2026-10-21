@@ -108,10 +108,19 @@ cc_default_gpu_csv() {
 }
 
 cc_allowed_cuda_versions() {
-  # Live Runpod POST /pods enum is 13.0, 12.9, … 12.0, 11.8. 13.1/13.2 return 400.
-  # The image's CUDA driver guard (>=12.8, fail closed) is the real floor.
-  # If this filter excludes 13.x hosts in practice, drop the field.
-  printf '%s' '["12.8","12.9","13.0"]'
+  # Opt-in via CC_ALLOWED_CUDA (CSV or JSON). Unset by default.
+  # Sending allowedCudaVersions made the live API return 500
+  # "no instances available" on every listed GPU, even with stock showing.
+  # The image CUDA driver guard (>=12.8, fail closed) is the real floor.
+  # If a filter is needed again and it excludes 13.x hosts, drop the field.
+  local raw="${CC_ALLOWED_CUDA:-}"
+  [[ -n "$raw" ]] || return 1
+  if [[ "$raw" == "["* ]]; then
+    printf '%s' "$raw"
+    return 0
+  fi
+  command -v jq >/dev/null 2>&1 || cc_fail "Install jq. The pod scripts need it."
+  jq -nc --arg s "$raw" '$s | split(",") | map(gsub("^ +| +$";"")) | map(select(length > 0))'
 }
 
 cc_load_defaults() {
@@ -200,6 +209,8 @@ cc_build_pod_payload() {
     interruptible=true
   fi
   local dc="${CC_RUNPOD_DATACENTER:-EU-RO-1}"
+  local cuda_json=""
+  cuda_json="$(cc_allowed_cuda_versions)" || cuda_json=""
 
   local payload
   payload="$(
@@ -213,7 +224,7 @@ cc_build_pod_payload() {
       --arg image "${CC_GPU_IMAGE:-}" \
       --arg dc "$dc" \
       --arg registry "${CC_RUNPOD_REGISTRY_AUTH_ID:-}" \
-      --argjson cuda "$(cc_allowed_cuda_versions)" \
+      --arg cuda "$cuda_json" \
       --argjson disk 20 \
       '{
         name: $name,
@@ -222,7 +233,6 @@ cc_build_pod_payload() {
         gpuCount: 1,
         gpuTypePriority: "custom",
         gpuTypeIds: ($gpus | split(",") | map(gsub("^ +| +$";""))),
-        allowedCudaVersions: $cuda,
         containerDiskInGb: $disk,
         volumeInGb: 0,
         volumeMountPath: "/workspace",
@@ -234,7 +244,8 @@ cc_build_pod_payload() {
       + (if $template != "" then {templateId: $template} else {} end)
       + (if $volume != "" then {networkVolumeId: $volume} else {} end)
       + (if $image != "" then {imageName: $image} else {} end)
-      + (if $registry != "" then {containerRegistryAuthId: $registry} else {} end)'
+      + (if $registry != "" then {containerRegistryAuthId: $registry} else {} end)
+      + (if $cuda != "" then {allowedCudaVersions: ($cuda | fromjson)} else {} end)'
   )"
   cc_assert_no_account_key "$payload"
   if ! jq -e '.env.CC_TTL_S' >/dev/null <<<"$payload"; then
@@ -309,7 +320,14 @@ cc_early_cleanup() {
   if [[ -f "${run_dir}/status" ]]; then
     existing="$(tr -d '[:space:]' <"${run_dir}/status")"
   fi
-  if [[ "$existing" == "passed" ]]; then
+  if [[ "${CC_INTERACTIVE:-}" == "1" && "${CC_INTERACTIVE_READY:-}" == "1" ]]; then
+    if [[ "$existing" != "passed" && "$existing" != "failed" && "$existing" != "stopped" ]]; then
+      printf 'stopped\n' >"${run_dir}/status"
+    fi
+    cc_terminate_self
+    return 0
+  fi
+  if [[ "$existing" == "passed" || "$existing" == "failed" || "$existing" == "stopped" ]]; then
     cc_terminate_self
     return 0
   fi
@@ -330,6 +348,118 @@ cc_early_cleanup() {
 cc_valid_pod_id() {
   local id="$1"
   [[ "$id" =~ ^[A-Za-z0-9_-]{4,64}$ ]]
+}
+
+cc_require_optarg() {
+  local flag="$1"
+  local value="${2:-}"
+  if [[ -z "$value" || "$value" == --* ]]; then
+    cc_fail "${flag} requires a value."
+  fi
+}
+
+cc_pod_is_terminated_status() {
+  case "${1:-}" in
+    EXITED|TERMINATED|DEAD) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+cc_pod_gone() {
+  local pod_id="$1"
+  local tmp desired
+  [[ -n "$pod_id" ]] || return 1
+  tmp="$(mktemp)"
+  if cc_rest GET "/pods/${pod_id}" >"$tmp"; then
+    desired="$(jq -r '.desiredStatus // .status // empty' <"$tmp")"
+    rm -f "$tmp"
+    if cc_pod_is_terminated_status "$desired"; then
+      printf '%s\n' "$desired"
+      return 0
+    fi
+    return 1
+  fi
+  rm -f "$tmp"
+  if [[ "${CC_LAST_HTTP_CODE:-}" == "404" ]]; then
+    echo "missing"
+    return 0
+  fi
+  echo "ERROR: pod lookup HTTP ${CC_LAST_HTTP_CODE:-unknown}." >&2
+  return 1
+}
+
+cc_redact_text() {
+  local text="$1"
+  if [[ -n "${CC_REPO_TOKEN:-}" ]]; then
+    text="${text//${CC_REPO_TOKEN}/REDACTED}"
+  fi
+  if [[ -n "${GIT_CONFIG_VALUE_0:-}" ]]; then
+    text="${text//${GIT_CONFIG_VALUE_0}/AUTHORIZATION: basic REDACTED}"
+  fi
+  printf '%s' "$text"
+}
+
+cc_run_logged() {
+  local err ec redacted
+  err="$(mktemp)"
+  set +e
+  "$@" >>"${CC_RUN_LOG:-/dev/null}" 2>"$err"
+  ec=$?
+  set -e
+  if [[ -s "$err" ]]; then
+    redacted="$(cc_redact_text "$(cat "$err")")"
+    printf '%s\n' "$redacted" | tee -a "${CC_RUN_LOG:-/dev/null}" >&2
+  fi
+  rm -f "$err"
+  return "$ec"
+}
+
+cc_run_timeout() {
+  local secs="$1"
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout --signal=KILL "$secs" "$@"
+    return
+  fi
+  "$@"
+}
+
+cc_s3_cp_stdout() {
+  local uri="$1"
+  local region="$2"
+  local endpoint="$3"
+  local err attempt delay out
+  command -v aws >/dev/null 2>&1 || cc_fail "Install AWS CLI v2."
+  err="$(mktemp)"
+  for attempt in 1 2 3 4; do
+    # shellcheck disable=SC2046
+    if out="$(aws s3 cp "$uri" - --region "$region" --endpoint-url "$endpoint" $(cc_aws_args) 2>"$err")"; then
+      rm -f "$err"
+      printf '%s' "$out"
+      return 0
+    fi
+    if grep -qiE 'NoSuchKey|Not Found|404' "$err"; then
+      rm -f "$err"
+      return 1
+    fi
+    if grep -qiE 'SignatureDoesNotMatch|403|AccessDenied' "$err"; then
+      delay=$((attempt * 2))
+      echo "S3 transient error attempt=${attempt}; sleep ${delay}s" >&2
+      cat "$err" >&2 || true
+      if [[ "${CC_TERMINATE_NO_SLEEP:-}" != "1" ]]; then
+        sleep "$delay"
+      fi
+      continue
+    fi
+    echo "ERROR: aws s3 cp failed for ${uri}." >&2
+    cat "$err" >&2 || true
+    rm -f "$err"
+    return 1
+  done
+  echo "ERROR: aws s3 cp failed for ${uri} after retries." >&2
+  cat "$err" >&2 || true
+  rm -f "$err"
+  return 1
 }
 
 cc_rest() {
@@ -460,8 +590,8 @@ cc_terminate_self() {
   local attempt delay
   for attempt in 1 2 3 4; do
     if command -v runpodctl >/dev/null 2>&1; then
-      if runpodctl remove pod "$RUNPOD_POD_ID" >/dev/null 2>&1 \
-        || runpodctl pod delete "$RUNPOD_POD_ID" >/dev/null 2>&1; then
+      if cc_run_timeout 20 runpodctl remove pod "$RUNPOD_POD_ID" >/dev/null 2>&1 \
+        || cc_run_timeout 20 runpodctl pod delete "$RUNPOD_POD_ID" >/dev/null 2>&1; then
         cc_log "terminate ok via runpodctl attempt=${attempt}"
         return 0
       fi

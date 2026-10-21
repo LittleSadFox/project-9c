@@ -31,11 +31,13 @@ GPU_CSV=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --job)
-      JOB="${2:-}"
+      cc_require_optarg "$1" "${2:-}"
+      JOB="$2"
       shift 2
       ;;
     --ref)
-      REF="${2:-}"
+      cc_require_optarg "$1" "${2:-}"
+      REF="$2"
       shift 2
       ;;
     --interactive)
@@ -47,11 +49,13 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --ttl)
-      TTL_RAW="${2:-}"
+      cc_require_optarg "$1" "${2:-}"
+      TTL_RAW="$2"
       shift 2
       ;;
     --gpu)
-      GPU_CSV="${2:-}"
+      cc_require_optarg "$1" "${2:-}"
+      GPU_CSV="$2"
       shift 2
       ;;
     --dry-run)

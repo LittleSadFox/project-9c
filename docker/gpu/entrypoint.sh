@@ -42,6 +42,7 @@ if [[ -n "${CC_JOB:-}" ]]; then
 fi
 
 echo "Interactive pod. SSH is up. TTL is ${CC_TTL_S}s."
+export CC_INTERACTIVE_READY=1
 while true; do
   sleep 3600
 done
