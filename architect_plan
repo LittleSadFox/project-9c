@@ -1,0 +1,170 @@
+---
+name: Climbing Coach App Plan
+overview: "Build Climbing Coach as a local web app (FastAPI + React with the house Liquid Glass kit) that runs on an Apple Silicon Mac: import bouldering videos, extract 26-keypoint skeletons with RTMPose, auto-detect start/fall and cut attempts, compare two attempts with movement-matched (DTW) alignment, rate attempts, and log every user correction so the detectors learn over time."
+todos:
+  - id: phase0-agents-md
+    content: Create /home/hal/docker/climbing_coach/AGENTS.md (rules, stack, constraints, data locations incl. the Mac deviation) and present it for review before any code
+    status: pending
+  - id: phase0-docs-skeleton
+    content: Add README, ARCHITECTURE (mermaid), DATA_MODEL, TROUBLESHOOTING_LOG, DLOG, errors/; repo layout; config layer; SQLite migrations; /health; Liquid Glass kit copy; dev scripts; model download script
+    status: pending
+  - id: phase1-library-import
+    content: Library CRUD (boulders, sessions, videos), import with ffprobe metadata, rotation handling, H.264 proxy, thumbnails, job queue with progress
+    status: pending
+  - id: phase1-pose-playback
+    content: RtmlibEstimator (BodyWithFeet + PoseTracker, CoreML/CPU), climber selection, Parquet pose tracks, Player with canvas skeleton overlay and skeleton-only view
+    status: pending
+  - id: phase1-manual-cut-ratings
+    content: Timeline with in/out handles and frame stepping, ffmpeg clip creation, attempt record with outcome, proximity and exertion sliders, notes
+    status: pending
+  - id: phase2-events-autocut
+    content: Rule-based start/fall/top detectors on scene marks (floor line, top zone), cut proposals, review UI, feedback logging of every adjustment
+    status: pending
+  - id: phase3-compare
+    content: Normalization, move segmentation, DTW with band and anchors, Compare page (side-by-side, overlay, movement-matched scrubbing, anchor editor), posture-difference heat and ranked list, rendered comparison MP4
+    status: pending
+  - id: phase4-learning-loop
+    content: Dataset builders from feedback_events, event-detector trainer and eval, alignment tuning, model registry and activation UI, attempt features vs ratings analytics
+    status: pending
+  - id: phase5-mac-packaging
+    content: run_mac.sh launcher, Settings page, pywebview window, PyInstaller .app, HIG/accessibility pass, performance tuning
+    status: pending
+  - id: phase6-pose-finetune
+    content: COCO keypoint export, MMPose fine-tune of RTMPose Halpe26 in Docker on hal GPUs, ONNX export, A/B evaluation in the app
+    status: pending
+isProject: false
+---
+
+# Climbing Coach App — Build Plan
+
+## Decisions already made
+- Delivery v1: local server + browser. A launcher starts FastAPI on `127.0.0.1` and opens the browser. A native window (pywebview/WKWebView) and a double-click `.app` come in Phase 5.
+- Pose model: RTMPose Halpe26 (26 keypoints incl. feet) via `rtmlib` (`BodyWithFeet` + `PoseTracker`, YOLOX person detector) on ONNX Runtime, CoreML EP on the Mac, CPU fallback. Pose-model fine-tuning is deferred to Phase 6; the learning loop first retrains our own small models.
+- The "RL loop" is implemented as human-in-the-loop supervised learning: every correction (cut, event label, keypoint edit, alignment anchor) is logged with the model version that produced the proposal and becomes training data.
+
+## Assumptions (stated, not asked)
+- Single user, no login. Backend binds `127.0.0.1` only.
+- Primary video source: files recorded on a phone and imported (AirDrop, Files). MOV/MP4, HEVC or H.264, any orientation. In-app webcam recording (`getUserMedia`) is optional and later.
+- Camera is fixed within one video. Two videos of the same boulder may have different camera positions; comparison uses body-relative normalization, and the overlay can use user-marked reference holds.
+- Development and tests run on `hal` (Linux x86_64, Python 3.12, Node 20) in a venv; the runtime target is the Mac. No Docker for the app (it is a standalone Mac app); Docker only for the Phase 6 MMPose trainer on hal.
+- Data on hal lives under `/data/climbing_coach/` (library, models, ffmpeg static binary), pip cache `/data/pip-cache/climbing_coach`, npm cache `/data/npm-cache`. On the Mac the library lives in `~/Library/Application Support/ClimbingCoach/` (HIG location) or a user-chosen folder; this deliberate deviation from the `/data` rule is recorded in `AGENTS.md`.
+- Python 3.11+ (onnxruntime 1.31 requires >= 3.11; the hal host has 3.12), macOS 13.3+ in practice (onnxruntime wheel), Apple Silicon only.
+- Dev ports on hal: backend 8810, Vite 8811 (confirm free at setup). Versions are pinned in `requirements.txt` / `package.json` at setup time after checking.
+- Project docs are written in ASD-STE100 per the house rule; this plan is not.
+
+## Project location and layout
+`/home/hal/docker/climbing_coach/`
+- Docs: `AGENTS.md`, `README.md`, `ARCHITECTURE.md`, `DATA_MODEL.md`, `TROUBLESHOOTING_LOG.md`, `DLOG.md`, `errors/`
+- `backend/app/`
+  - `config.py` — frozen `Settings` from env: `CC_LIBRARY_DIR`, `CC_MODELS_DIR`, `CC_FFMPEG_BIN`, `CC_PORT`, `CC_POSE_MODE` (lightweight/balanced/performance), `CC_DEVICE`
+  - `main.py` — app, `/health`, static frontend, job worker start
+  - `db.py`, `repo.py` — stdlib `sqlite3`, WAL mode, `schema_migrations` table (same pattern as `bom_builder`)
+  - `jobs.py` — in-process job queue (worker thread, SQLite `jobs` table, progress polling); no Celery/Redis
+  - `routes/` — `library.py`, `videos.py`, `attempts.py`, `pose.py`, `compare.py`, `feedback.py`, `models.py`, `jobs.py`
+  - `media/` — `ffmpeg.py` (probe, proxy transcode, frame-accurate cut, thumbnails, render), `frames.py` (frame iterator with rotation handling)
+  - `pose/` — `estimator.py` (`PoseEstimator` protocol; `RtmlibEstimator` with explicit local ONNX paths from `CC_MODELS_DIR`, never the default `~/.cache`), `climber.py` (climber selection and track continuity)
+  - `core/` — pure functions, no HTTP/SQL/file IO, tested with synthetic sequences; this is the part that gets ported to Swift later: `skeleton.py` (Halpe26 schema, edges, hip-center + torso-scale normalization, joint angles), `events.py` (start/end detectors, outcome), `cuts.py` (proposal with pre/post roll), `moves.py` (move segmentation), `align.py` (DTW with band and anchors), `diff.py` (posture differences), `features.py` (attempt features for analytics)
+  - `render/overlay.py` — server-side skeleton drawing, side-by-side and blend composer for exports
+- `backend/tests/` — pytest
+- `frontend/` — Vite + React 19 + react-router; unchanged kit copies `src/theme/liquid-glass/tokens.css`, `glass.css`, `src/components/glass.jsx` from `/home/hal/docker/style/theme`; `app.css` only on `--lg-*` tokens
+- `ml/` — `datasets/` (builders), `train/` (event detector, alignment tuning, eval), `registry/` (version manifests), `finetune_pose/` (Phase 6)
+- `scripts/` — `dev.sh`, `run_mac.sh`, `build.sh`, `download_models.py`, `package_mac.sh` (Phase 5)
+
+## Architecture
+
+```mermaid
+flowchart LR
+  subgraph browser [Browser on the Mac]
+    UI["Library, Review, Player, Compare, Models, Settings"]
+  end
+  subgraph app [FastAPI on 127.0.0.1]
+    Api[routes]
+    Jobs[job worker]
+    Pose["pose: rtmlib BodyWithFeet + PoseTracker on onnxruntime CoreML or CPU"]
+    Media["media: ffmpeg probe, proxy, cut, render"]
+    Core["core: skeleton, events, cuts, moves, align, diff, features"]
+    Repo["repo: sqlite3"]
+  end
+  subgraph store [Library folder]
+    Db[(SQLite)]
+    Files["originals, proxies, clips, thumbnails, renders"]
+    Tracks["pose tracks as Parquet"]
+    Weights["model versions"]
+  end
+  subgraph ml [ml offline]
+    Datasets[dataset builders]
+    Train["train event detector, tune alignment"]
+    Finetune["Phase 6: MMPose fine-tune on hal GPUs"]
+  end
+  UI --> Api
+  Api --> Repo --> Db
+  Api --> Jobs
+  Jobs --> Pose --> Tracks
+  Jobs --> Media --> Files
+  Api --> Core --> Tracks
+  Pose --> Weights
+  Db -. feedback log .-> Datasets --> Train --> Weights
+  Datasets --> Finetune --> Weights
+```
+
+Learning loop:
+
+```mermaid
+flowchart LR
+  Proposal["model proposal: cut, event, skeleton, alignment"] --> Review["user accepts or fine-tunes in the UI"]
+  Review --> Feedback["feedback_events: before, after, model_version"]
+  Feedback --> Dataset["dataset builders"]
+  Dataset --> Trainer["trainer + eval against held-out corrections"]
+  Trainer --> Registry["model_versions with metrics"]
+  Registry -->|"user activates in Models page"| Proposal
+```
+
+## Data model (SQLite + files; detailed in `DATA_MODEL.md`)
+- `boulders` (name, gym, grade, hold colour, sector, set date, status, notes)
+- `sessions` (date, gym, notes)
+- `videos` (boulder, session, original path, proxy path, sha256, duration, fps, size, rotation, recorded_at, status)
+- `pose_tracks` (video, model_version, Parquet path, fps, n_frames, climber track id, status); Parquet columns `frame, track_id, kpt, x, y, score` plus a bbox table
+- `pose_edits` (track, frame, kpt, x, y, kind: move / lr_swap / track_reassign / mark_bad) — deltas, raw inference is never overwritten
+- `scene_marks` (video, kind: floor_line / top_zone / start_holds / ref_points, geometry JSON, source auto/user)
+- `events` (video, frame, kind: leave_ground / start / fall / top / ground_return, source, confidence, model_version)
+- `attempts` (video, boulder, proposed start/end frame, final start/end frame, outcome send/fall/unknown, clip path, proximity 0-10, exertion 0-10, notes)
+- `comparisons` (attempt A, attempt B, warp path file, params, render path) and `alignment_anchors` (frame A, frame B, source)
+- `feedback_events` (kind, entity, before JSON, after JSON, model_version) — the unified correction log
+- `model_versions` (family pose / event / align, version, path, metrics JSON, dataset hash, active)
+- `jobs`, `schema_migrations`
+
+## How each requirement is met
+- Start detection (v1 rules in `core/events.py`): floor line estimated from ankle positions in pre-climb standing frames (user can adjust once per video); start = first frame where both feet are above the floor line for >= 0.5 s. Top zone drawn once per boulder.
+- Fall / end detection: fast downward hip velocity (normalized by body height) followed by feet back at floor level. Outcome: if hips or hands reached the top zone before the descent, "send", else "fall"; the user confirms. A controlled jump-off looks like a fall, so the top zone plus confirmation is required until the trained detector takes over.
+- Auto-cut: proposals = [start - pre-roll, end + post-roll]; review UI shows proposals over the full-video timeline with in/out handles and frame stepping; accept, adjust, reject, batch accept. Accepted cuts call ffmpeg (re-encode for frame accuracy); the clip's pose track is a slice of the parent track, no re-run.
+- Skeleton view: `<canvas>` over `<video>` synced with `requestVideoFrameCallback`; overlay mode and skeleton-only mode; server-side render for MP4 export. Imported videos get an H.264 proxy so HEVC from iPhone plays in every browser and pose runs on a downscaled copy.
+- Climber selection: all persons are tracked; default = the track with the largest vertical travel inside the wall region; the user can click the climber in a frame to fix it (logged as feedback).
+- Comparison of two attempts: body-relative normalization (hip centre, torso scale); optional similarity transform from 2-4 user-marked reference holds for overlay; side-by-side and blended overlay; movement-matched scrubbing (master timeline drives the other video through the warping path); rendered comparison MP4 for smooth playback and sharing.
+- Pacing (match movement, not time): DTW in `core/align.py` on per-frame features (normalized joints, joint angles, velocities) with a Sakoe-Chiba band; user anchors constrain the path; move segmentation in `core/moves.py` (a hand or foot goes static -> moving -> static at a new place = one move) gives move-level stats such as rest time per hold and number of moves.
+- Posture differences: per aligned frame pair, joint-angle and limb-position deltas; joints above a threshold are heat-coloured on the skeleton; a difference strip under the timeline and a ranked list ("left knee angle differs 32 deg at move 4").
+- Ratings: two sliders (proximity to success, exertion) plus outcome and notes on each attempt; `core/features.py` turns a track into an attempt feature vector; the Models page correlates features with ratings and outcome over time (Phase 4).
+- Fine-tune UIs that feed the loop: skeleton editor (drag keypoints with interpolation to neighbours, swap left/right, reassign track, mark frame bad), cut editor, event labels, alignment anchors, scene marks.
+- Learning loop v1 (`ml/`): dataset builders from `feedback_events`; event-detector trainer (per-frame features -> small temporal model, GRU or 1D CNN, trains in minutes on Mac CPU/MPS), evaluation against held-out corrections (boundary MAE in frames, attempt precision/recall), alignment feature-weight tuning from anchors; registry + activation in the UI.
+- Phase 6: corrected keypoints exported as COCO JSON; RTMPose-m Halpe26 fine-tuned with MMPose in a Docker image on hal GPUs; ONNX export back into the registry.
+
+## UI (HIG + Liquid Glass)
+- Follows [Human Interface Guidelines](https://developer.apple.com/design/human-interface-guidelines) and [Liquid Glass](https://developer.apple.com/documentation/technologyoverviews/liquid-glass) through the house kit and its rules in [DESIGN_GUIDELINES.md](/home/hal/docker/style/theme/DESIGN_GUIDELINES.md): glass only on the top bar, controls, menus and sheets; video, timelines and tables on the calm content layer; one blue primary action per view; capsules and concentric radii; one spring curve; reduced transparency, contrast and motion honoured.
+- macOS layout: glass top bar with segmented view switch (Library / Compare / Models / Settings); three-column pages (sidebar list, content, inspector). Keyboard: space, left/right frame step, J/K/L, I/O in and out points, Enter accepts a proposal. Drag-and-drop import. Progress for long jobs in the inspector.
+- Known limits: the kit is dark-only (a light token set can come later) and CSS can only emulate Liquid Glass; the real material arrives with the native iOS app.
+
+## Phases
+- Phase 0 — Docs and skeleton: `AGENTS.md` presented for review before any code (house rule), then `README.md`, `ARCHITECTURE.md` with the diagram, `DATA_MODEL.md`, logs, `errors/`; repo layout, config layer, SQLite migrations, `/health`, kit copy, empty shell UI, dev scripts, model download to `CC_MODELS_DIR`. Validate: `pytest`, `npm run build`, `curl /health`.
+- Phase 1 — Library, import, pose, playback, manual cut, ratings. Validate: run pose on 2-3 sample videos on hal and on the Mac; record fps per `CC_POSE_MODE`.
+- Phase 2 — Auto start/fall detection and auto-cut review with feedback logging. Validate: synthetic sequence tests; precision/recall on labelled videos.
+- Phase 3 — Comparison: normalization, move segmentation, DTW with anchors, Compare page, posture differences, rendered export. Validate: DTW tests (identity and time-stretched copies give monotone paths), golden tests.
+- Phase 4 — Learning loop v1 and progress analytics. Validate: end-to-end train and eval on the collected feedback; report in the Models page.
+- Phase 5 — Mac polish and packaging: `run_mac.sh` launcher, Settings page, pywebview window, PyInstaller `.app`, HIG and accessibility check, performance.
+- Phase 6 — Pose-model fine-tuning on hal (MMPose Docker, GPU) with ONNX export and A/B evaluation.
+- Phase 7 (future) — iOS: Swift app that shares the library format and the `core/` behaviour (tests as the spec), CoreML conversion; Android after.
+
+## Risks
+- Fall vs controlled jump-off is ambiguous for rules; mitigated by the top zone and user confirmation, then by the trained detector.
+- Spotters and bystanders: climber selection and track continuity on occlusion need real footage early.
+- Smooth movement-matched playback in a browser is seek-limited; scrubbing is interactive, smooth playback uses the rendered MP4.
+- `rtmlib` downloads weights to a home cache by default; the estimator must receive explicit paths under `CC_MODELS_DIR`.
+- ffmpeg is not on the hal host; a static binary goes under `/data/climbing_coach/bin`; Homebrew on the Mac; the path is configurable.
