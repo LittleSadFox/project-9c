@@ -1,0 +1,4 @@
+# Install with: pip install --no-deps -r backend/requirements-nodeps.txt
+# rtmlib 0.0.16 declares opencv-python and opencv-contrib-python.
+# This repo supplies opencv-python-headless==4.14.0.94 instead.
+rtmlib==0.0.16
