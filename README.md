@@ -154,6 +154,9 @@ The runner files are in the tree: `docker/gpu/`, `scripts/gpu/`, `ml/jobs.py`, a
 Do not start a live pod from a coding agent.
 Only the Runpod bot starts pods.
 Section 2.2 setup is complete.
+AGENTS.md section 9.4 still applies.
+Before every first `pod_up`, the Runpod bot must verify the GHCR registry credential is present.
+A complete setup does not skip that check.
 The first live `scripts/gpu/pod_up.sh --job gpu_tests` waits on this pull request merging and on green CI plus a green GPU image build.
 After that, the Runpod bot runs it.
 
@@ -287,6 +290,9 @@ Bot and CI
 Pod (after this pull request merges)
 
 Section 2.2 setup is complete.
+AGENTS.md section 9.4 still applies.
+Before every first `pod_up`, the Runpod bot must verify the GHCR registry credential is present.
+A complete setup does not skip that check.
 The first live `pod_up.sh --job gpu_tests` waits on this pull request merging and on green CI plus a green GPU image build.
 After that, the Runpod bot runs it.
 This repo change does not start a pod.
@@ -441,6 +447,7 @@ Pushes to `main` push the git sha tag and `latest` to private GHCR.
 The image is private.
 Section 2.2 setup is complete.
 The Runpod registry credential is already in place.
+AGENTS.md section 9.4 still applies: the Runpod bot must verify that credential before every first `pod_up`.
 
 ## 11. Licence
 

@@ -102,7 +102,7 @@ def test_pod_up_dry_run_sets_ttl_and_secret_refs() -> None:
 
 def test_pod_up_ttl_flag_overrides_default() -> None:
     result = _run(
-        [str(POD_UP), "--interactive", "--ttl", "10m", "--dry-run"],
+        [str(POD_UP), "--interactive", "--ref", "deadbeef", "--ttl", "10m", "--dry-run"],
     )
     assert result.returncode == 0, result.stderr
     payload = _payload(result.stdout)
@@ -229,6 +229,135 @@ def test_lib_git_auth_is_basic_x_access_token() -> None:
     text = LIB.read_text(encoding="utf-8")
     assert "x-access-token:" in text
     assert "AUTHORIZATION: basic" in text
+
+
+def _fake_curl(tmp_path: Path, status: str, body: str) -> Path:
+    script = tmp_path / "curl"
+    script.write_text(
+        f"""#!/usr/bin/env bash
+set -euo pipefail
+out=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [[ -n "$out" ]]; then
+  cat >"$out" <<'BODY'
+{body}
+BODY
+fi
+printf '%s' '{status}'
+exit 0
+""",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    return script
+
+
+def test_pod_ls_fails_on_error_object(tmp_path: Path) -> None:
+    _fake_curl(tmp_path, "200", '{"error":"unauthorized"}')
+    result = _run(
+        [str(POD_LS)],
+        env={
+            "PATH": f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}",
+            "RUNPOD_API_KEY": "broken-key",
+        },
+    )
+    assert result.returncode != 0
+    assert "no running pods" not in result.stdout
+    assert "did not return an array" in result.stderr or "unauthorized" in result.stderr
+
+
+def test_pod_down_fails_on_http_401(tmp_path: Path) -> None:
+    _fake_curl(tmp_path, "401", '{"error":"unauthorized"}')
+    result = _run(
+        [str(POD_DOWN), "pod-example"],
+        env={
+            "PATH": f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}",
+            "RUNPOD_API_KEY": "broken-key",
+        },
+    )
+    assert result.returncode != 0
+    assert "terminated=" not in result.stdout
+    assert "401" in result.stderr
+
+
+def test_pod_ls_fails_on_http_401(tmp_path: Path) -> None:
+    _fake_curl(tmp_path, "401", '{"error":"unauthorized"}')
+    result = _run(
+        [str(POD_LS)],
+        env={
+            "PATH": f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}",
+            "RUNPOD_API_KEY": "broken-key",
+        },
+    )
+    assert result.returncode != 0
+    assert "no running pods" not in result.stdout
+    assert "401" in result.stderr
+
+
+def test_terminate_self_fails_without_pod_id() -> None:
+    result = _run(
+        [
+            "bash",
+            "-c",
+            f"source {LIB} && cc_terminate_self",
+        ],
+        env={"RUNPOD_API_KEY": "pod-scoped-key"},
+    )
+    assert result.returncode != 0
+    assert "RUNPOD_POD_ID is missing" in result.stderr
+
+
+def test_run_job_trap_reaches_terminate(tmp_path: Path) -> None:
+    result = _run(
+        [str(RUN_JOB)],
+        env={"CC_VOLUME_DIR": str(tmp_path)},
+    )
+    assert result.returncode != 0
+    assert "CC_TTL_S" in result.stderr or "TTL" in result.stderr
+    assert "RUNPOD_POD_ID is missing" in result.stderr
+
+
+def test_run_job_sets_trap_before_mkdir() -> None:
+    text = RUN_JOB.read_text(encoding="utf-8")
+    trap_at = text.index("trap cleanup EXIT")
+    require_at = text.index("cc_require_ttl")
+    mkdir_at = text.index('mkdir -p "$RUN_DIR/artifacts" "$VOLUME/models"')
+    assert trap_at < require_at < mkdir_at
+    assert "trap cleanup INT" in text
+    assert "trap cleanup TERM" in text
+    assert "trap cleanup HUP" in text
+    assert "set +e" in text.split("cleanup()")[1].split("cc_terminate_self")[0]
+
+
+def test_entrypoint_requires_job_or_interactive() -> None:
+    text = ENTRYPOINT.read_text(encoding="utf-8")
+    assert "cc_require_job_or_interactive" in text
+    result = _run(
+        [
+            "bash",
+            "-c",
+            f"source {LIB} && unset CC_JOB CC_INTERACTIVE && cc_require_job_or_interactive",
+        ]
+    )
+    assert result.returncode != 0
+    assert "CC_JOB" in result.stderr or "CC_INTERACTIVE" in result.stderr
+
+
+def test_pods_from_response_rejects_error_object() -> None:
+    result = _run(
+        [
+            "bash",
+            "-c",
+            f"source {LIB} && cc_pods_from_response '{{\"error\":\"nope\"}}'",
+        ]
+    )
+    assert result.returncode != 0
+    assert "did not return an array" in result.stderr
 
 
 def test_gpu_scripts_pass_shellcheck() -> None:

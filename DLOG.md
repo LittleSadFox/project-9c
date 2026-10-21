@@ -108,6 +108,9 @@ Add the Phase 0 GPU runner.
 - `scripts/sync_volume.sh` and `scripts/export_labels.py` copy labels and new golden files.
 
 Section 2.2 setup is complete.
+AGENTS.md section 9.4 still applies.
+Before every first `pod_up`, the Runpod bot must verify the GHCR registry credential.
+A complete setup does not skip that check.
 The first live `pod_up.sh --job gpu_tests` waits on this pull request merging and on green CI plus a green GPU image build.
 After that, the Runpod bot runs it.
 This change does not start a pod.
@@ -129,4 +132,7 @@ Pod scripts use Basic `x-access-token` git auth, the EU-RO-1 GPU list, and retry
 `--spot` is allowed only for `gpu_tests` and `pose_bench`.
 
 Section 2.2 setup is complete.
+AGENTS.md section 9.4 still applies.
+Before every first `pod_up`, the Runpod bot must verify the GHCR registry credential.
+A complete setup does not skip that check.
 The first live `gpu_tests` pod waits on this pull request merging and on green CI plus a green GPU image build.

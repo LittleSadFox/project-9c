@@ -341,6 +341,9 @@ Phase 6 image `climbing-coach-train`:
 The image is private on GHCR.
 Tags are the git sha and, on `main`, `latest`.
 Section 2.2 setup is complete.
+AGENTS.md section 9.4 still applies.
+Before every first `pod_up`, the Runpod bot must verify the GHCR registry credential is present.
+A complete setup does not skip that check.
 The first live `gpu_tests` pod waits on this pull request merging and on green CI plus a green GPU image build.
 After that, the Runpod bot runs it.
 Do not put the account API key in the pod template or in pod env.

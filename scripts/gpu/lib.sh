@@ -259,7 +259,7 @@ cc_rest() {
     extra+=(-d "$body")
   fi
   code="$(
-    curl -sS -o "$tmp" -w '%{http_code}' -X "$method" \
+    curl -sS --fail-with-body -o "$tmp" -w '%{http_code}' -X "$method" \
       -H "@${hdr}" -H "Content-Type: application/json" \
       "${extra[@]}" "$url" || true
   )"

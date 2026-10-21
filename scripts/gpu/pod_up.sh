@@ -77,11 +77,16 @@ fi
 if [[ "$INTERACTIVE" != "1" ]]; then
   cc_is_known_job "$JOB" || cc_fail "Unknown job ${JOB@Q}. Known jobs: $(cc_known_jobs | tr '\n' ' ')"
 fi
-if [[ "$INTERACTIVE" != "1" && -z "$REF" ]]; then
-  cc_fail "--ref <sha> is required for a job pod. Pods run only pushed commits."
-fi
-if [[ "$INTERACTIVE" == "1" && -z "$REF" ]]; then
-  REF="main"
+if [[ -z "$REF" ]]; then
+  if [[ "$INTERACTIVE" == "1" ]]; then
+    if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      REF="$(git rev-parse HEAD)"
+    else
+      cc_fail "--ref <sha> is required for an interactive pod outside a git work tree."
+    fi
+  else
+    cc_fail "--ref <sha> is required for a job pod. Pods run only pushed commits."
+  fi
 fi
 if [[ "$SPOT" == "1" ]]; then
   if [[ "$INTERACTIVE" == "1" ]] || ! cc_spot_allowed "$JOB"; then

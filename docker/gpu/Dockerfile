@@ -3,6 +3,7 @@
 # No PyTorch. No MMPose. Those belong in docker/train (Phase 6).
 #
 # ffmpeg URL and sha256 match .github/workflows/ci.yml.
+# Host keys are created at container start, not during the image build.
 
 FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04@sha256:ac55d124da4882b497f732d8dfd9a702d5447a5f29d08d56da6f64f0a1eb34bc
 
