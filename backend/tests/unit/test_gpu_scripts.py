@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -33,6 +34,68 @@ EXPECTED_GPUS = [
 ]
 
 
+_SHIM_DIR: Path | None = None
+_SHIM_LOG: Path | None = None
+
+_STRIP_EXACT = {
+    "WEBHOOK_URL",
+    "WEBHOOK_SECRET",
+    "POD_ID",
+    "POD_API_KEY",
+    "API_KEY",
+}
+
+
+def _should_strip(key: str) -> bool:
+    if key.startswith("CC_") or key.startswith("RUNPOD_"):
+        return True
+    if key in _STRIP_EXACT:
+        return True
+    if "WEBHOOK" in key:
+        return True
+    return key.endswith(("_API_KEY", "_POD_KEY", "_POD_ID"))
+
+
+def _ensure_shims() -> Path:
+    global _SHIM_DIR, _SHIM_LOG
+    if _SHIM_DIR is not None:
+        return _SHIM_DIR
+    _SHIM_DIR = Path(tempfile.mkdtemp(prefix="cc-gpu-shims-"))
+    _SHIM_LOG = _SHIM_DIR / "invocations.log"
+    log = _SHIM_LOG
+    curl = _SHIM_DIR / "curl"
+    curl.write_text(
+        f"""#!/usr/bin/env bash
+printf '%s %s\\n' curl "$*" >> "{log}"
+out=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [[ -n "$out" ]]; then
+  printf '%s\\n' '{{"error":"shim-blocked"}}' >"$out"
+fi
+printf '599'
+exit 0
+""",
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+    runpodctl = _SHIM_DIR / "runpodctl"
+    runpodctl.write_text(
+        f"""#!/usr/bin/env bash
+printf '%s %s\\n' runpodctl "$*" >> "{log}"
+echo "ERROR: shim runpodctl blocked network" >&2
+exit 1
+""",
+        encoding="utf-8",
+    )
+    runpodctl.chmod(0o755)
+    return _SHIM_DIR
+
+
 def _payload(stdout: str) -> dict[str, object]:
     start = stdout.index("{")
     end = stdout.rindex("}")
@@ -42,15 +105,32 @@ def _payload(stdout: str) -> dict[str, object]:
     return data
 
 
-def _run(args: list[str], env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+def _run(
+    args: list[str],
+    env: dict[str, str] | None = None,
+    *,
+    bin_dir: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
     merged = os.environ.copy()
-    merged.pop("RUNPOD_API_KEY", None)
     for key in list(merged):
-        if key.startswith("CC_"):
+        if _should_strip(key):
             merged.pop(key, None)
     merged["CC_TERMINATE_NO_SLEEP"] = "1"
-    if env:
-        merged.update(env)
+    extra = dict(env) if env else {}
+    extra_path = extra.pop("PATH", None)
+    path_parts: list[str] = []
+    if bin_dir is not None:
+        path_parts.append(str(bin_dir))
+    elif extra_path:
+        first, _, rest = extra_path.partition(os.pathsep)
+        path_parts.append(first)
+        extra_path = rest
+    path_parts.append(str(_ensure_shims()))
+    if extra_path:
+        path_parts.append(extra_path)
+    path_parts.append(merged.get("PATH", ""))
+    merged["PATH"] = os.pathsep.join(part for part in path_parts if part)
+    merged.update(extra)
     return subprocess.run(
         args,
         cwd=str(ROOT),
@@ -281,10 +361,8 @@ def test_pod_ls_fails_on_error_object(tmp_path: Path) -> None:
     _fake_curl(tmp_path, "200", '{"error":"unauthorized"}')
     result = _run(
         [str(POD_LS)],
-        env={
-            "PATH": f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}",
-            "RUNPOD_API_KEY": "broken-key",
-        },
+        env={"RUNPOD_API_KEY": "broken-key"},
+        bin_dir=tmp_path,
     )
     assert result.returncode != 0
     assert "no running pods" not in result.stdout
@@ -295,10 +373,8 @@ def test_pod_down_fails_on_http_401(tmp_path: Path) -> None:
     _fake_curl(tmp_path, "401", '{"error":"unauthorized"}')
     result = _run(
         [str(POD_DOWN), "pod-example"],
-        env={
-            "PATH": f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}",
-            "RUNPOD_API_KEY": "broken-key",
-        },
+        env={"RUNPOD_API_KEY": "broken-key"},
+        bin_dir=tmp_path,
     )
     assert result.returncode != 0
     assert "terminated=" not in result.stdout
@@ -309,10 +385,8 @@ def test_pod_ls_fails_on_http_401(tmp_path: Path) -> None:
     _fake_curl(tmp_path, "401", '{"error":"unauthorized"}')
     result = _run(
         [str(POD_LS)],
-        env={
-            "PATH": f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}",
-            "RUNPOD_API_KEY": "broken-key",
-        },
+        env={"RUNPOD_API_KEY": "broken-key"},
+        bin_dir=tmp_path,
     )
     assert result.returncode != 0
     assert "no running pods" not in result.stdout
@@ -340,6 +414,62 @@ def test_run_job_trap_reaches_terminate(tmp_path: Path) -> None:
     assert result.returncode != 0
     assert "CC_TTL_S" in result.stderr or "TTL" in result.stderr
     assert "RUNPOD_POD_ID is missing" in result.stderr
+
+
+def test_suite_with_runpod_pod_id_does_not_invoke_real_binaries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """gpu_tests on a live pod must not terminate that pod with a fake key."""
+    live_id = "live-pod-from-runtime"
+    live_key = "live-key-must-not-be-used"
+    monkeypatch.setenv("RUNPOD_POD_ID", live_id)
+    monkeypatch.setenv("RUNPOD_API_KEY", live_key)
+    monkeypatch.setenv("WEBHOOK_URL", "https://example.invalid/hook")
+    monkeypatch.setenv("CC_WEBHOOK_URL", "https://example.invalid/cc-hook")
+
+    sentinel = tmp_path / "real-binaries.log"
+    trap = tmp_path / "trap-bin"
+    trap.mkdir()
+    for name in ("curl", "runpodctl"):
+        script = trap / name
+        script.write_text(
+            f"""#!/usr/bin/env bash
+printf '%s %s\\n' '{name}' "$*" >> '{sentinel}'
+exit 0
+""",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{trap}{os.pathsep}{os.environ.get('PATH', '')}")
+
+    if _SHIM_LOG is not None and _SHIM_LOG.exists():
+        _SHIM_LOG.write_text("", encoding="utf-8")
+
+    missing = _run(
+        ["bash", "-c", f"source {LIB} && cc_terminate_self"],
+        env={"RUNPOD_API_KEY": "pod-scoped-key"},
+    )
+    assert missing.returncode != 0
+    assert "RUNPOD_POD_ID is missing" in missing.stderr
+
+    trapped = _run(
+        [str(RUN_JOB)],
+        env={"CC_VOLUME_DIR": str(tmp_path / "vol")},
+    )
+    assert trapped.returncode != 0
+    assert "RUNPOD_POD_ID is missing" in trapped.stderr
+
+    which = _run(["bash", "-c", "command -v curl; command -v runpodctl"])
+    assert which.returncode == 0, which.stderr
+    paths = [line.strip() for line in which.stdout.splitlines() if line.strip()]
+    assert paths == [str(_SHIM_DIR / "curl"), str(_SHIM_DIR / "runpodctl")]
+
+    assert not sentinel.exists(), f"real binaries invoked:\n{sentinel.read_text()}"
+    log = ""
+    if _SHIM_LOG is not None and _SHIM_LOG.exists():
+        log = _SHIM_LOG.read_text(encoding="utf-8")
+    assert live_id not in log
+    assert live_key not in log
 
 
 def test_run_job_sets_trap_before_mkdir() -> None:
@@ -411,10 +541,8 @@ def test_pod_up_registry_get_refuses_on_401(tmp_path: Path) -> None:
     _fake_curl(tmp_path, "401", '{"error":"unauthorized"}')
     result = _run(
         [str(POD_UP), "--job", "gpu_tests", "--ref", SHA40],
-        env={
-            "PATH": f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}",
-            "RUNPOD_API_KEY": "broken-key",
-        },
+        env={"RUNPOD_API_KEY": "broken-key"},
+        bin_dir=tmp_path,
     )
     assert result.returncode != 0
     assert "containerregistryauth" in result.stderr
@@ -434,10 +562,8 @@ def test_pod_ls_exits_3_when_pods_exist(tmp_path: Path) -> None:
     _fake_curl(tmp_path, "200", '[{"id":"pod-1","name":"n","desiredStatus":"RUNNING"}]')
     result = _run(
         [str(POD_LS)],
-        env={
-            "PATH": f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}",
-            "RUNPOD_API_KEY": "ok-key",
-        },
+        env={"RUNPOD_API_KEY": "ok-key"},
+        bin_dir=tmp_path,
     )
     assert result.returncode == 3
     assert "pod-1" in result.stdout
