@@ -350,7 +350,7 @@ The clone dir is `/tmp/cc-src`. The wipe guard allowlists that basename under `/
 CI copies the repo to `/tmp/cc-src` and runs the `gpu_tests` pytest selection from there.
 `allowedCudaVersions` is opt-in via `CC_ALLOWED_CUDA` (unset by default). The image CUDA ≥12.8 guard is the real floor.
 The default GPU list is L4, RTX 2000 Ada, RTX 4090, and A100. It omits Blackwell. ONNX Runtime has never been verified on sm_120 on a pod.
-`$TMPDIR` under `/tmp/cc-src` is untrusted. `gpu_tests` sets `CC_IN_GPU_TESTS=1` on the pytest child. Tests keep that flag unless a case clears it. `run_job.sh` and `ml.jobs` refuse a nested `gpu_tests`. The refuse line goes to the job `log.txt`. Tests set `CC_PYTHON` so they do not use `/opt/cc/venv/bin/python`. `CC_PYTHON` is a test hook. A pod uses `/opt/cc/venv/bin/python` unless that file is missing. `run_job.sh` writes `python=<path>` to the job log. CI installs a fake interpreter at that path. The terminate stamp is `/tmp/.cc_terminated.$RUNPOD_POD_ID`.
+`$TMPDIR` under `/tmp/cc-src` is untrusted. `gpu_tests` sets `CC_IN_GPU_TESTS=1` on the pytest child. Tests keep that flag unless a case clears it. `run_job.sh` and `ml.jobs` refuse a nested `gpu_tests`. The nested refuse exits before the cleanup trap and before mkdir. Tests set `CC_PYTHON` so they do not use `/opt/cc/venv/bin/python`. `CC_PYTHON` is a test hook. A pod uses `/opt/cc/venv/bin/python` unless that file is missing. `run_job.sh` writes `python=<path>` to the job log. CI installs a fake interpreter at that path. Tests write terminate stamps under `CC_TERMINATE_STAMP_DIR`. `pod_up` refuses a reused job id.
 Do not put the account API key in the pod template or in pod env.
 
 The Docker files for `climbing-coach-train` land in the Phase 6 todo.

@@ -148,16 +148,82 @@ def _cc_isolation_root(tmp_path_factory: pytest.TempPathFactory) -> None:
     _ISOLATION_ROOT = tmp_path_factory.mktemp("cc-isolate")
     created = _TMP_CC_SRC_DIRS
     created.clear()
-    for stamp in Path("/tmp").glob(".cc_terminated.*"):
-        stamp.unlink(missing_ok=True)
+    before_stamps = set(Path("/tmp").glob(".cc_terminated.*"))
     yield
     for path in created:
         shutil.rmtree(path, ignore_errors=True)
     created.clear()
-    for stamp in Path("/tmp").glob(".cc_terminated.*"):
-        stamp.unlink(missing_ok=True)
+    after_stamps = set(Path("/tmp").glob(".cc_terminated.*"))
+    leaked = after_stamps - before_stamps
+    if leaked:
+        raise AssertionError(f"tests wrote real /tmp terminate stamps: {leaked}")
     _ISOLATION_ROOT = None
     _BASETEMP = None
+
+
+_REAL_STAMP_DIR = Path("/tmp").resolve()
+
+
+def _is_real_terminate_stamp(path: Path) -> bool:
+    resolved = path.resolve()
+    return (
+        resolved.parent == _REAL_STAMP_DIR
+        and resolved.name.startswith(".cc_terminated.")
+    )
+
+
+def _terminate_stamp_dir(extra: dict[str, str] | None = None) -> Path:
+    if _ISOLATION_ROOT is None or _BASETEMP is None:
+        raise AssertionError("pytest isolation root is not bound")
+    raw = (extra or {}).get("CC_TERMINATE_STAMP_DIR")
+    if raw:
+        resolved = Path(raw).expanduser().resolve()
+    else:
+        resolved = (_ISOLATION_ROOT / "term-stamps").resolve()
+    if resolved == _REAL_STAMP_DIR:
+        raise AssertionError("CC_TERMINATE_STAMP_DIR must not be /tmp")
+    if not resolved.is_relative_to(_BASETEMP):
+        raise AssertionError("CC_TERMINATE_STAMP_DIR must be under pytest basetemp")
+    resolved.mkdir(parents=True, exist_ok=True)
+    return resolved
+
+
+def _stamp_path(pod: str, extra: dict[str, str] | None = None) -> Path:
+    path = _terminate_stamp_dir(extra) / f".cc_terminated.{pod}"
+    if _is_real_terminate_stamp(path):
+        raise AssertionError(f"tests must not write {path}")
+    return path
+
+
+def _pid_state(pid: int) -> str | None:
+    proc = Path(f"/proc/{pid}")
+    if Path("/proc").is_dir():
+        if not proc.exists():
+            return None
+        try:
+            stat = (proc / "stat").read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        rparen = stat.rfind(")")
+        if rparen == -1:
+            return None
+        parts = stat[rparen + 2 :].split()
+        return parts[0] if parts else None
+    listed = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if listed.returncode != 0:
+        return None
+    state = listed.stdout.strip()
+    return state or None
+
+
+def _pid_is_dead(pid: int) -> bool:
+    state = _pid_state(pid)
+    return state is None or state.startswith("Z")
 
 
 def _job_dirs(tmp_path: Path, src: Path | None = None) -> dict[str, str]:
@@ -279,6 +345,7 @@ def _isolated_env(
     path_parts.append(merged.get("PATH", ""))
     merged["PATH"] = os.pathsep.join(part for part in path_parts if part)
     extra = _require_isolated_job_dirs(extra)
+    extra["CC_TERMINATE_STAMP_DIR"] = str(_terminate_stamp_dir(extra))
     if "CC_IN_GPU_TESTS" not in extra:
         inherited = os.environ.get("CC_IN_GPU_TESTS")
         if inherited:
@@ -542,6 +609,67 @@ def test_pod_up_ttl_flag_overrides_default() -> None:
     assert env["CC_TTL_S"] == "600"
     assert env["CC_INTERACTIVE"] == "1"
     assert "CC_JOB" not in env
+
+
+def test_pod_up_refuses_existing_job_id_on_volume(tmp_path: Path) -> None:
+    vol = tmp_path / "vol"
+    existing = vol / "runs" / "job-reuse"
+    existing.mkdir(parents=True)
+    (existing / "started_at").write_text("1\n", encoding="utf-8")
+    result = _run(
+        [str(POD_UP), "--job", "gpu_tests", "--ref", SHA40, "--dry-run"],
+        env={"CC_JOB_ID": "job-reuse", "CC_VOLUME_DIR": str(vol)},
+    )
+    assert result.returncode != 0
+    assert "Refuse to reuse job id job-reuse" in result.stderr
+    assert "already exists on the volume" in result.stderr
+
+
+def test_pod_up_refuses_existing_job_id_in_s3(tmp_path: Path) -> None:
+    _fake_aws_get_object(
+        tmp_path,
+        body="running\n",
+        expected_bucket="wguvx2347m",
+        expected_keys=("runs/job-s3/status",),
+    )
+    result = _run(
+        [str(POD_UP), "--job", "gpu_tests", "--ref", SHA40, "--dry-run"],
+        env={
+            "CC_JOB_ID": "job-s3",
+            "CC_VOLUME_DIR": str(tmp_path / "empty-vol"),
+        },
+        bin_dir=tmp_path,
+    )
+    assert result.returncode != 0
+    assert "Refuse to reuse job id job-s3" in result.stderr
+    assert "already exists in S3" in result.stderr
+
+
+def test_pod_up_allows_unused_job_id(tmp_path: Path) -> None:
+    aws = tmp_path / "aws"
+    aws.write_text(
+        "#!/usr/bin/env bash\necho NoSuchKey >&2\nexit 1\n",
+        encoding="utf-8",
+    )
+    aws.chmod(0o755)
+    result = _run(
+        [str(POD_UP), "--job", "gpu_tests", "--ref", SHA40, "--dry-run"],
+        env={
+            "CC_JOB_ID": "job-fresh",
+            "CC_VOLUME_DIR": str(tmp_path / "empty-vol"),
+        },
+        bin_dir=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "job_id=job-fresh" in result.stdout
+
+
+def test_terminate_stamp_dir_must_not_be_tmp(tmp_path: Path) -> None:
+    with pytest.raises(AssertionError, match="must not be /tmp"):
+        _run(
+            ["bash", "-c", f"source {LIB} && cc_terminate_stamp"],
+            env={"RUNPOD_POD_ID": "pod-x", "CC_TERMINATE_STAMP_DIR": "/tmp"},
+        )
 
 
 def test_pod_up_refuses_zero_ttl() -> None:
@@ -859,10 +987,11 @@ exit 0
 
 def test_run_job_sets_trap_before_mkdir() -> None:
     text = RUN_JOB.read_text(encoding="utf-8")
+    refuse_at = text.index("cc_refuse_nested_gpu_tests")
     trap_at = text.index("trap cleanup EXIT")
     require_at = text.index("cc_require_ttl")
     mkdir_at = text.index('mkdir -p "$RUN_DIR/artifacts" "$VOLUME/models"')
-    assert trap_at < require_at < mkdir_at
+    assert refuse_at < trap_at < require_at < mkdir_at
     assert "trap cleanup INT" in text
     assert "trap cleanup TERM" in text
     assert "trap cleanup HUP" in text
@@ -1687,11 +1816,11 @@ def test_run_job_refuses_nested_gpu_tests(tmp_path: Path) -> None:
         },
     )
     assert result.returncode != 0
-    assert "Refuse to start nested gpu_tests" in result.stderr
+    assert result.stderr.count("Refuse to start nested gpu_tests") == 1
     assert "CC_IN_GPU_TESTS is already set" in result.stderr
-    log = tmp_path / "vol" / "runs" / "job-nested" / "log.txt"
-    assert log.is_file()
-    assert "Refuse to start nested gpu_tests" in log.read_text(encoding="utf-8")
+    assert not (tmp_path / "vol" / "runs" / "job-nested").exists()
+    assert "Webhook ping" not in result.stdout
+    assert "Webhook ping" not in result.stderr
 
 
 def test_nested_gpu_tests_guard_inherits_and_uses_real_ml_jobs(
@@ -1739,8 +1868,7 @@ exec /usr/bin/python3 "$@"
     refused = _run([str(RUN_JOB)], env=job_env, bin_dir=tmp_path)
     assert refused.returncode != 0
     assert "Refuse to start nested gpu_tests" in refused.stderr
-    log = tmp_path / "vol" / "runs" / "job-e2e" / "log.txt"
-    assert "Refuse to start nested gpu_tests" in log.read_text(encoding="utf-8")
+    assert not (tmp_path / "vol" / "runs" / "job-e2e").exists()
     assert not marker.exists()
 
     run_dir = tmp_path / "vol" / "runs" / "job-ml"
@@ -1804,7 +1932,8 @@ def test_terminate_skips_second_attempt_after_success(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     assert hits.read_text(encoding="utf-8").count("curl") == 1
-    assert Path("/tmp/.cc_terminated.pod-abc").is_file()
+    assert _stamp_path("pod-abc").is_file()
+    assert not Path("/tmp/.cc_terminated.pod-abc").exists()
     assert not (tmp_path / "vol" / "runs" / "job-term" / ".cc_terminated").exists()
     assert result.stdout.count("terminate ok") == 1
 
@@ -1827,8 +1956,7 @@ def test_terminate_stamp_other_pod_or_unset_job_does_not_suppress(
         encoding="utf-8",
     )
     curl.chmod(0o755)
-    other = Path("/tmp/.cc_terminated.other-pod")
-    other.write_text("ok\n", encoding="utf-8")
+    _stamp_path("other-pod").write_text("ok\n", encoding="utf-8")
     unknown = tmp_path / "vol" / "runs" / "unknown"
     unknown.mkdir(parents=True)
     (unknown / ".cc_terminated").write_text("ok\n", encoding="utf-8")
@@ -1847,8 +1975,9 @@ def test_terminate_stamp_other_pod_or_unset_job_does_not_suppress(
     )
     assert unset_job.returncode == 0, unset_job.stderr
     assert _count_curl_hits(hits) == 1
-    assert Path("/tmp/.cc_terminated.pod-new").is_file()
-    Path("/tmp/.cc_terminated.pod-new").unlink()
+    assert _stamp_path("pod-new").is_file()
+    assert not Path("/tmp/.cc_terminated.pod-new").exists()
+    _stamp_path("pod-new").unlink()
 
     reused_job = _run(
         ["bash", "-c", f"source {LIB} && cc_terminate_self"],
@@ -1862,8 +1991,9 @@ def test_terminate_stamp_other_pod_or_unset_job_does_not_suppress(
     )
     assert reused_job.returncode == 0, reused_job.stderr
     assert _count_curl_hits(hits) == 2
-    assert Path("/tmp/.cc_terminated.pod-reused").is_file()
-    Path("/tmp/.cc_terminated.pod-reused").unlink()
+    assert _stamp_path("pod-reused").is_file()
+    assert not Path("/tmp/.cc_terminated.pod-reused").exists()
+    _stamp_path("pod-reused").unlink()
 
     run_dir = tmp_path / "vol" / "runs" / "job-wd"
     run_dir.mkdir(parents=True)
@@ -1886,7 +2016,8 @@ def test_terminate_stamp_other_pod_or_unset_job_does_not_suppress(
     )
     assert watchdog.returncode == 0, watchdog.stderr
     assert _count_curl_hits(hits) >= 3
-    assert Path("/tmp/.cc_terminated.pod-wd").is_file()
+    assert _stamp_path("pod-wd").is_file()
+    assert not Path("/tmp/.cc_terminated.pod-wd").exists()
     assert "TTL 1s expired" in watchdog.stdout
 
 
@@ -1905,8 +2036,12 @@ def test_run_times_out_kills_process_group(tmp_path: Path) -> None:
     with pytest.raises(AssertionError, match="timed out"):
         _run(["bash", "-c", script], env=_job_dirs(tmp_path), timeout=0.4)
     pid = int(pidfile.read_text(encoding="utf-8").strip())
-    with pytest.raises(OSError):
-        os.kill(pid, 0)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if _pid_is_dead(pid):
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"grandchild {pid} still running")
 
 
 def test_exit_0_trap_runpodctl_fail_falls_back_to_rest(tmp_path: Path) -> None:
@@ -2241,25 +2376,15 @@ def test_safe_wipe_refuses_working_directory_cc_src(tmp_cc_src: Path, tmp_path: 
 def test_safe_wipe_refuses_tmpdir_under_tmp_cc_src(tmp_path: Path) -> None:
     # Parent is $TMPDIR, so a trusted TMPDIR would allow the wipe.
     # TMPDIR is under /tmp/cc-src, so the new rule must clear it.
-    # Assert-only. Never add wipe=True: /tmp/cc-src may be the live checkout.
-    clone = Path("/tmp/cc-src")
-    created_clone = not clone.exists()
-    nest = clone / f"cc-untrusted-tmp-{tmp_path.name}"
+    # The path must not exist. Do not create anything under /tmp/cc-src.
+    nest = Path("/tmp/cc-src/cc-missing-tmpdir")
     target = nest / "cc-src"
-    try:
-        target.mkdir(parents=True, exist_ok=True)
-        (target / "keep").write_text("clone\n", encoding="utf-8")
-        result = _wipe(tmp_path, str(target), env={"TMPDIR": str(nest)})
-        assert result.returncode != 0
-        assert "Parent must be /tmp" in result.stderr
-        assert (target / "keep").is_file()
-    finally:
-        shutil.rmtree(nest, ignore_errors=True)
-        if created_clone:
-            try:
-                clone.rmdir()
-            except OSError:
-                pass
+    assert not nest.exists()
+    result = _wipe(tmp_path, str(target), env={"TMPDIR": str(nest)})
+    assert result.returncode != 0
+    assert "Parent must be /tmp" in result.stderr
+    assert not nest.exists()
+    assert not target.exists()
 
 
 def test_safe_wipe_refuses_tmpdir_inside_volume(tmp_path: Path) -> None:

@@ -70,8 +70,8 @@ Copy this block for a new entry.
 - Symptom: The third live `gpu_tests` pod at `1af17806` used an L4, CUDA 13.2, and `CUDAExecutionProvider`. Pytest never finished. `test_run_job_rerun_after_clone_reaches_ml_jobs` hung.
 - Where it failed: pod
 - Cause: `run_job.sh` used `/opt/cc/venv/bin/python` from the image. Tests only stubbed `python3` on `PATH`. The real `ml.jobs gpu_tests` ran pytest on `/tmp/cc-src` again. `_run()` had no timeout.
-- Fix: Tests set `CC_PYTHON` to the stub. `_run()` starts a new session and kills the process group after 30s. `gpu_tests` sets `CC_IN_GPU_TESTS=1` on the pytest child. Tests keep that flag unless a case clears it. `run_job.sh` and `ml.jobs` refuse a nested `gpu_tests`. The refuse line goes to the job `log.txt`. CI creates a fake `/opt/cc/venv/bin/python`. A second terminate after success is skipped only for this pod. The stamp lives at `/tmp/.cc_terminated.$RUNPOD_POD_ID`.
-- Prevention: Do not let `run_job.sh` tests use `/opt/cc/venv/bin/python`. Keep `_run()` bounded. Do not store the terminate stamp on the volume.
+- Fix: Tests set `CC_PYTHON` to the stub. `_run()` starts a new session and kills the process group after 30s. `gpu_tests` sets `CC_IN_GPU_TESTS=1` on the pytest child. Tests keep that flag unless a case clears it. `run_job.sh` and `ml.jobs` refuse a nested `gpu_tests` before the EXIT trap and before mkdir. CI creates a fake `/opt/cc/venv/bin/python`. A second terminate after success is skipped only for this pod. Tests write stamps under `CC_TERMINATE_STAMP_DIR`. `pod_up` refuses a reused job id.
+- Prevention: Do not let `run_job.sh` tests use `/opt/cc/venv/bin/python`. Keep `_run()` bounded. Do not store the terminate stamp on the volume. Do not reuse `CC_JOB_ID`.
 
 ### 2026-10-21 — wait_job S3 cp-to-stdout failed
 

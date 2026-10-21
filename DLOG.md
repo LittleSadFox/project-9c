@@ -209,7 +209,8 @@ Tests now set `CC_PYTHON` to the stub. That hook is a test override. A pod uses 
 `_run()` starts a new session and kills the process group after 30s.
 `gpu_tests` sets `CC_IN_GPU_TESTS=1` in the pytest child only. Tests keep that flag unless a case clears it. `run_job.sh` and `python -m ml.jobs gpu_tests` refuse a nested `gpu_tests` when that flag is set. The refuse line goes to stderr and to the job `log.txt`. The CI pod-layout job installs a fake `/opt/cc/venv/bin/python`.
 
-A second terminate after a successful first attempt is skipped only for the current pod. The stamp is `/tmp/.cc_terminated.$RUNPOD_POD_ID`. A volume stamp or a stamp for another pod does not skip terminate or the TTL watchdog.
+A second terminate after a successful first attempt is skipped only for the current pod. The stamp is `$CC_TERMINATE_STAMP_DIR/.cc_terminated.$RUNPOD_POD_ID`. Tests set that dir under pytest tmp. The default is `/tmp`. A volume stamp or a stamp for another pod does not skip terminate or the TTL watchdog.
+`pod_up` refuses a caller job id when `runs/<id>` already exists on the volume or in S3.
 
 The default GPU list omits Blackwell. ONNX Runtime has never been verified on sm_120 on a pod.
 

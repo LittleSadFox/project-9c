@@ -104,7 +104,6 @@ cc_require_job_or_interactive() {
 
 cc_refuse_nested_gpu_tests() {
   if [[ "${CC_JOB:-}" == "gpu_tests" && "${CC_IN_GPU_TESTS:-}" == "1" ]]; then
-    cc_log "ERROR: Refuse to start nested gpu_tests. CC_IN_GPU_TESTS is already set."
     cc_fail "Refuse to start nested gpu_tests. CC_IN_GPU_TESTS is already set."
   fi
 }
@@ -909,6 +908,70 @@ cc_rest() {
   return 0
 }
 
+cc_s3_object_exists() {
+  local uri="$1"
+  local region="$2"
+  local endpoint="$3"
+  local err dest parts bucket key
+  command -v aws >/dev/null 2>&1 || cc_fail "Install AWS CLI v2."
+  if ! parts="$(cc_s3_uri_parts "$uri")"; then
+    cc_fail "S3 URI ${uri} is not s3://bucket/key."
+  fi
+  bucket="$(printf '%s\n' "$parts" | sed -n '1p')"
+  key="$(printf '%s\n' "$parts" | sed -n '2p')"
+  err="$(mktemp)"
+  dest="$(mktemp)"
+  # shellcheck disable=SC2046
+  if aws s3api get-object \
+    --bucket "$bucket" \
+    --key "$key" \
+    --region "$region" \
+    --endpoint-url "$endpoint" \
+    $(cc_aws_args) \
+    "$dest" >/dev/null 2>"$err"; then
+    rm -f "$err" "$dest"
+    return 0
+  fi
+  if grep -qiE 'NoSuchKey|Not Found|404' "$err"; then
+    rm -f "$err" "$dest"
+    return 1
+  fi
+  echo "ERROR: S3 get-object ${uri} failed. $(cc_s3_err_summary "$err" "$key")" >&2
+  rm -f "$err" "$dest"
+  cc_fail "Could not check ${uri}."
+}
+
+cc_s3_run_exists() {
+  local job_id="$1"
+  local volume region endpoint name
+  volume="$(cc_volume_id)"
+  region="${CC_RUNPOD_DATACENTER:-}"
+  [[ -n "$region" ]] || cc_fail "Set CC_RUNPOD_DATACENTER to the volume datacenter."
+  endpoint="$(cc_s3_endpoint)"
+  for name in status started_at log.txt metrics.json; do
+    if cc_s3_object_exists "s3://${volume}/runs/${job_id}/${name}" "$region" "$endpoint"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+cc_refuse_existing_run() {
+  local job_id="$1"
+  local caller="${2:-}"
+  local vol="${CC_VOLUME_DIR:-}"
+  [[ -n "$job_id" ]] || cc_fail "Job id is empty."
+  if [[ -n "$vol" && -e "${vol}/runs/${job_id}" ]]; then
+    cc_fail "Refuse to reuse job id ${job_id}. runs/${job_id} already exists on the volume."
+  fi
+  if [[ -z "$caller" ]]; then
+    return 0
+  fi
+  if cc_s3_run_exists "$job_id"; then
+    cc_fail "Refuse to reuse job id ${job_id}. runs/${job_id} already exists in S3."
+  fi
+}
+
 cc_s3_endpoint() {
   local dc="${CC_RUNPOD_DATACENTER:-}"
   [[ -n "$dc" ]] || cc_fail "Set CC_RUNPOD_DATACENTER to the volume datacenter."
@@ -992,6 +1055,7 @@ cc_log() {
 
 cc_terminate_stamp() {
   local pod="${RUNPOD_POD_ID:-}"
+  local dir="${CC_TERMINATE_STAMP_DIR:-/tmp}"
   if [[ -z "$pod" ]]; then
     return 1
   fi
@@ -1000,12 +1064,16 @@ cc_terminate_stamp() {
       return 1
       ;;
   esac
-  printf '%s\n' "/tmp/.cc_terminated.${pod}"
+  dir="$(cc_trim "$dir")"
+  [[ "$dir" == /* ]] || return 1
+  printf '%s\n' "${dir}/.cc_terminated.${pod}"
 }
 
 cc_terminate_mark() {
-  local stamp
+  local stamp dir
   stamp="$(cc_terminate_stamp)" || return 0
+  dir="${stamp%/*}"
+  mkdir -p "$dir"
   printf 'ok\n' >"$stamp"
 }
 

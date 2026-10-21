@@ -84,6 +84,10 @@ cleanup() {
   return 0
 }
 
+# Refuse before the EXIT trap and before mkdir. A nested gpu_tests
+# must not write a run folder, mark an outer job failed, or ping twice.
+cc_refuse_nested_gpu_tests
+
 trap cleanup EXIT
 trap cleanup INT
 trap cleanup TERM
@@ -97,7 +101,6 @@ RUN_DIR="${VOLUME}/runs/${CC_JOB_ID}"
 
 mkdir -p "$RUN_DIR/artifacts" "$VOLUME/models" "$VOLUME/cache/pip" "$SCRATCH"
 export CC_RUN_LOG="${RUN_DIR}/log.txt"
-cc_refuse_nested_gpu_tests
 export GIT_TERMINAL_PROMPT=0
 export GIT_TRACE_REDACT=1
 cc_git_sanitize_env
