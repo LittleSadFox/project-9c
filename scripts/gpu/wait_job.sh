@@ -117,9 +117,13 @@ aws_cp_status() {
 }
 
 aws_cp_metrics() {
-  local raw
+  local raw compact
   if raw="$(cc_s3_cp_stdout "s3://${VOLUME}/runs/${JOB_ID}/metrics.json" "$REGION" "$ENDPOINT")"; then
-    printf 'metrics=%s\n' "$raw"
+    compact="$(printf '%s' "$raw" | jq -c . 2>/dev/null || true)"
+    if [[ -z "$compact" ]]; then
+      compact="$(printf '%s' "$raw" | tr '\n' ' ')"
+    fi
+    printf 'metrics=%s\n' "$compact"
     return 0
   fi
   return 1

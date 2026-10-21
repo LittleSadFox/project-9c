@@ -127,6 +127,20 @@ def _payload(stdout: str) -> dict[str, object]:
     return data
 
 
+_BASETEMP: Path | None = None
+_ISOLATION_ROOT: Path | None = None
+
+
+@pytest.fixture(autouse=True)
+def _cc_isolation_root(tmp_path_factory: pytest.TempPathFactory) -> None:
+    global _BASETEMP, _ISOLATION_ROOT
+    _BASETEMP = Path(tmp_path_factory.getbasetemp()).resolve()
+    _ISOLATION_ROOT = tmp_path_factory.mktemp("cc-isolate")
+    yield
+    _ISOLATION_ROOT = None
+    _BASETEMP = None
+
+
 def _job_dirs(tmp_path: Path) -> dict[str, str]:
     src = tmp_path / "cc-src"
     library = tmp_path / "cc-lib"
@@ -168,31 +182,44 @@ exit 0
     return hits
 
 
-_DESTRUCTIVE_SCRIPTS = {"run_job.sh", "entrypoint.sh"}
-_FORBIDDEN_JOB_DIRS = {"/tmp/climbing-coach", "/tmp/cc-library"}
+_FORBIDDEN_JOB_DIRS = {
+    "/tmp/climbing-coach",
+    "/tmp/climbing-coach/",
+    "/tmp/cc-library",
+    "/workspace",
+}
 
 
-def _is_destructive_script(args: list[str]) -> bool:
-    return any(Path(arg).name in _DESTRUCTIVE_SCRIPTS for arg in args)
-
-
-def _require_isolated_job_dirs(extra: dict[str, str]) -> None:
-    for key in ("CC_SRC_DIR", "CC_LIBRARY_DIR", "CC_VOLUME_DIR"):
-        if key not in extra:
-            raise AssertionError(
-                "run_job.sh and entrypoint tests must set "
-                "CC_SRC_DIR, CC_LIBRARY_DIR, and CC_VOLUME_DIR"
-            )
+def _require_isolated_job_dirs(extra: dict[str, str]) -> dict[str, str]:
+    if _ISOLATION_ROOT is None or _BASETEMP is None:
+        raise AssertionError("pytest isolation root is not bound")
+    root = _ISOLATION_ROOT
+    extra.setdefault("CC_SRC_DIR", str(root / "cc-src"))
+    extra.setdefault("CC_LIBRARY_DIR", str(root / "cc-lib"))
+    extra.setdefault("CC_VOLUME_DIR", str(root / "cc-vol"))
+    extra.setdefault("CC_SSH_DIR", str(root / "ssh"))
+    extra.setdefault("CC_SSH_HOME", str(root / "ssh-home"))
+    for key in (
+        "CC_SRC_DIR",
+        "CC_LIBRARY_DIR",
+        "CC_VOLUME_DIR",
+        "CC_SSH_DIR",
+        "CC_SSH_HOME",
+    ):
         raw = extra[key]
-        if not raw or raw in _FORBIDDEN_JOB_DIRS:
+        if not raw or raw.rstrip("/") in {p.rstrip("/") for p in _FORBIDDEN_JOB_DIRS}:
             raise AssertionError(f"{key} must be an isolated tmp_path directory")
         resolved = Path(raw).resolve()
         home = Path.home().resolve()
         if resolved == Path("/") or resolved == home:
             raise AssertionError(f"{key} must not be / or HOME")
-        root = ROOT.resolve()
-        if resolved == root or root.is_relative_to(resolved):
+        repo = ROOT.resolve()
+        if resolved == repo or repo.is_relative_to(resolved):
             raise AssertionError(f"{key} must not be the live checkout or a parent of it")
+        if not resolved.is_relative_to(_BASETEMP):
+            raise AssertionError(f"{key} must be under pytest basetemp")
+        Path(raw).mkdir(parents=True, exist_ok=True)
+    return extra
 
 
 def _isolated_env(
@@ -219,6 +246,7 @@ def _isolated_env(
         path_parts.append(extra_path)
     path_parts.append(merged.get("PATH", ""))
     merged["PATH"] = os.pathsep.join(part for part in path_parts if part)
+    extra = _require_isolated_job_dirs(extra)
     merged.update(extra)
     return merged
 
@@ -230,8 +258,7 @@ def _run(
     bin_dir: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     extra = dict(env) if env else {}
-    if _is_destructive_script(args):
-        _require_isolated_job_dirs(extra)
+    _require_isolated_job_dirs(extra)
     return subprocess.run(
         args,
         cwd=str(ROOT),
@@ -240,6 +267,117 @@ def _run(
         capture_output=True,
         text=True,
     )
+
+
+def _wipe(
+    tmp_path: Path,
+    target: str,
+    *,
+    env: dict[str, str] | None = None,
+    script_dir: str | None = None,
+    wipe: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    extra = {
+        "CC_VOLUME_DIR": str(tmp_path / "cc-vol"),
+        "CC_LIBRARY_DIR": str(tmp_path / "cc-lib"),
+    }
+    if env:
+        extra.update(env)
+    cmd = "cc_safe_wipe_dir" if wipe else "cc_assert_safe_wipe_dir"
+    sd = script_dir or str(LIB.parent)
+    return _run(
+        ["bash", "-c", f'source {LIB} && {cmd} "$1" "$2"', "wipe", target, sd],
+        env=extra,
+    )
+
+
+def _fake_aws_get_object(
+    tmp_path: Path,
+    *,
+    body: str = "passed\n",
+    metrics_body: str | None = None,
+    fail_first: int = 0,
+    fail_msg: str = "SignatureDoesNotMatch",
+    expected_bucket: str = "vol",
+    expected_keys: tuple[str, ...] = ("runs/job-1/status", "runs/job-1/metrics.json"),
+    expected_region: str = "EU-RO-1",
+    expected_endpoint: str = "https://s3api-eu-ro-1.runpod.io",
+) -> Path:
+    aws = tmp_path / "aws"
+    keys = " ".join(expected_keys)
+    body_file = tmp_path / "aws-body"
+    body_file.write_text(body, encoding="utf-8")
+    metrics_file = tmp_path / "aws-metrics"
+    metrics_file.write_text(metrics_body if metrics_body is not None else body, encoding="utf-8")
+    aws.write_text(
+        f"""#!/usr/bin/env bash
+[[ "$1" == "s3api" && "$2" == "get-object" ]] || {{
+  echo "expected s3api get-object" >&2
+  exit 1
+}}
+shift 2
+bucket=""
+key=""
+region=""
+endpoint=""
+out=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --bucket) bucket="$2"; shift 2 ;;
+    --key) key="$2"; shift 2 ;;
+    --region) region="$2"; shift 2 ;;
+    --endpoint-url) endpoint="$2"; shift 2 ;;
+    --profile) shift 2 ;;
+    *)
+      out="$1"
+      shift
+      ;;
+  esac
+done
+if [[ "$bucket" != "{expected_bucket}" ]]; then
+  echo "unexpected aws bucket=$bucket" >&2
+  exit 1
+fi
+if [[ "$region" != "{expected_region}" || "$endpoint" != "{expected_endpoint}" ]]; then
+  echo "unexpected aws region=$region endpoint=$endpoint" >&2
+  exit 1
+fi
+ok=0
+for allowed in {keys}; do
+  if [[ "$key" == "$allowed" ]]; then
+    ok=1
+  fi
+done
+if [[ "$ok" != "1" ]]; then
+  echo "unexpected aws key=$key" >&2
+  exit 1
+fi
+n=0
+state="{tmp_path}/aws-state"
+if [[ -f "$state" ]]; then
+  n="$(cat "$state")"
+fi
+n=$((n + 1))
+printf '%s' "$n" > "$state"
+if [[ "$n" -le {fail_first} ]]; then
+  echo "{fail_msg}" >&2
+  exit 1
+fi
+if [[ -z "$out" || "$out" == "-" ]]; then
+  echo "missing get-object outfile" >&2
+  exit 1
+fi
+if [[ "$key" == *metrics.json ]]; then
+  cat "{metrics_file}" > "$out"
+else
+  cat "{body_file}" > "$out"
+fi
+exit 0
+""",
+        encoding="utf-8",
+    )
+    aws.chmod(0o755)
+    return aws
 
 
 def test_pod_up_refuses_without_job_or_interactive() -> None:
@@ -700,20 +838,12 @@ def test_wait_job_timeout_uses_ttl_plus_margin() -> None:
 
 
 def test_wait_job_passed_does_not_exit_zero_if_pod_remains(tmp_path: Path) -> None:
-    aws = tmp_path / "aws"
-    aws.write_text(
-        """#!/usr/bin/env bash
-out=""
-for out; do :; done
-if [[ "$1" == "s3api" && "$2" == "get-object" && -n "$out" && "$out" != "-" ]]; then
-  printf 'passed\\n' > "$out"
-  exit 0
-fi
-exit 1
-""",
-        encoding="utf-8",
+    _fake_aws_get_object(
+        tmp_path,
+        body="passed\n",
+        metrics_body='{\n  "job": "gpu_tests",\n  "status": "passed"\n}\n',
+        expected_bucket="vol-1",
     )
-    aws.chmod(0o755)
     _fake_curl(tmp_path, "200", '{"id":"pod-abc","desiredStatus":"RUNNING"}')
     result = _run(
         [str(WAIT_JOB), "job-1", "--pod-id", "pod-abc"],
@@ -721,6 +851,7 @@ exit 1
             "CC_VOLUME_ID": "vol-1",
             "CC_VOLUME_DC": "EU-RO-1",
             "CC_TTL_S": "60",
+            "CC_WAIT_TIMEOUT_S": "20",
             "CC_WAIT_POLL_S": "1",
             "RUNPOD_API_KEY": "broken-key",
         },
@@ -728,6 +859,10 @@ exit 1
     )
     assert result.returncode != 0
     assert "still exists" in result.stderr or "still present" in result.stderr
+    metrics_lines = [line for line in result.stdout.splitlines() if line.startswith("metrics=")]
+    assert metrics_lines
+    assert all("\n" not in line for line in metrics_lines)
+    assert '"job":"gpu_tests"' in metrics_lines[0]
 
 
 def test_early_cleanup_keeps_passed_status(tmp_path: Path) -> None:
@@ -815,28 +950,7 @@ def test_pod_gone_detects_terminated(tmp_path: Path) -> None:
 
 
 def test_s3_cp_retries_signature_mismatch(tmp_path: Path) -> None:
-    aws = tmp_path / "aws"
-    state = tmp_path / "aws-state"
-    aws.write_text(
-        f"""#!/usr/bin/env bash
-n=0
-if [[ -f "{state}" ]]; then
-  n="$(cat "{state}")"
-fi
-n=$((n + 1))
-printf '%s' "$n" > "{state}"
-out=""
-for out; do :; done
-if [[ "$n" -lt 3 ]]; then
-  echo "SignatureDoesNotMatch" >&2
-  exit 1
-fi
-printf 'passed\\n' > "$out"
-exit 0
-""",
-        encoding="utf-8",
-    )
-    aws.chmod(0o755)
+    _fake_aws_get_object(tmp_path, fail_first=2)
     result = _run(
         [
             "bash",
@@ -847,33 +961,12 @@ exit 0
     )
     assert result.returncode == 0, result.stderr
     assert "passed" in result.stdout
-    assert state.read_text(encoding="utf-8") == "3"
+    assert (tmp_path / "aws-state").read_text(encoding="utf-8") == "3"
 
 
 def test_s3_cp_retries_headobject_403_forbidden(tmp_path: Path) -> None:
-    aws = tmp_path / "aws"
-    state = tmp_path / "aws-state"
     live_err = "An error occurred (403) when calling the HeadObject operation: Forbidden"
-    aws.write_text(
-        f"""#!/usr/bin/env bash
-n=0
-if [[ -f "{state}" ]]; then
-  n="$(cat "{state}")"
-fi
-n=$((n + 1))
-printf '%s' "$n" > "{state}"
-out=""
-for out; do :; done
-if [[ "$n" -lt 3 ]]; then
-  echo "{live_err}" >&2
-  exit 1
-fi
-printf 'passed\\n' > "$out"
-exit 0
-""",
-        encoding="utf-8",
-    )
-    aws.chmod(0o755)
+    _fake_aws_get_object(tmp_path, fail_first=2, fail_msg=live_err)
     result = _run(
         [
             "bash",
@@ -884,21 +977,13 @@ exit 0
     )
     assert result.returncode == 0, result.stderr
     assert "passed" in result.stdout
-    assert state.read_text(encoding="utf-8") == "3"
+    assert (tmp_path / "aws-state").read_text(encoding="utf-8") == "3"
     assert "SignatureDoesNotMatch" not in result.stderr
     assert result.stderr.count("ERROR: S3 get-object") == 0
 
 
 def test_s3_get_object_summarizes_retry_failure(tmp_path: Path) -> None:
-    aws = tmp_path / "aws"
-    aws.write_text(
-        """#!/usr/bin/env bash
-echo "SignatureDoesNotMatch" >&2
-exit 1
-""",
-        encoding="utf-8",
-    )
-    aws.chmod(0o755)
+    _fake_aws_get_object(tmp_path, fail_first=4)
     result = _run(
         [
             "bash",
@@ -910,7 +995,49 @@ exit 1
     assert result.returncode != 0
     assert result.stderr.count("ERROR: S3 get-object") == 1
     assert "after 4 attempts" in result.stderr
-    assert result.stderr.count("SignatureDoesNotMatch") == 0
+    assert "code=SignatureDoesNotMatch" in result.stderr
+    assert "key=runs/job-1/status" in result.stderr
+    assert result.stderr.count("code=SignatureDoesNotMatch") == 1
+
+
+def test_s3_get_object_logs_first_line_on_nonretry(tmp_path: Path) -> None:
+    _fake_aws_get_object(
+        tmp_path,
+        fail_first=1,
+        fail_msg="An error occurred (InvalidAccessKeyId) when calling GetObject: nope",
+    )
+    result = _run(
+        [
+            "bash",
+            "-c",
+            f"source {LIB} && cc_s3_cp_stdout s3://vol/runs/job-1/status EU-RO-1 https://s3api-eu-ro-1.runpod.io",
+        ],
+        bin_dir=tmp_path,
+    )
+    assert result.returncode != 0
+    assert result.stderr.count("ERROR: S3 get-object") == 1
+    assert "after 4 attempts" not in result.stderr
+    assert "code=InvalidAccessKeyId" in result.stderr
+    assert "key=runs/job-1/status" in result.stderr
+    assert "nope" in result.stderr
+
+
+def test_s3_uri_parts_require_bucket_and_key() -> None:
+    ok = _run(
+        [
+            "bash",
+            "-c",
+            f"source {LIB} && cc_s3_uri_parts s3://vol/runs/job-1/status",
+        ]
+    )
+    assert ok.returncode == 0, ok.stderr
+    assert ok.stdout.splitlines() == ["vol", "runs/job-1/status"]
+    for uri in ("s3://vol", "s3://", "http://vol/key", "vol/key"):
+        bad = _run(
+            ["bash", "-c", f"source {LIB} && cc_s3_uri_parts {uri}"],
+        )
+        assert bad.returncode != 0, uri
+        assert "s3://bucket/key" in bad.stderr
 
 
 def test_run_job_logs_redacted_clone_stderr(tmp_path: Path) -> None:
@@ -1043,12 +1170,19 @@ def test_entrypoint_early_failure_writes_status(tmp_path: Path) -> None:
     patched = text.replace('LIB="/opt/cc/scripts/gpu/lib.sh"', f'LIB="{LIB}"')
     script.write_text(patched, encoding="utf-8")
     script.chmod(0o755)
+    ssh_dir = tmp_path / "ssh"
+    ssh_dir.mkdir()
+    isolated_key = ssh_dir / "ssh_host_test"
+    isolated_key.write_text("probe\n", encoding="utf-8")
+    etc_before = sorted(p.name for p in Path("/etc/ssh").glob("ssh_host_*"))
     result = _run(
         [str(script)],
         env={
             "CC_VOLUME_DIR": str(tmp_path),
             "CC_JOB_ID": "job-early",
             "CC_JOB": "gpu_tests",
+            "CC_TTL_S": "60",
+            "CC_SSH_DIR": str(ssh_dir),
             **_job_dirs(tmp_path),
         },
     )
@@ -1056,7 +1190,8 @@ def test_entrypoint_early_failure_writes_status(tmp_path: Path) -> None:
     status = tmp_path / "runs" / "job-early" / "status"
     assert status.is_file()
     assert status.read_text(encoding="utf-8").strip() == "failed"
-    assert "RUNPOD_POD_ID is missing" in result.stderr
+    assert not isolated_key.exists(), result.stdout + result.stderr
+    assert sorted(p.name for p in Path("/etc/ssh").glob("ssh_host_*")) == etc_before
 
 
 def test_wait_job_pod_id_requires_value() -> None:
@@ -1292,7 +1427,7 @@ def test_run_logged_streams_before_exit(tmp_path: Path) -> None:
 
 
 def test_run_job_rerun_after_clone_reaches_ml_jobs(tmp_path: Path) -> None:
-    src = tmp_path / "src"
+    src = tmp_path / "cc-src"
     git = tmp_path / "git"
     git.write_text(
         f"""#!/usr/bin/env bash
@@ -1377,6 +1512,41 @@ def test_exit_0_trap_runpodctl_fail_falls_back_to_rest(tmp_path: Path) -> None:
     assert "terminate ok via runpodctl" not in combined
     assert "runpodctl failed" in combined
     assert "ctl-fail" in combined
+
+
+def test_runpodctl_failure_redacts_key_hook_and_newlines(tmp_path: Path) -> None:
+    _fake_curl(tmp_path, "200", '{"id":"pod-abc"}')
+    key = "pod-scoped-secret-key"
+    hook = "https://example.invalid/cc-hook"
+    shaped = "rp" + "a_" + "TestToken123"
+    runpodctl = tmp_path / "runpodctl"
+    runpodctl.write_text(
+        "#!/usr/bin/env bash\n"
+        f"printf '%s\\n%s\\n%s\\n' '{key}' '{hook}' '{shaped}'\n"
+        "printf 'x%.0s' {1..500}\n"
+        "printf '\\n'\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    runpodctl.chmod(0o755)
+    result = _run(
+        ["bash", "-c", f"source {LIB} && cc_terminate_self"],
+        env={
+            "RUNPOD_POD_ID": "pod-abc",
+            "RUNPOD_API_KEY": key,
+            "CC_WEBHOOK_URL": hook,
+        },
+        bin_dir=tmp_path,
+    )
+    combined = result.stdout + result.stderr
+    assert key not in combined
+    assert hook not in combined
+    assert shaped not in combined
+    assert "REDACTED" in combined
+    failed_lines = [line for line in combined.splitlines() if "runpodctl failed" in line]
+    assert failed_lines
+    assert len(failed_lines[0]) <= 480
+    assert "\n" not in failed_lines[0].replace("runpodctl failed", "")
 
 
 def test_run_logged_wait_preserves_exit_code() -> None:
@@ -1538,65 +1708,170 @@ def test_entrypoint_sleeps_in_background() -> None:
     assert "wait $!" in text
 
 
-def test_safe_wipe_refuses_repo_and_parents(tmp_path: Path) -> None:
-    script_dir = LIB.parent
-    empty = _run(
-        ["bash", "-c", f"source {LIB} && cc_assert_safe_wipe_dir '' '{script_dir}'"],
-    )
+def test_safe_wipe_refuses_empty_relative_and_tmp(tmp_path: Path) -> None:
+    empty = _wipe(tmp_path, "")
     assert empty.returncode != 0
     assert "empty path" in empty.stderr
-    slash = _run(
-        ["bash", "-c", f"source {LIB} && cc_assert_safe_wipe_dir / '{script_dir}'"],
-    )
+    spaces = _wipe(tmp_path, "  ")
+    assert spaces.returncode != 0
+    assert "empty path" in spaces.stderr
+    slash = _wipe(tmp_path, "/")
     assert slash.returncode != 0
     assert "rm -rf /" in slash.stderr
-    home = _run(
-        ["bash", "-c", f'source {LIB} && cc_assert_safe_wipe_dir "$HOME" "{script_dir}"'],
-    )
+    relative = _wipe(tmp_path, "backend")
+    assert relative.returncode != 0
+    assert "relative path" in relative.stderr
+    tmp = _wipe(tmp_path, "/tmp")
+    assert tmp.returncode != 0
+    assert "/tmp" in tmp.stderr
+
+
+def test_safe_wipe_refuses_workspace_home_and_checkout(tmp_path: Path) -> None:
+    workspace = _wipe(tmp_path, "/workspace")
+    assert workspace.returncode != 0
+    home = _wipe(tmp_path, str(Path.home()))
     assert home.returncode != 0
-    assert "HOME" in home.stderr
-    repo = _run(
-        [
-            "bash",
-            "-c",
-            f"source {LIB} && cc_assert_safe_wipe_dir '{ROOT}' '{script_dir}'",
-        ]
-    )
+    home_parent = _wipe(tmp_path, str(Path.home().parent))
+    assert home_parent.returncode != 0
+    usr = _wipe(tmp_path, "/usr")
+    assert usr.returncode != 0
+    backend = _wipe(tmp_path, str(ROOT / "backend"))
+    assert backend.returncode != 0
+    repo = _wipe(tmp_path, str(ROOT))
     assert repo.returncode != 0
-    assert "live checkout" in repo.stderr
-    parent = _run(
-        [
-            "bash",
-            "-c",
-            f"source {LIB} && cc_assert_safe_wipe_dir '{ROOT.parent}' '{script_dir}'",
-        ]
-    )
+    parent = _wipe(tmp_path, str(ROOT.parent))
     assert parent.returncode != 0
-    safe = tmp_path / "wipe-me"
-    ok = _run(
+    dash = _wipe(tmp_path, "-cc-src")
+    assert dash.returncode != 0
+
+
+def test_safe_wipe_refuses_home_when_unset(tmp_path: Path) -> None:
+    result = _wipe(tmp_path, str(Path.home()), env={"HOME": ""})
+    assert result.returncode != 0
+
+
+def test_safe_wipe_refuses_volume_and_scratch(tmp_path: Path) -> None:
+    src = tmp_path / "cc-src"
+    src.mkdir()
+    inside_volume = _wipe(
+        tmp_path,
+        str(src),
+        env={"CC_VOLUME_DIR": str(tmp_path)},
+    )
+    assert inside_volume.returncode != 0
+    inside_scratch = _wipe(
+        tmp_path,
+        str(src),
+        env={"CC_LIBRARY_DIR": str(tmp_path)},
+    )
+    assert inside_scratch.returncode != 0
+
+
+def test_safe_wipe_refuses_symlink_and_trailing_slash_link(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret").write_text("keep\n", encoding="utf-8")
+    link = tmp_path / "srclink"
+    link.symlink_to(outside)
+    slashed = _wipe(tmp_path, f"{link}/")
+    assert slashed.returncode != 0
+    assert "symlink" in slashed.stderr
+    assert (outside / "secret").read_text(encoding="utf-8") == "keep\n"
+    named = tmp_path / "cc-src"
+    named.symlink_to(ROOT)
+    repo_link = _wipe(tmp_path, str(named))
+    assert repo_link.returncode != 0
+    assert (ROOT / "scripts" / "gpu" / "run_job.sh").is_file()
+
+
+def test_safe_wipe_allows_tmp_cc_src(tmp_path: Path) -> None:
+    safe = tmp_path / "cc-src"
+    safe.mkdir()
+    (safe / "old").write_text("gone\n", encoding="utf-8")
+    slashed = _wipe(tmp_path, f"{safe}/")
+    assert slashed.returncode == 0, slashed.stderr
+    assert slashed.stdout.strip() == str(safe.resolve())
+    wiped = _wipe(tmp_path, str(safe), wipe=True)
+    assert wiped.returncode == 0, wiped.stderr
+    assert not (safe / "old").exists()
+
+
+def test_safe_wipe_default_src_when_unset() -> None:
+    assert 'SRC="${CC_SRC_DIR:-/tmp/cc-src}"' in RUN_JOB.read_text(encoding="utf-8")
+    result = _run(
         [
             "bash",
             "-c",
-            f"source {LIB} && cc_assert_safe_wipe_dir '{safe}' '{script_dir}'",
+            (
+                f"source {LIB} && unset CC_SRC_DIR && "
+                'SRC="${CC_SRC_DIR:-/tmp/cc-src}" && printf "%s\\n" "$SRC"'
+            ),
         ]
     )
-    assert ok.returncode == 0, ok.stderr
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "/tmp/cc-src"
+    allowed = _run(
+        [
+            "bash",
+            "-c",
+            (
+                f"source {LIB} && unset CC_SRC_DIR && "
+                f'cc_assert_safe_wipe_dir /tmp/cc-src "{LIB.parent}"'
+            ),
+        ]
+    )
+    assert allowed.returncode == 0, allowed.stderr
+
+
+def test_safe_wipe_parent_swap_does_not_follow_new_link(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret").write_text("keep\n", encoding="utf-8")
+    stage = tmp_path / "stage"
+    src = stage / "cc-src"
+    src.mkdir(parents=True)
+    result = _run(
+        [
+            "bash",
+            "-c",
+            f"""
+source {LIB}
+target="$1"
+outside="$2"
+resolved="$(cc_assert_safe_wipe_dir "$target" "{LIB.parent}")"
+rm -rf "$(dirname "$target")"
+ln -s "$outside" "$(dirname "$target")"
+if cc_safe_wipe_dir "$target" "{LIB.parent}"; then
+  echo WIPED
+  exit 0
+fi
+echo REFUSED
+exit 1
+""",
+            "swap",
+            str(src),
+            str(outside),
+        ],
+        env={
+            "CC_VOLUME_DIR": str(tmp_path / "cc-vol"),
+            "CC_LIBRARY_DIR": str(tmp_path / "cc-lib"),
+        },
+    )
+    assert "secret" not in (result.stdout + result.stderr)
+    assert (outside / "secret").read_text(encoding="utf-8") == "keep\n"
 
 
 def test_run_job_refuses_to_wipe_pod_checkout(tmp_path: Path) -> None:
-    assert 'SRC="${CC_SRC_DIR:-/tmp/climbing-coach}"' in RUN_JOB.read_text(
-        encoding="utf-8"
-    )
+    assert 'SRC="${CC_SRC_DIR:-/tmp/cc-src}"' in RUN_JOB.read_text(encoding="utf-8")
     pod = tmp_path / "climbing-coach"
     gpu = pod / "scripts" / "gpu"
     gpu.mkdir(parents=True)
     shutil.copy2(RUN_JOB, gpu / "run_job.sh")
     shutil.copy2(LIB, gpu / "lib.sh")
     copied = (gpu / "run_job.sh").read_text(encoding="utf-8")
-    # Isolate the default SRC so this test never targets the live checkout path.
     (gpu / "run_job.sh").write_text(
         copied.replace(
-            'SRC="${CC_SRC_DIR:-/tmp/climbing-coach}"',
+            'SRC="${CC_SRC_DIR:-/tmp/cc-src}"',
             f'SRC="${{CC_SRC_DIR:-{pod}}}"',
         ),
         encoding="utf-8",
@@ -1619,20 +1894,29 @@ def test_run_job_refuses_to_wipe_pod_checkout(tmp_path: Path) -> None:
     )
     assert result.returncode != 0
     assert "Refuse to rm -rf" in result.stderr
+    log = (tmp_path / "vol" / "runs" / "job-wipe" / "log.txt").read_text(encoding="utf-8")
+    assert "Refuse to rm -rf" in log
     assert marker.is_file()
     assert marker.read_text(encoding="utf-8") == "checkout-alive\n"
     assert (ROOT / "scripts" / "gpu" / "run_job.sh").is_file()
-    assert "Clone" in (tmp_path / "vol" / "runs" / "job-wipe" / "log.txt").read_text(
-        encoding="utf-8"
+    assert "Clone" in log
+
+
+def test_isolation_defaults_job_dirs_under_basetemp(tmp_path: Path) -> None:
+    result = _run(
+        [
+            "bash",
+            "-c",
+            'printf "src=%s\\nlib=%s\\nvol=%s\\n" "$CC_SRC_DIR" "$CC_LIBRARY_DIR" "$CC_VOLUME_DIR"',
+        ]
     )
-
-
-def test_run_job_helpers_require_src_and_library(tmp_path: Path) -> None:
-    with pytest.raises(AssertionError, match="CC_SRC_DIR"):
-        _run(
-            [str(RUN_JOB)],
-            env={"CC_VOLUME_DIR": str(tmp_path), "CC_TTL_S": "60"},
-        )
+    assert result.returncode == 0, result.stderr
+    values = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+    assert _BASETEMP is not None
+    for key in ("src", "lib", "vol"):
+        resolved = Path(values[key]).resolve()
+        assert resolved.is_relative_to(_BASETEMP)
+        assert resolved.name.startswith("cc-")
     with pytest.raises(AssertionError, match="isolated"):
         _run(
             [str(RUN_JOB)],
@@ -1655,8 +1939,12 @@ def test_run_logged_fifo_uses_mktemp_dir() -> None:
     text = LIB.read_text(encoding="utf-8")
     assert 'fifo_dir="$(mktemp -d)"' in text
     assert "mktemp -u" not in text
-    assert "cc_redact_text" in text
-    assert "head -c 400" in text
+    assert "cc_redact_oneline" in text
+    assert "jq -c" in WAIT_JOB.read_text(encoding="utf-8")
+    curl_fn = LIB.read_text(encoding="utf-8").split("cc_curl_post_json()")[1]
+    curl_fn = curl_fn.split("cc_realpath")[0]
+    assert "return 1" in curl_fn
+    assert "cc_fail" not in curl_fn
 
 
 def test_webhook_url_stays_off_curl_argv() -> None:

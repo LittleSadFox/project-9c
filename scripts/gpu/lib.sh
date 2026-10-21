@@ -6,6 +6,9 @@
 
 cc_fail() {
   echo "ERROR: $*" >&2
+  if [[ -n "${CC_RUN_LOG:-}" ]]; then
+    printf 'ERROR: %s\n' "$*" >> "$CC_RUN_LOG"
+  fi
   exit 1
 }
 
@@ -492,6 +495,13 @@ def redact(text):
             text = text.replace(b64_nopad, "REDACTED")
     if header:
         text = re.sub(re.escape(header), "AUTHORIZATION: basic REDACTED", text, flags=re.I)
+    pod_key = os.environ.get("RUNPOD_API_KEY") or ""
+    hook = os.environ.get("CC_WEBHOOK_URL") or ""
+    if pod_key:
+        text = text.replace(pod_key, "REDACTED")
+    if hook:
+        text = text.replace(hook, "REDACTED")
+    text = re.sub("rp" + "a_" + r"[A-Za-z0-9]+", "REDACTED", text)
     return text
 
 for line in sys.stdin:
@@ -504,11 +514,24 @@ cc_redact_text() {
   printf '%s' "$1" | cc_redact_stream
 }
 
+cc_redact_oneline() {
+  printf '%s' "$1" | cc_redact_stream | python3 -c '
+import sys
+text = sys.stdin.read().replace("\r", " ").replace("\n", " ")
+while "  " in text:
+    text = text.replace("  ", " ")
+sys.stdout.write(text[:400])
+'
+}
+
 cc_curl_post_json() {
   local url="$1"
   local body="$2"
   local cfg
-  command -v python3 >/dev/null 2>&1 || cc_fail "python3 is required to post JSON."
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "ERROR: python3 is required to post JSON." >&2
+    return 1
+  fi
   cfg="$(mktemp)"
   python3 -c '
 import sys
@@ -528,31 +551,107 @@ cc_realpath() {
   python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$path"
 }
 
+cc_trim() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
+cc_path_equals_or_contains() {
+  local resolved="$1"
+  local protected="$2"
+  [[ -n "$protected" ]] || return 1
+  [[ "$resolved" == "$protected" || "$protected" == "$resolved"/* ]]
+}
+
+cc_path_inside() {
+  local resolved="$1"
+  local protected="$2"
+  [[ -n "$protected" ]] || return 1
+  [[ "$resolved" == "$protected"/* ]]
+}
+
 cc_assert_safe_wipe_dir() {
   local target="${1:-}"
   local script_dir="${2:-}"
+  target="$(cc_trim "$target")"
   [[ -n "$target" ]] || cc_fail "Refuse to rm -rf an empty path."
-  local resolved home here repo_root protected
-  resolved="$(cc_realpath "$target")"
-  [[ "$resolved" != "/" ]] || cc_fail "Refuse to rm -rf /."
-  if [[ -n "${HOME:-}" ]]; then
-    home="$(cc_realpath "$HOME")"
-    if [[ "$resolved" == "$home" ]]; then
-      cc_fail "Refuse to rm -rf HOME ${target}."
-    fi
+  [[ "$target" == /* ]] || cc_fail "Refuse to rm -rf a relative path ${target}."
+  if [[ -L "${target%/}" ]]; then
+    cc_fail "Refuse to rm -rf symlink ${target}."
   fi
+  local resolved base tmp_root tmpdir_root under_tmp
+  resolved="$(cc_realpath "$target")"
+  [[ -n "$resolved" ]] || cc_fail "Refuse to rm -rf an empty path."
+  [[ "$resolved" == /* ]] || cc_fail "Refuse to rm -rf a relative path ${resolved}."
+  [[ "$resolved" != "/" ]] || cc_fail "Refuse to rm -rf /."
+  if [[ -L "${resolved%/}" ]]; then
+    cc_fail "Refuse to rm -rf symlink ${target}."
+  fi
+  base="${resolved##*/}"
+  if [[ ! "$base" =~ ^cc-src(-[A-Za-z0-9._-]+)?$ ]]; then
+    cc_fail "Refuse to rm -rf ${target}. Basename must match cc-src."
+  fi
+  tmp_root="$(cc_realpath /tmp)"
+  tmpdir_root=""
+  if [[ -n "${TMPDIR:-}" ]]; then
+    tmpdir_root="$(cc_realpath "$TMPDIR")"
+  fi
+  under_tmp=0
+  if [[ "$resolved" == "$tmp_root"/* ]]; then
+    under_tmp=1
+  fi
+  if [[ -n "$tmpdir_root" && "$resolved" == "$tmpdir_root"/* ]]; then
+    under_tmp=1
+  fi
+  if [[ "$resolved" == "$tmp_root" || ( -n "$tmpdir_root" && "$resolved" == "$tmpdir_root" ) ]]; then
+    cc_fail "Refuse to rm -rf ${target}. It is /tmp."
+  fi
+  [[ "$under_tmp" == "1" ]] || cc_fail "Refuse to rm -rf ${target}. It is not under /tmp."
+  local here repo_root home real_home volume scratch protected
   here="$(pwd -P)"
+  if cc_path_equals_or_contains "$resolved" "$here"; then
+    cc_fail "Refuse to rm -rf ${target}. It is a live checkout path or a parent of one."
+  fi
   repo_root=""
   if [[ -n "$script_dir" ]]; then
     repo_root="$(cc_realpath "${script_dir}/../..")"
     script_dir="$(cc_realpath "$script_dir")"
   fi
-  for protected in "$here" "$script_dir" "$repo_root"; do
+  home=""
+  if [[ -n "${HOME:-}" ]]; then
+    home="$(cc_realpath "$HOME")"
+  fi
+  real_home="$(python3 -c 'import os; print(os.path.realpath(os.path.expanduser("~")))' 2>/dev/null || true)"
+  volume=""
+  if [[ -n "${CC_VOLUME_DIR:-}" ]]; then
+    volume="$(cc_realpath "$CC_VOLUME_DIR")"
+  fi
+  scratch=""
+  if [[ -n "${CC_LIBRARY_DIR:-}" ]]; then
+    scratch="$(cc_realpath "$CC_LIBRARY_DIR")"
+  fi
+  for protected in "$script_dir" "$repo_root" "$home" "$real_home" "$volume" "$scratch"; do
     [[ -n "$protected" ]] || continue
-    if [[ "$protected" == "$resolved" || "$protected" == "$resolved"/* ]]; then
+    if cc_path_equals_or_contains "$resolved" "$protected" || cc_path_inside "$resolved" "$protected"; then
       cc_fail "Refuse to rm -rf ${target}. It is a live checkout path or a parent of one."
     fi
   done
+  printf '%s\n' "$resolved"
+}
+
+cc_safe_wipe_dir() {
+  local target="${1:-}"
+  local script_dir="${2:-}"
+  local resolved check
+  resolved="$(cc_assert_safe_wipe_dir "$target" "$script_dir")"
+  check="$(cc_realpath "$target")"
+  if [[ "$check" != "$resolved" || -L "${target%/}" || -L "${resolved%/}" ]]; then
+    cc_fail "Refuse to rm -rf ${target}. Path changed or is a symlink."
+  fi
+  rm -rf -- "$resolved"
+  printf '%s\n' "$resolved"
 }
 
 cc_git_sanitize_env() {
@@ -614,13 +713,39 @@ cc_run_timeout() {
 cc_s3_uri_parts() {
   local uri="$1"
   local rest bucket key
+  case "$uri" in
+    s3://*/*) ;;
+    *)
+      echo "ERROR: S3 URI ${uri} is not s3://bucket/key." >&2
+      return 1
+      ;;
+  esac
   rest="${uri#s3://}"
   bucket="${rest%%/*}"
   key="${rest#*/}"
-  if [[ -z "$bucket" || -z "$key" || "$key" == "$rest" ]]; then
-    cc_fail "S3 URI ${uri} is not s3://bucket/key."
+  if [[ -z "$bucket" || -z "$key" || "$key" == "$rest" || "$bucket" == *" "* ]]; then
+    echo "ERROR: S3 URI ${uri} is not s3://bucket/key." >&2
+    return 1
   fi
   printf '%s\n%s\n' "$bucket" "$key"
+}
+
+cc_s3_err_summary() {
+  local errfile="$1"
+  local key="$2"
+  local line code
+  line="$(head -n 1 "$errfile" 2>/dev/null || true)"
+  line="$(cc_redact_oneline "$line")"
+  if grep -qiE 'SignatureDoesNotMatch' "$errfile"; then
+    code="SignatureDoesNotMatch"
+  elif grep -qiE '\(403\)|403 Forbidden|Status Code: 403|HTTPStatusCode: 403' "$errfile"; then
+    code="403"
+  else
+    code="$(sed -n 's/.*(\([^)]*\)).*/\1/p' "$errfile" | head -n 1)"
+    code="$(cc_trim "$code")"
+    : "${code:=error}"
+  fi
+  printf 'code=%s key=%s %s' "$code" "$key" "$line"
 }
 
 cc_s3_cp_stdout() {
@@ -629,11 +754,19 @@ cc_s3_cp_stdout() {
   local endpoint="$3"
   local err attempt delay dest parts bucket key
   command -v aws >/dev/null 2>&1 || cc_fail "Install AWS CLI v2."
-  parts="$(cc_s3_uri_parts "$uri")"
+  if ! parts="$(cc_s3_uri_parts "$uri")"; then
+    return 1
+  fi
   bucket="$(printf '%s\n' "$parts" | sed -n '1p')"
   key="$(printf '%s\n' "$parts" | sed -n '2p')"
+  if [[ -z "$bucket" || -z "$key" ]]; then
+    echo "ERROR: S3 URI ${uri} is not s3://bucket/key." >&2
+    return 1
+  fi
   err="$(mktemp)"
   dest="$(mktemp)"
+  # shellcheck disable=SC2064
+  trap 'rm -f "$err" "$dest"' RETURN
   for attempt in 1 2 3 4; do
     # shellcheck disable=SC2046
     if aws s3api get-object \
@@ -644,11 +777,9 @@ cc_s3_cp_stdout() {
       $(cc_aws_args) \
       "$dest" >/dev/null 2>"$err"; then
       cat "$dest"
-      rm -f "$err" "$dest"
       return 0
     fi
     if grep -qiE 'NoSuchKey|Not Found|404' "$err"; then
-      rm -f "$err" "$dest"
       return 1
     fi
     if grep -qiE 'SignatureDoesNotMatch|403 Forbidden|Status Code: 403|HTTPStatusCode: 403|\(403\)' "$err"; then
@@ -661,12 +792,10 @@ cc_s3_cp_stdout() {
       fi
       continue
     fi
-    echo "ERROR: S3 get-object ${uri} failed." >&2
-    rm -f "$err" "$dest"
+    echo "ERROR: S3 get-object ${uri} failed. $(cc_s3_err_summary "$err" "$key")" >&2
     return 1
   done
-  echo "ERROR: S3 get-object ${uri} failed after ${attempt} attempts." >&2
-  rm -f "$err" "$dest"
+  echo "ERROR: S3 get-object ${uri} failed after ${attempt} attempts. $(cc_s3_err_summary "$err" "$key")" >&2
   return 1
 }
 
@@ -731,11 +860,12 @@ cc_aws_args() {
 }
 
 cc_setup_ssh() {
-  mkdir -p /root/.ssh
-  chmod 700 /root/.ssh
+  local ssh_home="${CC_SSH_HOME:-/root/.ssh}"
+  mkdir -p "$ssh_home"
+  chmod 700 "$ssh_home"
   if [[ -n "${PUBLIC_KEY:-}" ]]; then
-    printf '%s\n' "$PUBLIC_KEY" > /root/.ssh/authorized_keys
-    chmod 600 /root/.ssh/authorized_keys
+    printf '%s\n' "$PUBLIC_KEY" > "${ssh_home}/authorized_keys"
+    chmod 600 "${ssh_home}/authorized_keys"
   fi
 }
 
@@ -807,7 +937,7 @@ cc_terminate_self() {
         cc_log "terminate ok via runpodctl attempt=${attempt}"
         return 0
       fi
-      cc_log "runpodctl failed attempt=${attempt}: $(printf '%s' "$(cc_redact_text "$ctl")" | head -c 400)"
+      cc_log "runpodctl failed attempt=${attempt}: $(cc_redact_oneline "$ctl")"
     fi
     if cc_rest DELETE "/pods/${RUNPOD_POD_ID}" >/dev/null; then
       cc_log "terminate ok via curl attempt=${attempt}"

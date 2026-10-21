@@ -127,6 +127,6 @@ def test_gpu_tests_drops_webhook_and_pod_key(
     assert metrics["status"] == "passed"
 
 
-def test_later_jobs_are_not_ready() -> None:
+def test_later_jobs_are_not_ready(tmp_path: Path) -> None:
     with pytest.raises(JobError, match="not implemented"):
-        JOBS["finetune_pose"](Path("/tmp"))
+        JOBS["finetune_pose"](tmp_path)

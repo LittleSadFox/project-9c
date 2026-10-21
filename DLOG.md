@@ -179,15 +179,19 @@ The second live `gpu_tests` pod at `73be826` used an RTX 4090, driver 595.91.07,
 
 `test_run_job_logs_redacted_clone_stderr` ran the real `run_job.sh`. The test helper cleared `CC_*`, so `CC_SRC_DIR` was empty. `SRC` then defaulted to `/tmp/climbing-coach`. The script ran `rm -rf "$SRC"` and deleted the live checkout. Later tests that read repo files failed.
 
-Tests that run `run_job.sh` now set `CC_SRC_DIR` and `CC_LIBRARY_DIR` under `tmp_path`.
-`run_job.sh` refuses to remove `SRC` when it is empty, `/`, `$HOME`, the script directory, the repo root, or a parent of those paths.
+Tests now default `CC_SRC_DIR` and `CC_LIBRARY_DIR` under pytest `tmp_path`.
+The default clone dir is `/tmp/cc-src`.
+`run_job.sh` only removes a resolved path whose basename matches `cc-src`, that sits under `/tmp` or `$TMPDIR`, and that is not a symlink or a live checkout, volume, or HOME path.
+A wipe refusal also goes to `log.txt`.
 
 `wait_job` did not see `status=failed` from S3. `aws s3 cp ... -` returned `SignatureDoesNotMatch` on all four retries. `aws s3api get-object` with the same profile worked on the first try. The wait ended when the pod returned 404.
 
 `cc_s3_cp_stdout` now uses `aws s3api get-object` into a temp file.
 It retries 403 and `SignatureDoesNotMatch`.
-It prints one summary line per poll.
+It prints one summary line per poll with the error code and key.
+`wait_job` prints `metrics.json` with `jq -c`.
 
 The GPU image now includes `shellcheck`.
+`AGENTS.md` and `coding_plan.md` do not name the clone dir, so they stay unchanged.
 
 See `TROUBLESHOOTING_LOG.md`.

@@ -45,14 +45,16 @@ def test_dockerfile_pins_and_omits_trainer_stack() -> None:
 def test_entrypoint_generates_host_keys_and_starts_sshd() -> None:
     text = ENTRYPOINT.read_text(encoding="utf-8")
     assert "ssh-keygen -A" in text
-    assert "rm -f /etc/ssh/ssh_host_*" in text
+    assert "CC_SSH_DIR" in text
+    assert "CC_SSH_HOME" in (ROOT / "scripts" / "gpu" / "lib.sh").read_text(encoding="utf-8")
+    assert "ssh_host_*" in text
     assert "/usr/sbin/sshd" in text
     assert "cc_require_job_or_interactive" in text
     assert "cc_early_cleanup" in text
     job_exec = text.index("exec /opt/cc/scripts/gpu/run_job.sh")
     sshd = text.index("/usr/sbin/sshd")
     keys = text.index("ssh-keygen -A")
-    wipe = text.index("rm -f /etc/ssh/ssh_host_*")
+    wipe = text.index('rm -f "${ssh_dir}"/ssh_host_*')
     assert wipe < keys < sshd < job_exec
 
 
