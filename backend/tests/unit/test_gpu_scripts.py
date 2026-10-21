@@ -32,9 +32,6 @@ EXPECTED_GPUS = [
     "NVIDIA RTX 2000 Ada Generation",
     "NVIDIA GeForce RTX 4090",
     "NVIDIA A100 80GB PCIe",
-    "NVIDIA RTX PRO 4500 Blackwell",
-    "NVIDIA RTX PRO 4000 Blackwell",
-    "NVIDIA GeForce RTX 5090",
 ]
 
 
@@ -151,12 +148,82 @@ def _cc_isolation_root(tmp_path_factory: pytest.TempPathFactory) -> None:
     _ISOLATION_ROOT = tmp_path_factory.mktemp("cc-isolate")
     created = _TMP_CC_SRC_DIRS
     created.clear()
+    before_stamps = set(Path("/tmp").glob(".cc_terminated.*"))
     yield
     for path in created:
         shutil.rmtree(path, ignore_errors=True)
     created.clear()
+    after_stamps = set(Path("/tmp").glob(".cc_terminated.*"))
+    leaked = after_stamps - before_stamps
+    if leaked:
+        raise AssertionError(f"tests wrote real /tmp terminate stamps: {leaked}")
     _ISOLATION_ROOT = None
     _BASETEMP = None
+
+
+_REAL_STAMP_DIR = Path("/tmp").resolve()
+
+
+def _is_real_terminate_stamp(path: Path) -> bool:
+    resolved = path.resolve()
+    return (
+        resolved.parent == _REAL_STAMP_DIR
+        and resolved.name.startswith(".cc_terminated.")
+    )
+
+
+def _terminate_stamp_dir(extra: dict[str, str] | None = None) -> Path:
+    if _ISOLATION_ROOT is None or _BASETEMP is None:
+        raise AssertionError("pytest isolation root is not bound")
+    raw = (extra or {}).get("CC_TERMINATE_STAMP_DIR")
+    if raw:
+        resolved = Path(raw).expanduser().resolve()
+    else:
+        resolved = (_ISOLATION_ROOT / "term-stamps").resolve()
+    if resolved == _REAL_STAMP_DIR:
+        raise AssertionError("CC_TERMINATE_STAMP_DIR must not be /tmp")
+    if not resolved.is_relative_to(_BASETEMP):
+        raise AssertionError("CC_TERMINATE_STAMP_DIR must be under pytest basetemp")
+    resolved.mkdir(parents=True, exist_ok=True)
+    return resolved
+
+
+def _stamp_path(pod: str, extra: dict[str, str] | None = None) -> Path:
+    path = _terminate_stamp_dir(extra) / f".cc_terminated.{pod}"
+    if _is_real_terminate_stamp(path):
+        raise AssertionError(f"tests must not write {path}")
+    return path
+
+
+def _pid_state(pid: int) -> str | None:
+    proc = Path(f"/proc/{pid}")
+    if Path("/proc").is_dir():
+        if not proc.exists():
+            return None
+        try:
+            stat = (proc / "stat").read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        rparen = stat.rfind(")")
+        if rparen == -1:
+            return None
+        parts = stat[rparen + 2 :].split()
+        return parts[0] if parts else None
+    listed = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if listed.returncode != 0:
+        return None
+    state = listed.stdout.strip()
+    return state or None
+
+
+def _pid_is_dead(pid: int) -> bool:
+    state = _pid_state(pid)
+    return state is None or state.startswith("Z")
 
 
 def _job_dirs(tmp_path: Path, src: Path | None = None) -> dict[str, str]:
@@ -278,8 +345,35 @@ def _isolated_env(
     path_parts.append(merged.get("PATH", ""))
     merged["PATH"] = os.pathsep.join(part for part in path_parts if part)
     extra = _require_isolated_job_dirs(extra)
+    extra["CC_TERMINATE_STAMP_DIR"] = str(_terminate_stamp_dir(extra))
+    if "CC_IN_GPU_TESTS" not in extra:
+        inherited = os.environ.get("CC_IN_GPU_TESTS")
+        if inherited:
+            extra["CC_IN_GPU_TESTS"] = inherited
+    if extra.get("CC_PYTHON"):
+        resolved = Path(extra["CC_PYTHON"]).resolve()
+        if "/opt/cc/" in str(resolved):
+            raise AssertionError("CC_PYTHON must not be /opt/cc")
+        if _BASETEMP is not None and not resolved.is_relative_to(_BASETEMP):
+            raise AssertionError("CC_PYTHON must be under pytest basetemp")
+    else:
+        if _ISOLATION_ROOT is None:
+            raise AssertionError("pytest isolation root is not bound")
+        stub = _ISOLATION_ROOT / "cc-python"
+        if not stub.exists():
+            stub.write_text(
+                "#!/usr/bin/env bash\n"
+                "echo 'ERROR: isolated CC_PYTHON stub' >&2\n"
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            stub.chmod(0o755)
+        extra["CC_PYTHON"] = str(stub)
     merged.update(extra)
     return merged
+
+
+_RUN_TIMEOUT_S = 30
 
 
 def _run(
@@ -288,20 +382,33 @@ def _run(
     *,
     bin_dir: Path | None = None,
     cwd: str | Path | None = None,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     extra = dict(env) if env else {}
     _require_isolated_job_dirs(extra)
     for arg in args:
         if "/opt/cc/" in str(arg) or str(arg).rstrip("/") == "/opt/cc":
             raise AssertionError(f"tests must not exec /opt/cc: {arg}")
-    return subprocess.run(
+    limit = _RUN_TIMEOUT_S if timeout is None else timeout
+    proc = subprocess.Popen(
         args,
         cwd=str(cwd or ROOT),
         env=_isolated_env(env, bin_dir=bin_dir),
-        check=False,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
+        start_new_session=True,
     )
+    try:
+        stdout, stderr = proc.communicate(timeout=limit)
+    except subprocess.TimeoutExpired as exc:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        stdout, stderr = proc.communicate()
+        raise AssertionError(f"_run timed out after {limit}s: {args}") from exc
+    return subprocess.CompletedProcess(args, proc.returncode, stdout, stderr)
 
 
 def _wipe(
@@ -483,8 +590,12 @@ def test_pod_up_dry_run_sets_ttl_and_secret_refs() -> None:
     assert isinstance(gpus, list)
     for name in EXPECTED_GPUS:
         assert name in gpus
+    assert gpus == EXPECTED_GPUS
     assert "NVIDIA A40" not in gpus
     assert "NVIDIA RTX A5000" not in gpus
+    assert "NVIDIA RTX PRO 4500 Blackwell" not in gpus
+    assert "NVIDIA RTX PRO 4000 Blackwell" not in gpus
+    assert "NVIDIA GeForce RTX 5090" not in gpus
 
 
 def test_pod_up_ttl_flag_overrides_default() -> None:
@@ -498,6 +609,67 @@ def test_pod_up_ttl_flag_overrides_default() -> None:
     assert env["CC_TTL_S"] == "600"
     assert env["CC_INTERACTIVE"] == "1"
     assert "CC_JOB" not in env
+
+
+def test_pod_up_refuses_existing_job_id_on_volume(tmp_path: Path) -> None:
+    vol = tmp_path / "vol"
+    existing = vol / "runs" / "job-reuse"
+    existing.mkdir(parents=True)
+    (existing / "started_at").write_text("1\n", encoding="utf-8")
+    result = _run(
+        [str(POD_UP), "--job", "gpu_tests", "--ref", SHA40, "--dry-run"],
+        env={"CC_JOB_ID": "job-reuse", "CC_VOLUME_DIR": str(vol)},
+    )
+    assert result.returncode != 0
+    assert "Refuse to reuse job id job-reuse" in result.stderr
+    assert "already exists on the volume" in result.stderr
+
+
+def test_pod_up_refuses_existing_job_id_in_s3(tmp_path: Path) -> None:
+    _fake_aws_get_object(
+        tmp_path,
+        body="running\n",
+        expected_bucket="wguvx2347m",
+        expected_keys=("runs/job-s3/status",),
+    )
+    result = _run(
+        [str(POD_UP), "--job", "gpu_tests", "--ref", SHA40, "--dry-run"],
+        env={
+            "CC_JOB_ID": "job-s3",
+            "CC_VOLUME_DIR": str(tmp_path / "empty-vol"),
+        },
+        bin_dir=tmp_path,
+    )
+    assert result.returncode != 0
+    assert "Refuse to reuse job id job-s3" in result.stderr
+    assert "already exists in S3" in result.stderr
+
+
+def test_pod_up_allows_unused_job_id(tmp_path: Path) -> None:
+    aws = tmp_path / "aws"
+    aws.write_text(
+        "#!/usr/bin/env bash\necho NoSuchKey >&2\nexit 1\n",
+        encoding="utf-8",
+    )
+    aws.chmod(0o755)
+    result = _run(
+        [str(POD_UP), "--job", "gpu_tests", "--ref", SHA40, "--dry-run"],
+        env={
+            "CC_JOB_ID": "job-fresh",
+            "CC_VOLUME_DIR": str(tmp_path / "empty-vol"),
+        },
+        bin_dir=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "job_id=job-fresh" in result.stdout
+
+
+def test_terminate_stamp_dir_must_not_be_tmp(tmp_path: Path) -> None:
+    with pytest.raises(AssertionError, match="must not be /tmp"):
+        _run(
+            ["bash", "-c", f"source {LIB} && cc_terminate_stamp"],
+            env={"RUNPOD_POD_ID": "pod-x", "CC_TERMINATE_STAMP_DIR": "/tmp"},
+        )
 
 
 def test_pod_up_refuses_zero_ttl() -> None:
@@ -815,10 +987,11 @@ exit 0
 
 def test_run_job_sets_trap_before_mkdir() -> None:
     text = RUN_JOB.read_text(encoding="utf-8")
+    refuse_at = text.index("cc_refuse_nested_gpu_tests")
     trap_at = text.index("trap cleanup EXIT")
     require_at = text.index("cc_require_ttl")
     mkdir_at = text.index('mkdir -p "$RUN_DIR/artifacts" "$VOLUME/models"')
-    assert trap_at < require_at < mkdir_at
+    assert refuse_at < trap_at < require_at < mkdir_at
     assert "trap cleanup INT" in text
     assert "trap cleanup TERM" in text
     assert "trap cleanup HUP" in text
@@ -1121,6 +1294,7 @@ exit 1
             "CC_GIT_REF": SHA40,
             "CC_JOB_ID": "job-clone",
             "CC_TTL_S": "60",
+            "CC_IN_GPU_TESTS": "",
             "CC_REPO_TOKEN": token,
             **_job_dirs(tmp_path),
         },
@@ -1218,6 +1392,7 @@ def test_run_job_skips_finished_status(tmp_path: Path) -> None:
             "CC_GIT_REF": SHA40,
             "CC_JOB_ID": "job-done",
             "CC_TTL_S": "60",
+            "CC_IN_GPU_TESTS": "",
             **_job_dirs(tmp_path),
         },
     )
@@ -1379,6 +1554,7 @@ def test_run_job_fails_fast_without_repo_token(tmp_path: Path) -> None:
             "CC_GIT_REF": SHA40,
             "CC_JOB_ID": "job-notoken",
             "CC_TTL_S": "60",
+            "CC_IN_GPU_TESTS": "",
             **_job_dirs(tmp_path),
         },
     )
@@ -1406,6 +1582,7 @@ def test_run_job_empty_token_pings_webhook(tmp_path: Path) -> None:
             "CC_GIT_REF": SHA40,
             "CC_JOB_ID": "job-hook",
             "CC_TTL_S": "60",
+            "CC_IN_GPU_TESTS": "",
             "CC_WEBHOOK_URL": "https://example.invalid/hook",
             **_job_dirs(tmp_path),
         },
@@ -1434,6 +1611,7 @@ def test_run_job_unresolved_token_pings_webhook(tmp_path: Path) -> None:
             "CC_GIT_REF": SHA40,
             "CC_JOB_ID": "job-unresolved",
             "CC_TTL_S": "60",
+            "CC_IN_GPU_TESTS": "",
             "CC_REPO_TOKEN": "{{ RUNPOD_SECRET_cc_repo_token }}",
             "CC_WEBHOOK_URL": "https://example.invalid/hook",
             **_job_dirs(tmp_path),
@@ -1511,6 +1689,26 @@ def test_run_logged_streams_before_exit(tmp_path: Path) -> None:
             proc.wait(timeout=5)
 
 
+def _ml_jobs_python(tmp_path: Path, *, message: str = "ml.jobs reached", code: int = 0) -> Path:
+    py = tmp_path / "cc-python"
+    py.write_text(
+        f"""#!/usr/bin/env bash
+echo STUB_CC_PYTHON
+if [[ " $* " == *" -m pip "* ]]; then
+  exit 0
+fi
+if [[ " $* " == *" -m ml.jobs "* ]]; then
+  echo {message}
+  exit {code}
+fi
+exec /usr/bin/python3 "$@"
+""",
+        encoding="utf-8",
+    )
+    py.chmod(0o755)
+    return py
+
+
 def test_run_job_rerun_after_clone_reaches_ml_jobs(tmp_cc_src: Path, tmp_path: Path) -> None:
     src = tmp_cc_src
     git = tmp_path / "git"
@@ -1536,21 +1734,7 @@ exit 0
         encoding="utf-8",
     )
     git.chmod(0o755)
-    py = tmp_path / "python3"
-    py.write_text(
-        """#!/usr/bin/env bash
-if [[ " $* " == *" -m pip "* ]]; then
-  exit 0
-fi
-if [[ " $* " == *" -m ml.jobs "* ]]; then
-  echo "ml.jobs reached"
-  exit 0
-fi
-exec /usr/bin/python3 "$@"
-""",
-        encoding="utf-8",
-    )
-    py.chmod(0o755)
+    py = _ml_jobs_python(tmp_path)
     result = _run(
         [str(RUN_JOB)],
         env={
@@ -1559,9 +1743,11 @@ exec /usr/bin/python3 "$@"
             "CC_GIT_REF": SHA40,
             "CC_JOB_ID": "job-rerun",
             "CC_TTL_S": "60",
+            "CC_IN_GPU_TESTS": "",
             "CC_REPO_TOKEN": "clone-then-clear-token",
             **_job_dirs(tmp_path),
             "CC_SRC_DIR": str(src),
+            "CC_PYTHON": str(py),
         },
         bin_dir=tmp_path,
     )
@@ -1571,8 +1757,291 @@ exec /usr/bin/python3 "$@"
     assert "CC_REPO_TOKEN is empty" not in result.stderr
     assert "CC_REPO_TOKEN is empty" not in text
     assert "ml.jobs reached" in text
+    assert "STUB_CC_PYTHON" in text
+    assert "OPT_CC_PYTHON" not in text
     status = tmp_path / "vol" / "runs" / "job-rerun" / "status"
     assert status.read_text(encoding="utf-8").strip() == "passed"
+
+
+def test_run_job_uses_cc_python_even_if_opt_cc_venv_exists(
+    tmp_cc_src: Path, tmp_path: Path
+) -> None:
+    src = tmp_cc_src
+    (src / "backend").mkdir(parents=True)
+    for name in (
+        "requirements-gpu.txt",
+        "requirements-dev.txt",
+        "requirements-nodeps.txt",
+    ):
+        (src / "backend" / name).write_text("# pin\n", encoding="utf-8")
+    py = _ml_jobs_python(tmp_path)
+    result = _run(
+        [str(RUN_JOB)],
+        env={
+            "CC_VOLUME_DIR": str(tmp_path / "vol"),
+            "CC_JOB": "gpu_tests",
+            "CC_GIT_REF": SHA40,
+            "CC_JOB_ID": "job-python",
+            "CC_TTL_S": "60",
+            "CC_IN_GPU_TESTS": "",
+            "CC_REPO_TOKEN": "tok",
+            "CC_RUN_JOB_READY": "1",
+            **_job_dirs(tmp_path),
+            "CC_SRC_DIR": str(src),
+            "CC_PYTHON": str(py),
+        },
+        bin_dir=tmp_path,
+    )
+    log = tmp_path / "vol" / "runs" / "job-python" / "log.txt"
+    text = log.read_text(encoding="utf-8") if log.is_file() else ""
+    assert result.returncode == 0, result.stderr + text
+    assert "STUB_CC_PYTHON" in text
+    assert "ml.jobs reached" in text
+    assert f"python={py}" in text
+    assert "OPT_CC_PYTHON" not in text + result.stderr
+    assert "fake /opt/cc" not in text + result.stderr
+
+
+def test_run_job_refuses_nested_gpu_tests(tmp_path: Path) -> None:
+    result = _run(
+        [str(RUN_JOB)],
+        env={
+            "CC_VOLUME_DIR": str(tmp_path / "vol"),
+            "CC_JOB": "gpu_tests",
+            "CC_GIT_REF": SHA40,
+            "CC_JOB_ID": "job-nested",
+            "CC_TTL_S": "60",
+            "CC_IN_GPU_TESTS": "1",
+            **_job_dirs(tmp_path),
+        },
+    )
+    assert result.returncode != 0
+    assert result.stderr.count("Refuse to start nested gpu_tests") == 1
+    assert "CC_IN_GPU_TESTS is already set" in result.stderr
+    assert not (tmp_path / "vol" / "runs" / "job-nested").exists()
+    assert "Webhook ping" not in result.stdout
+    assert "Webhook ping" not in result.stderr
+
+
+def test_nested_gpu_tests_guard_inherits_and_uses_real_ml_jobs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CC_IN_GPU_TESTS", "1")
+    marker = tmp_path / "pytest-stub"
+    py = tmp_path / "cc-python"
+    py.write_text(
+        f"""#!/usr/bin/env bash
+echo STUB_CC_PYTHON
+if [[ " $* " == *" -m pip "* ]]; then
+  exit 0
+fi
+if [[ " $* " == *" -m pytest "* ]]; then
+  echo PYTEST_STUB
+  printf 'hit\\n' > "{marker}"
+  exit 0
+fi
+export PYTHONPATH="{ROOT / "backend"}:{ROOT}${{PYTHONPATH:+:$PYTHONPATH}}"
+exec /usr/bin/python3 "$@"
+""",
+        encoding="utf-8",
+    )
+    py.chmod(0o755)
+    src = tmp_path / "src"
+    (src / "backend").mkdir(parents=True)
+    for name in (
+        "requirements-gpu.txt",
+        "requirements-dev.txt",
+        "requirements-nodeps.txt",
+    ):
+        (src / "backend" / name).write_text("# pin\n", encoding="utf-8")
+    job_env = {
+        "CC_VOLUME_DIR": str(tmp_path / "vol"),
+        "CC_JOB": "gpu_tests",
+        "CC_GIT_REF": SHA40,
+        "CC_JOB_ID": "job-e2e",
+        "CC_TTL_S": "60",
+        "CC_REPO_TOKEN": "tok",
+        "CC_RUN_JOB_READY": "1",
+        **_job_dirs(tmp_path, src=src),
+        "CC_PYTHON": str(py),
+    }
+    refused = _run([str(RUN_JOB)], env=job_env, bin_dir=tmp_path)
+    assert refused.returncode != 0
+    assert "Refuse to start nested gpu_tests" in refused.stderr
+    assert not (tmp_path / "vol" / "runs" / "job-e2e").exists()
+    assert not marker.exists()
+
+    run_dir = tmp_path / "vol" / "runs" / "job-ml"
+    run_dir.mkdir(parents=True)
+    direct = _run(
+        [str(py), "-m", "ml.jobs", "gpu_tests", "--run-dir", str(run_dir)],
+        env={"CC_PYTHON": str(py)},
+        bin_dir=tmp_path,
+    )
+    assert direct.returncode == 1, direct.stderr + direct.stdout
+    assert "Refuse to start nested gpu_tests" in direct.stderr
+    assert not marker.exists()
+    assert "PYTEST_STUB" not in direct.stdout
+    assert "PYTEST_STUB" not in direct.stderr
+
+
+def test_resolve_python_requires_absolute_executable(tmp_path: Path) -> None:
+    missing = _run(
+        ["bash", "-c", f"source {LIB} && cc_resolve_python"],
+        env={"CC_PYTHON": str(tmp_path / "no-such-python")},
+    )
+    assert missing.returncode != 0
+    assert "not an executable file" in missing.stderr
+    relative = _run(
+        ["bash", "-c", f"source {LIB} && CC_PYTHON=python3 cc_resolve_python"],
+    )
+    assert relative.returncode != 0
+    assert "absolute path" in relative.stderr
+    stub = _ml_jobs_python(tmp_path)
+    ok = _run(
+        ["bash", "-c", f"source {LIB} && cc_resolve_python"],
+        env={"CC_PYTHON": str(stub)},
+    )
+    assert ok.returncode == 0, ok.stderr
+    assert ok.stdout.strip() == str(stub)
+
+
+def test_terminate_skips_second_attempt_after_success(tmp_path: Path) -> None:
+    hits = tmp_path / "curl.hits"
+    _fake_curl(tmp_path, "200", '{"id":"pod-abc"}')
+    curl = tmp_path / "curl"
+    original = curl.read_text(encoding="utf-8")
+    curl.write_text(
+        f'printf "%s\\n" curl >> "{hits}"\n' + original,
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+    result = _run(
+        [
+            "bash",
+            "-c",
+            f"source {LIB} && cc_terminate_self && cc_terminate_self",
+        ],
+        env={
+            "RUNPOD_POD_ID": "pod-abc",
+            "RUNPOD_API_KEY": "ok-key",
+            "CC_VOLUME_DIR": str(tmp_path / "vol"),
+            "CC_JOB_ID": "job-term",
+        },
+        bin_dir=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert hits.read_text(encoding="utf-8").count("curl") == 1
+    assert _stamp_path("pod-abc").is_file()
+    assert not Path("/tmp/.cc_terminated.pod-abc").exists()
+    assert not (tmp_path / "vol" / "runs" / "job-term" / ".cc_terminated").exists()
+    assert result.stdout.count("terminate ok") == 1
+
+
+def _count_curl_hits(path: Path) -> int:
+    if not path.is_file():
+        return 0
+    return path.read_text(encoding="utf-8").count("curl")
+
+
+def test_terminate_stamp_other_pod_or_unset_job_does_not_suppress(
+    tmp_path: Path,
+) -> None:
+    hits = tmp_path / "curl.hits"
+    _fake_curl(tmp_path, "200", '{"id":"pod-new"}')
+    curl = tmp_path / "curl"
+    original = curl.read_text(encoding="utf-8")
+    curl.write_text(
+        f'printf "%s\\n" curl >> "{hits}"\n' + original,
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+    _stamp_path("other-pod").write_text("ok\n", encoding="utf-8")
+    unknown = tmp_path / "vol" / "runs" / "unknown"
+    unknown.mkdir(parents=True)
+    (unknown / ".cc_terminated").write_text("ok\n", encoding="utf-8")
+    reused = tmp_path / "vol" / "runs" / "job-reused"
+    reused.mkdir(parents=True)
+    (reused / ".cc_terminated").write_text("ok\n", encoding="utf-8")
+
+    unset_job = _run(
+        ["bash", "-c", f"source {LIB} && unset CC_JOB_ID && cc_terminate_self"],
+        env={
+            "RUNPOD_POD_ID": "pod-new",
+            "RUNPOD_API_KEY": "ok-key",
+            "CC_VOLUME_DIR": str(tmp_path / "vol"),
+        },
+        bin_dir=tmp_path,
+    )
+    assert unset_job.returncode == 0, unset_job.stderr
+    assert _count_curl_hits(hits) == 1
+    assert _stamp_path("pod-new").is_file()
+    assert not Path("/tmp/.cc_terminated.pod-new").exists()
+    _stamp_path("pod-new").unlink()
+
+    reused_job = _run(
+        ["bash", "-c", f"source {LIB} && cc_terminate_self"],
+        env={
+            "RUNPOD_POD_ID": "pod-reused",
+            "RUNPOD_API_KEY": "ok-key",
+            "CC_VOLUME_DIR": str(tmp_path / "vol"),
+            "CC_JOB_ID": "job-reused",
+        },
+        bin_dir=tmp_path,
+    )
+    assert reused_job.returncode == 0, reused_job.stderr
+    assert _count_curl_hits(hits) == 2
+    assert _stamp_path("pod-reused").is_file()
+    assert not Path("/tmp/.cc_terminated.pod-reused").exists()
+    _stamp_path("pod-reused").unlink()
+
+    run_dir = tmp_path / "vol" / "runs" / "job-wd"
+    run_dir.mkdir(parents=True)
+    started = str(int(time.time()) - 120)
+    (run_dir / "started_at").write_text(f"{started}\n", encoding="utf-8")
+    watchdog = _run(
+        [
+            "bash",
+            "-c",
+            f"source {LIB} && unset CC_JOB_ID && cc_watchdog_start {run_dir} && sleep 2",
+        ],
+        env={
+            "RUNPOD_POD_ID": "pod-wd",
+            "RUNPOD_API_KEY": "ok-key",
+            "CC_VOLUME_DIR": str(tmp_path / "vol"),
+            "CC_TTL_S": "1",
+        },
+        bin_dir=tmp_path,
+        timeout=5,
+    )
+    assert watchdog.returncode == 0, watchdog.stderr
+    assert _count_curl_hits(hits) >= 3
+    assert _stamp_path("pod-wd").is_file()
+    assert not Path("/tmp/.cc_terminated.pod-wd").exists()
+    assert "TTL 1s expired" in watchdog.stdout
+
+
+def test_run_times_out(tmp_path: Path) -> None:
+    with pytest.raises(AssertionError, match="timed out"):
+        _run(["bash", "-c", "sleep 5"], env=_job_dirs(tmp_path), timeout=0.2)
+
+
+def test_run_times_out_kills_process_group(tmp_path: Path) -> None:
+    pidfile = tmp_path / "child.pid"
+    script = (
+        f"sleep 60 &\n"
+        f"echo $! > '{pidfile}'\n"
+        "wait\n"
+    )
+    with pytest.raises(AssertionError, match="timed out"):
+        _run(["bash", "-c", script], env=_job_dirs(tmp_path), timeout=0.4)
+    pid = int(pidfile.read_text(encoding="utf-8").strip())
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if _pid_is_dead(pid):
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"grandchild {pid} still running")
 
 
 def test_exit_0_trap_runpodctl_fail_falls_back_to_rest(tmp_path: Path) -> None:
@@ -1655,21 +2124,7 @@ def test_run_job_records_ml_jobs_exit_code(tmp_path: Path) -> None:
         "requirements-nodeps.txt",
     ):
         (src / "backend" / name).write_text("# pin\n", encoding="utf-8")
-    py = tmp_path / "python3"
-    py.write_text(
-        """#!/usr/bin/env bash
-if [[ " $* " == *" -m pip "* ]]; then
-  exit 0
-fi
-if [[ " $* " == *" -m ml.jobs "* ]]; then
-  echo "pytest failed: 3 failed"
-  exit 7
-fi
-exec /usr/bin/python3 "$@"
-""",
-        encoding="utf-8",
-    )
-    py.chmod(0o755)
+    py = _ml_jobs_python(tmp_path, message="pytest failed: 3 failed", code=7)
     text = RUN_JOB.read_text(encoding="utf-8")
     assert "ec=0" in text
     assert "|| ec=$?" in text
@@ -1681,10 +2136,12 @@ exec /usr/bin/python3 "$@"
             "CC_GIT_REF": SHA40,
             "CC_JOB_ID": "job-ec",
             "CC_TTL_S": "60",
+            "CC_IN_GPU_TESTS": "",
             "CC_REPO_TOKEN": "tok",
             "CC_RUN_JOB_READY": "1",
             **_job_dirs(tmp_path),
             "CC_SRC_DIR": str(src),
+            "CC_PYTHON": str(py),
         },
         bin_dir=tmp_path,
     )
@@ -1916,6 +2373,20 @@ def test_safe_wipe_refuses_working_directory_cc_src(tmp_cc_src: Path, tmp_path: 
     assert (tmp_cc_src / "keep").is_file()
 
 
+def test_safe_wipe_refuses_tmpdir_under_tmp_cc_src(tmp_path: Path) -> None:
+    # Parent is $TMPDIR, so a trusted TMPDIR would allow the wipe.
+    # TMPDIR is under /tmp/cc-src, so the new rule must clear it.
+    # The path must not exist. Do not create anything under /tmp/cc-src.
+    nest = Path("/tmp/cc-src/cc-missing-tmpdir")
+    target = nest / "cc-src"
+    assert not nest.exists()
+    result = _wipe(tmp_path, str(target), env={"TMPDIR": str(nest)})
+    assert result.returncode != 0
+    assert "Parent must be /tmp" in result.stderr
+    assert not nest.exists()
+    assert not target.exists()
+
+
 def test_safe_wipe_refuses_tmpdir_inside_volume(tmp_path: Path) -> None:
     volume = tmp_path / "workspace"
     target = volume / "cc-src"
@@ -1989,6 +2460,7 @@ def test_safe_wipe_default_src_when_unset(tmp_path: Path) -> None:
     scratch = tmp_path / "cc-lib"
     volume.mkdir()
     scratch.mkdir()
+    # Assert-only. Never add wipe=True: /tmp/cc-src may be the live checkout in pod-layout.
     allowed = _run(
         [
             "bash",
@@ -2094,6 +2566,7 @@ def test_run_job_refuses_to_wipe_cc_src_checkout(tmp_cc_src: Path, tmp_path: Pat
             "CC_GIT_REF": SHA40,
             "CC_JOB_ID": "job-wipe",
             "CC_TTL_S": "60",
+            "CC_IN_GPU_TESTS": "",
             "CC_REPO_TOKEN": "tok",
             "CC_SRC_DIR": str(pod),
             "CC_LIBRARY_DIR": str(tmp_path / "cc-lib"),

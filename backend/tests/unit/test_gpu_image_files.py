@@ -66,6 +66,7 @@ def test_ci_runs_gpu_tests_from_tmp_cc_src() -> None:
     assert "/tmp/cc-src" in text
     assert 'pytest backend/tests -m "not macos"' in text
     assert "pod-layout" in text
+    assert "/opt/cc/venv/bin/python" in text
 
 
 def test_dockerfile_uses_ci_ffmpeg_pin() -> None:

@@ -62,8 +62,16 @@ Copy this block for a new entry.
 - Symptom: The second live `gpu_tests` pod at `73be826` used CUDA and `CUDAExecutionProvider`. Pytest reported 82 passed, 28 failed, and 1 skipped. Many of the failures were missing repo files.
 - Where it failed: pod
 - Cause: `test_run_job_logs_redacted_clone_stderr` ran `run_job.sh` with `CC_SRC_DIR` unset. `SRC` defaulted to `/tmp/climbing-coach`. `rm -rf "$SRC"` deleted the live checkout.
-- Fix: Tests now default `CC_SRC_DIR` and `CC_LIBRARY_DIR` under pytest `tmp_path`. The default clone dir is `/tmp/cc-src`. `run_job.sh` only removes a resolved path whose basename matches `cc-src`, whose parent is exactly `/tmp` or a trusted `$TMPDIR`, and that is not a symlink or a live checkout, volume, scratch, HOME, or working-directory path. `$TMPDIR` is untrusted when it resolves inside the volume, scratch, repo, or HOME. CI copies the repo to `/tmp/cc-src` and runs the `gpu_tests` pytest selection from there.
+- Fix: Tests now default `CC_SRC_DIR` and `CC_LIBRARY_DIR` under pytest `tmp_path`. The default clone dir is `/tmp/cc-src`. `run_job.sh` only removes a resolved path whose basename matches `cc-src`, whose parent is exactly `/tmp` or a trusted `$TMPDIR`, and that is not a symlink or a live checkout, volume, scratch, HOME, or working-directory path. `$TMPDIR` is untrusted when it resolves inside the volume, scratch, repo, HOME, or `/tmp/cc-src`. CI copies the repo to `/tmp/cc-src` and runs the `gpu_tests` pytest selection from there.
 - Prevention: Keep destructive paths on `tmp_path`. Do not run `run_job.sh` against the live checkout. The remaining check-to-rm race needs `/tmp` write access on the pod; do not give extra writers access to `/tmp` on a job pod.
+
+### 2026-10-21 — live gpu_tests nested pytest through /opt/cc python
+
+- Symptom: The third live `gpu_tests` pod at `1af17806` used an L4, CUDA 13.2, and `CUDAExecutionProvider`. Pytest never finished. `test_run_job_rerun_after_clone_reaches_ml_jobs` hung.
+- Where it failed: pod
+- Cause: `run_job.sh` used `/opt/cc/venv/bin/python` from the image. Tests only stubbed `python3` on `PATH`. The real `ml.jobs gpu_tests` ran pytest on `/tmp/cc-src` again. `_run()` had no timeout.
+- Fix: Tests set `CC_PYTHON` to the stub. `_run()` starts a new session and kills the process group after 30s. `gpu_tests` sets `CC_IN_GPU_TESTS=1` on the pytest child. Tests keep that flag unless a case clears it. `run_job.sh` and `ml.jobs` refuse a nested `gpu_tests` before the EXIT trap and before mkdir. CI creates a fake `/opt/cc/venv/bin/python`. A second terminate after success is skipped only for this pod. Tests write stamps under `CC_TERMINATE_STAMP_DIR`. `pod_up` refuses a reused job id.
+- Prevention: Do not let `run_job.sh` tests use `/opt/cc/venv/bin/python`. Keep `_run()` bounded. Do not store the terminate stamp on the volume. Do not reuse `CC_JOB_ID`.
 
 ### 2026-10-21 — wait_job S3 cp-to-stdout failed
 

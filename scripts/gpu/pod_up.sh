@@ -110,7 +110,8 @@ fi
 export CC_TTL_S
 cc_require_ttl
 
-JOB_ID="${CC_JOB_ID:-}"
+CALLER_JOB_ID="${CC_JOB_ID:-}"
+JOB_ID="$CALLER_JOB_ID"
 if [[ -z "$JOB_ID" ]]; then
   stamp="$(date -u +%Y%m%dT%H%M%SZ)"
   short="$(printf '%s' "$REF" | tr -cd 'a-fA-F0-9' | cut -c1-8)"
@@ -120,6 +121,7 @@ if [[ -z "$JOB_ID" ]]; then
   fi
   JOB_ID="cc-${kind}-${short:-noref}-${stamp}"
 fi
+cc_refuse_existing_run "$JOB_ID" "$CALLER_JOB_ID"
 
 NAME="$JOB_ID"
 cc_require_image_tag

@@ -173,6 +173,13 @@ jobs:
       - name: Pytest gpu_tests selection from /tmp/cc-src
         run: |
           set -euo pipefail
+          sudo mkdir -p /opt/cc/venv/bin
+          printf '%s\n' \
+            '#!/usr/bin/env bash' \
+            'echo "ERROR: fake /opt/cc/venv/bin/python used" >&2' \
+            'echo OPT_CC_PYTHON >&2' \
+            'exit 42' | sudo tee /opt/cc/venv/bin/python >/dev/null
+          sudo chmod 755 /opt/cc/venv/bin/python
           rm -rf /tmp/cc-src
           cp -a "$GITHUB_WORKSPACE" /tmp/cc-src
           cd /tmp/cc-src

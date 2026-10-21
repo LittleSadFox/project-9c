@@ -102,6 +102,29 @@ cc_require_job_or_interactive() {
   cc_fail "Set CC_JOB or CC_INTERACTIVE=1."
 }
 
+cc_refuse_nested_gpu_tests() {
+  if [[ "${CC_JOB:-}" == "gpu_tests" && "${CC_IN_GPU_TESTS:-}" == "1" ]]; then
+    cc_fail "Refuse to start nested gpu_tests. CC_IN_GPU_TESTS is already set."
+  fi
+}
+
+cc_resolve_python() {
+  local raw="${CC_PYTHON:-}"
+  if [[ -n "$raw" ]]; then
+    raw="$(cc_trim "$raw")"
+    [[ -n "$raw" ]] || cc_fail "CC_PYTHON is empty."
+    [[ "$raw" == /* ]] || cc_fail "CC_PYTHON must be an absolute path."
+    [[ -x "$raw" && -f "$raw" ]] || cc_fail "CC_PYTHON is not an executable file: ${raw}."
+    printf '%s\n' "$raw"
+    return 0
+  fi
+  if [[ -x /opt/cc/venv/bin/python ]]; then
+    printf '%s\n' /opt/cc/venv/bin/python
+    return 0
+  fi
+  printf '%s\n' python3
+}
+
 cc_secret_ref_repo_token() {
   printf '%s' '{{ RUNPOD_SECRET_cc_repo_token }}'
 }
@@ -111,7 +134,9 @@ cc_secret_ref_webhook() {
 }
 
 cc_default_gpu_csv() {
-  printf '%s' "NVIDIA L4,NVIDIA RTX 2000 Ada Generation,NVIDIA GeForce RTX 4090,NVIDIA A100 80GB PCIe,NVIDIA RTX PRO 4500 Blackwell,NVIDIA RTX PRO 4000 Blackwell,NVIDIA GeForce RTX 5090"
+  # ONNX Runtime has never been verified on sm_120 (Blackwell) on a pod.
+  # Leave RTX PRO 4500/4000 Blackwell and RTX 5090 out of the default list.
+  printf '%s' "NVIDIA L4,NVIDIA RTX 2000 Ada Generation,NVIDIA GeForce RTX 4090,NVIDIA A100 80GB PCIe"
 }
 
 cc_allowed_cuda_versions() {
@@ -636,8 +661,9 @@ cc_assert_safe_wipe_dir() {
   tmpdir_root=""
   if [[ -n "${TMPDIR:-}" ]]; then
     tmpdir_root="$(cc_realpath "$TMPDIR")"
-    local protected
-    for protected in "$volume" "$scratch" "$repo_root" "$home"; do
+    local protected clone_root
+    clone_root="${tmp_root}/cc-src"
+    for protected in "$volume" "$scratch" "$repo_root" "$home" "$clone_root"; do
       if [[ -n "$protected" && -n "$tmpdir_root" ]]; then
         if [[ "$tmpdir_root" == "$protected" || "$tmpdir_root" == "$protected"/* ]]; then
           tmpdir_root=""
@@ -882,6 +908,70 @@ cc_rest() {
   return 0
 }
 
+cc_s3_object_exists() {
+  local uri="$1"
+  local region="$2"
+  local endpoint="$3"
+  local err dest parts bucket key
+  command -v aws >/dev/null 2>&1 || cc_fail "Install AWS CLI v2."
+  if ! parts="$(cc_s3_uri_parts "$uri")"; then
+    cc_fail "S3 URI ${uri} is not s3://bucket/key."
+  fi
+  bucket="$(printf '%s\n' "$parts" | sed -n '1p')"
+  key="$(printf '%s\n' "$parts" | sed -n '2p')"
+  err="$(mktemp)"
+  dest="$(mktemp)"
+  # shellcheck disable=SC2046
+  if aws s3api get-object \
+    --bucket "$bucket" \
+    --key "$key" \
+    --region "$region" \
+    --endpoint-url "$endpoint" \
+    $(cc_aws_args) \
+    "$dest" >/dev/null 2>"$err"; then
+    rm -f "$err" "$dest"
+    return 0
+  fi
+  if grep -qiE 'NoSuchKey|Not Found|404' "$err"; then
+    rm -f "$err" "$dest"
+    return 1
+  fi
+  echo "ERROR: S3 get-object ${uri} failed. $(cc_s3_err_summary "$err" "$key")" >&2
+  rm -f "$err" "$dest"
+  cc_fail "Could not check ${uri}."
+}
+
+cc_s3_run_exists() {
+  local job_id="$1"
+  local volume region endpoint name
+  volume="$(cc_volume_id)"
+  region="${CC_RUNPOD_DATACENTER:-}"
+  [[ -n "$region" ]] || cc_fail "Set CC_RUNPOD_DATACENTER to the volume datacenter."
+  endpoint="$(cc_s3_endpoint)"
+  for name in status started_at log.txt metrics.json; do
+    if cc_s3_object_exists "s3://${volume}/runs/${job_id}/${name}" "$region" "$endpoint"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+cc_refuse_existing_run() {
+  local job_id="$1"
+  local caller="${2:-}"
+  local vol="${CC_VOLUME_DIR:-}"
+  [[ -n "$job_id" ]] || cc_fail "Job id is empty."
+  if [[ -n "$vol" && -e "${vol}/runs/${job_id}" ]]; then
+    cc_fail "Refuse to reuse job id ${job_id}. runs/${job_id} already exists on the volume."
+  fi
+  if [[ -z "$caller" ]]; then
+    return 0
+  fi
+  if cc_s3_run_exists "$job_id"; then
+    cc_fail "Refuse to reuse job id ${job_id}. runs/${job_id} already exists in S3."
+  fi
+}
+
 cc_s3_endpoint() {
   local dc="${CC_RUNPOD_DATACENTER:-}"
   [[ -n "$dc" ]] || cc_fail "Set CC_RUNPOD_DATACENTER to the volume datacenter."
@@ -963,7 +1053,35 @@ cc_log() {
   fi
 }
 
+cc_terminate_stamp() {
+  local pod="${RUNPOD_POD_ID:-}"
+  local dir="${CC_TERMINATE_STAMP_DIR:-/tmp}"
+  if [[ -z "$pod" ]]; then
+    return 1
+  fi
+  case "$pod" in
+    *[!A-Za-z0-9._-]*)
+      return 1
+      ;;
+  esac
+  dir="$(cc_trim "$dir")"
+  [[ "$dir" == /* ]] || return 1
+  printf '%s\n' "${dir}/.cc_terminated.${pod}"
+}
+
+cc_terminate_mark() {
+  local stamp dir
+  stamp="$(cc_terminate_stamp)" || return 0
+  dir="${stamp%/*}"
+  mkdir -p "$dir"
+  printf 'ok\n' >"$stamp"
+}
+
 cc_terminate_self() {
+  local stamp
+  if stamp="$(cc_terminate_stamp)" && [[ -f "$stamp" ]]; then
+    return 0
+  fi
   if [[ -z "${RUNPOD_POD_ID:-}" ]]; then
     echo "ERROR: RUNPOD_POD_ID is missing. Cannot terminate this pod." >&2
     return 1
@@ -979,12 +1097,14 @@ cc_terminate_self() {
       if ctl="$(cc_run_timeout 20 runpodctl remove pod "$RUNPOD_POD_ID" 2>&1)" \
         || ctl="$(cc_run_timeout 20 runpodctl pod delete "$RUNPOD_POD_ID" 2>&1)"; then
         cc_log "terminate ok via runpodctl attempt=${attempt}"
+        cc_terminate_mark
         return 0
       fi
       cc_log "runpodctl failed attempt=${attempt}: $(cc_redact_oneline "$ctl")"
     fi
     if cc_rest DELETE "/pods/${RUNPOD_POD_ID}" >/dev/null; then
       cc_log "terminate ok via curl attempt=${attempt}"
+      cc_terminate_mark
       return 0
     fi
     delay=$((attempt * 2))

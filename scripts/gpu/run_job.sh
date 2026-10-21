@@ -84,6 +84,10 @@ cleanup() {
   return 0
 }
 
+# Refuse before the EXIT trap and before mkdir. A nested gpu_tests
+# must not write a run folder, mark an outer job failed, or ping twice.
+cc_refuse_nested_gpu_tests
+
 trap cleanup EXIT
 trap cleanup INT
 trap cleanup TERM
@@ -96,6 +100,7 @@ cc_require_ttl
 RUN_DIR="${VOLUME}/runs/${CC_JOB_ID}"
 
 mkdir -p "$RUN_DIR/artifacts" "$VOLUME/models" "$VOLUME/cache/pip" "$SCRATCH"
+export CC_RUN_LOG="${RUN_DIR}/log.txt"
 export GIT_TERMINAL_PROMPT=0
 export GIT_TRACE_REDACT=1
 cc_git_sanitize_env
@@ -116,7 +121,6 @@ if [[ -f "$RUN_DIR/status" ]]; then
   esac
 fi
 echo running >"$RUN_DIR/status"
-export CC_RUN_LOG="${RUN_DIR}/log.txt"
 
 {
   echo "job=${CC_JOB}"
@@ -172,11 +176,8 @@ export CC_GOLDEN_DIR="${CC_GOLDEN_DIR:-$VOLUME/videos}"
 export CC_VOLUME_DIR="$VOLUME"
 export PYTHONPATH="${SRC}/backend:${SRC}${PYTHONPATH:+:$PYTHONPATH}"
 
-if [[ -x /opt/cc/venv/bin/python ]]; then
-  PY=/opt/cc/venv/bin/python
-else
-  PY=python3
-fi
+PY="$(cc_resolve_python)"
+echo "python=${PY}" | tee -a "$RUN_DIR/log.txt"
 
 echo "Install pins from cache" | tee -a "$RUN_DIR/log.txt"
 cc_run_logged --wait "$PY" -m pip install --cache-dir "$VOLUME/cache/pip" -r "$SRC/backend/requirements-gpu.txt"

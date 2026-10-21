@@ -144,7 +144,9 @@ Do not write example credentials.
    Create the volume in a datacenter that supports the S3 API.
    Examples: `EU-RO-1`, `EUR-IS-1`, `US-KS-2`, `US-CA-2`.
    See the Runpod S3 API docs for the full list.
-   Pick a datacenter with good L4, RTX 2000 Ada, RTX 4090, A100, RTX PRO Blackwell, and RTX 5090 availability.
+   Pick a datacenter with good L4, RTX 2000 Ada, RTX 4090, and A100 availability.
+   The default GPU list omits Blackwell (RTX PRO 4500/4000 and RTX 5090).
+   ONNX Runtime has never been verified on sm_120 on a pod.
 
 The account API key never goes in a pod.
 A pod uses only the pod-scoped key that Runpod injects, plus the two secrets.
@@ -159,7 +161,7 @@ Before every first `pod_up`, the Runpod bot must verify the GHCR registry creden
 A complete setup does not skip that check.
 The first live `gpu_tests` pod at `bd99ed3` failed at clone, wrote `status=failed`, and self-terminated.
 The second live `gpu_tests` pod at `73be826` used CUDA and then failed after a test deleted `/tmp/climbing-coach`.
-The clone dir is `/tmp/cc-src`. The wipe guard allowlists that basename under `/tmp` or a trusted `$TMPDIR`. The remaining check-to-rm race needs `/tmp` write access on the pod. CI copies the repo to `/tmp/cc-src` and runs the `gpu_tests` pytest selection from there.
+The clone dir is `/tmp/cc-src`. The wipe guard allowlists that basename under `/tmp` or a trusted `$TMPDIR`. `$TMPDIR` under `/tmp/cc-src` is untrusted. The remaining check-to-rm race needs `/tmp` write access on the pod. CI copies the repo to `/tmp/cc-src` and runs the `gpu_tests` pytest selection from there. Tests set `CC_PYTHON` so they do not use `/opt/cc/venv/bin/python`. `CC_PYTHON` is a test hook. A pod uses `/opt/cc/venv/bin/python` unless that file is missing. `run_job.sh` writes `python=<path>` to the job log. `gpu_tests` refuses a nested run when `CC_IN_GPU_TESTS` is set. The nested refuse exits before the cleanup trap and before mkdir. The terminate stamp is `$CC_TERMINATE_STAMP_DIR/.cc_terminated.$RUNPOD_POD_ID`. Tests set that dir under pytest tmp. `pod_up` refuses a job id whose `runs/<id>` folder already exists.
 `allowedCudaVersions` is opt-in via `CC_ALLOWED_CUDA` (unset by default). The image CUDA ≥12.8 guard is the real floor.
 
 Phase 0 needs only a small sample upload.
