@@ -67,7 +67,7 @@ flowchart LR
     App["app, library and golden folder"]
   end
   Bot -->|"push"| Repo
-  Repo -->|"gpu-image.yml later"| Ghcr
+  Repo -->|"gpu-image.yml"| Ghcr
   Bot -->|"REST API: create pod"| Pod
   Ghcr -->|"image pull"| Pod
   Repo -->|"clone at sha"| Pod
@@ -337,7 +337,13 @@ Phase 6 image `climbing-coach-train`:
 - PyTorch, MMCV 2.2, MMPose 1.3, NumPy 1.26
 - Do not put those packages in the Phase 0 image
 
-The Docker files and `gpu-image.yml` land in the `p0-runpod-runner` and Phase 6 todos.
+`docker/gpu/` and `.github/workflows/gpu-image.yml` build `climbing-coach-gpu`.
+The image is private on GHCR.
+Tags are the git sha and, on `main`, `latest`.
+The first live `gpu_tests` pod waits on the section 2.2 credentials.
+Do not put the account API key in the pod template or in pod env.
+
+The Docker files for `climbing-coach-train` land in the Phase 6 todo.
 
 ## 14. Phase 0 skeleton
 
@@ -346,4 +352,5 @@ The Phase 0 skeleton is in the tree.
 - `backend/app` has config, errors, security, storage, db, `0001_init.sql`, the job queue, `/health`, `/auth/launch`, and the SPA fallback.
 - `create_app(settings, media=..., estimator=...)` injects fakes in tests.
 - The frontend Vite app serves the Liquid Glass shell and empty pages.
-- Scripts: `setup_mac.sh`, `check.sh`, `dev.sh`, `build.sh`, `run_mac.sh`, and `download_models.py`.
+- Scripts: `setup_mac.sh`, `check.sh`, `dev.sh`, `build.sh`, `run_mac.sh`, `download_models.py`, `export_labels.py`, `sync_volume.sh`, and `scripts/gpu/`.
+- `ml/jobs.py` registers `gpu_tests`.

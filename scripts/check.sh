@@ -28,7 +28,7 @@ else
 fi
 
 echo "Ruff"
-ruff check backend
+ruff check backend ml scripts/export_labels.py scripts/download_models.py
 
 echo "Mypy"
 mypy backend/app

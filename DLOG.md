@@ -91,3 +91,22 @@ The repo-root `scripts` package is then visible.
 
 `spa_target` joins under `frontend/dist` with `safe_join`.
 A `..` or absolute path that leaves that folder returns 400.
+
+## 2026-10-21 — p0-runpod-runner
+
+Add the Phase 0 GPU runner.
+
+- `docker/gpu/` builds `climbing-coach-gpu` from `nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04`.
+- The image has Python 3.12, `onnxruntime-gpu==1.23.2`, the CI static ffmpeg 7.1.5 build, sshd, git, curl, jq, and a TTL watchdog.
+- The image has no PyTorch and no MMPose.
+- `.github/workflows/gpu-image.yml` builds the image and pushes it to private GHCR.
+- Tags are the git sha and, on `main`, `latest`.
+- `scripts/gpu/` has `pod_up.sh`, `run_job.sh`, `wait_job.sh`, `pod_down.sh`, and `pod_ls.sh`.
+- The scripts always set `CC_TTL_S`.
+- The scripts refuse to copy the account API key into pod env.
+- `ml/jobs.py` registers `gpu_tests`.
+- `scripts/sync_volume.sh` and `scripts/export_labels.py` copy labels and new golden files.
+
+The first live `pod_up.sh --job gpu_tests` waits on Ryan and the Runpod bot.
+They must finish the section 2.2 credential setup.
+This change does not start a pod.

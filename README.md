@@ -149,12 +149,16 @@ Do not write example credentials.
 The account API key never goes in a pod.
 A pod uses only the pod-scoped key that Runpod injects, plus the two secrets.
 
-The Runpod runner, the GPU image, and `gpu-image.yml` land in the `p0-runpod-runner` todo.
-Do not start a pod until that work exists and the GHCR credential is in place.
+The runner files are in the tree: `docker/gpu/`, `scripts/gpu/`, `ml/jobs.py`, and `.github/workflows/gpu-image.yml`.
+
+Do not start a live pod from a coding agent.
+Only the Runpod bot starts pods.
+The first live `scripts/gpu/pod_up.sh --job gpu_tests` waits on Ryan and the Runpod bot.
+They must finish the section 2.2 setup and add the GHCR `read:packages` credential.
 
 Phase 0 needs only a small sample upload.
 One or two videos are enough.
-Upload them with `scripts/sync_volume.sh` after that script exists.
+Upload them with `scripts/sync_volume.sh` after the volume exists.
 The golden set of at least 10 videos is a post–Phase 1 todo.
 
 ## 5. Commands
@@ -173,7 +177,8 @@ This table is the command map.
 | `scripts/export_labels.py` | Writes golden labels from the dev library. |
 | `scripts/sync_volume.sh` | Copies new golden videos and labels to the Runpod volume. |
 | `scripts/export_dataset.sh` | Uploads a Phase 4 or Phase 6 dataset. |
-| `scripts/gpu/pod_up.sh` | Creates a GPU pod for a job or an interactive session. |
+| `scripts/gpu/pod_up.sh` | Creates a GPU pod for a job or an interactive session. Use `--dry-run` to print the payload. |
+| `scripts/gpu/run_job.sh` | Runs inside the pod. Clone, install, run `ml/jobs.py`, write the run folder, ping, terminate. |
 | `scripts/gpu/wait_job.sh` | Polls `runs/<id>/status` through the S3 API. |
 | `scripts/gpu/pod_down.sh` | Terminates a pod. |
 | `scripts/gpu/pod_ls.sh` | Lists running pods and their age. |
@@ -181,6 +186,8 @@ This table is the command map.
 Only the Runpod bot starts pods.
 Never start a pod without `CC_TTL_S`.
 Never start a pod without `CC_JOB` or `--interactive`.
+The account API key never goes in the pod template or in pod env.
+A job pod terminates itself with the pod-scoped key that Runpod injects.
 
 ## 6. Environment variables
 
@@ -205,6 +212,24 @@ The frozen `Settings` object holds them.
 
 On pods, set `CC_MODELS_DIR=/workspace/models` and `CC_GOLDEN_DIR=/workspace/videos`.
 Point `CC_LIBRARY_DIR` at a scratch folder on the container disk.
+
+Pod scripts also read these names.
+Ryan and the Runpod bot set the values.
+Do not invent the values.
+
+| Name | Meaning |
+| --- | --- |
+| `CC_TTL_S` | Required lifetime backstop in seconds |
+| `CC_JOB` | Job name. Empty for `--interactive` |
+| `CC_GIT_REF` | Pushed commit sha |
+| `CC_JOB_ID` | Run folder name under `/workspace/runs/` |
+| `CC_REPO_TOKEN` | Runpod secret `cc_repo_token`. Do not set this by hand |
+| `CC_WEBHOOK_URL` | Runpod secret `cc_webhook_url`. Do not set this by hand |
+| `RUNPOD_API_KEY` | Account key on the bot computer only. Never copy it into a pod |
+| `CC_RUNPOD_TEMPLATE_ID` | Pod template id |
+| `CC_RUNPOD_VOLUME_ID` / `CC_VOLUME_ID` | Network volume id |
+| `CC_RUNPOD_DATACENTER` / `CC_VOLUME_DC` | Volume datacenter |
+| `CC_GPU_IMAGE` | GHCR image name when the template does not set it |
 
 Do not put secrets in this file.
 Do not commit `.env` files that hold tokens.
@@ -253,7 +278,11 @@ Bot and CI
 - [ ] `npm run build` and Vitest pass.
 - [ ] A Playwright Chromium smoke test opens the shell.
 
-Pod (after `p0-runpod-runner`)
+Pod (after Runpod credentials exist)
+
+The first live `pod_up.sh --job gpu_tests` waits on Ryan and the Runpod bot.
+They must finish the section 2.2 setup.
+This repo change does not start a pod.
 
 - [ ] `pod_up.sh --job gpu_tests` clones the commit and runs the suite with real ffmpeg.
 - [ ] A tiny ONNX model runs on `CUDAExecutionProvider`.
@@ -398,8 +427,11 @@ GitHub Actions runs on every push and pull request.
 
 The macOS job proves that every pinned wheel installs on Apple Silicon.
 
-`gpu-image.yml` is not part of this todo.
-That workflow lands with the Runpod runner.
+`gpu-image.yml` builds `climbing-coach-gpu` and pushes it to private GHCR.
+It runs when `docker/gpu/` or `requirements*.txt` change.
+Tags are the git sha and, on `main`, `latest`.
+The image is private.
+Add a Runpod registry credential with GitHub `read:packages` before the first pod.
 
 ## 11. Licence
 
