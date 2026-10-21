@@ -158,6 +158,7 @@ AGENTS.md section 9.4 still applies.
 Before every first `pod_up`, the Runpod bot must verify the GHCR registry credential is present.
 A complete setup does not skip that check.
 The first live `gpu_tests` pod at `bd99ed3` failed at clone, wrote `status=failed`, and self-terminated.
+The second live `gpu_tests` pod at `73be826` used CUDA and then failed after a test deleted `/tmp/climbing-coach`.
 `allowedCudaVersions` is opt-in via `CC_ALLOWED_CUDA` (unset by default). The image CUDA ≥12.8 guard is the real floor.
 
 Phase 0 needs only a small sample upload.
@@ -183,7 +184,7 @@ This table is the command map.
 | `scripts/export_dataset.sh` | Uploads a Phase 4 or Phase 6 dataset. |
 | `scripts/gpu/pod_up.sh` | Creates a GPU pod for a job or an interactive session. Use `--dry-run` to print the payload. |
 | `scripts/gpu/run_job.sh` | Runs inside the pod. Clone, install, run `ml/jobs.py`, write the run folder, ping, terminate. |
-| `scripts/gpu/wait_job.sh` | Polls `runs/<id>/status` through the S3 API. Pass `--pod-id` to fail if the pod exits first. |
+| `scripts/gpu/wait_job.sh` | Polls `runs/<id>/status` with `aws s3api get-object`. Pass `--pod-id` to fail if the pod exits first. |
 | `scripts/gpu/pod_down.sh` | Terminates a pod. |
 | `scripts/gpu/pod_ls.sh` | Lists running pods and their age. |
 

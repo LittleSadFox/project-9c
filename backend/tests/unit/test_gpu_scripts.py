@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -126,6 +127,74 @@ def _payload(stdout: str) -> dict[str, object]:
     return data
 
 
+def _job_dirs(tmp_path: Path) -> dict[str, str]:
+    src = tmp_path / "cc-src"
+    library = tmp_path / "cc-lib"
+    src.mkdir(parents=True, exist_ok=True)
+    library.mkdir(parents=True, exist_ok=True)
+    return {"CC_SRC_DIR": str(src), "CC_LIBRARY_DIR": str(library)}
+
+
+def _webhook_curl(tmp_path: Path) -> Path:
+    hits = tmp_path / "webhook.log"
+    curl = tmp_path / "curl"
+    curl.write_text(
+        f"""#!/usr/bin/env bash
+printf 'argv=%s\\n' "$*" >> "{hits}"
+url=""
+body=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --config)
+      url="$(sed -n 's/^url = \"\\(.*\\)\"$/\\1/p' "$2")"
+      shift 2
+      ;;
+    -d)
+      body="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+printf 'url=%s body=%s\\n' "$url" "$body" >> "{hits}"
+printf '200'
+exit 0
+""",
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+    return hits
+
+
+_DESTRUCTIVE_SCRIPTS = {"run_job.sh", "entrypoint.sh"}
+_FORBIDDEN_JOB_DIRS = {"/tmp/climbing-coach", "/tmp/cc-library"}
+
+
+def _is_destructive_script(args: list[str]) -> bool:
+    return any(Path(arg).name in _DESTRUCTIVE_SCRIPTS for arg in args)
+
+
+def _require_isolated_job_dirs(extra: dict[str, str]) -> None:
+    for key in ("CC_SRC_DIR", "CC_LIBRARY_DIR", "CC_VOLUME_DIR"):
+        if key not in extra:
+            raise AssertionError(
+                "run_job.sh and entrypoint tests must set "
+                "CC_SRC_DIR, CC_LIBRARY_DIR, and CC_VOLUME_DIR"
+            )
+        raw = extra[key]
+        if not raw or raw in _FORBIDDEN_JOB_DIRS:
+            raise AssertionError(f"{key} must be an isolated tmp_path directory")
+        resolved = Path(raw).resolve()
+        home = Path.home().resolve()
+        if resolved == Path("/") or resolved == home:
+            raise AssertionError(f"{key} must not be / or HOME")
+        root = ROOT.resolve()
+        if resolved == root or root.is_relative_to(resolved):
+            raise AssertionError(f"{key} must not be the live checkout or a parent of it")
+
+
 def _isolated_env(
     env: dict[str, str] | None = None,
     *,
@@ -160,6 +229,9 @@ def _run(
     *,
     bin_dir: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    extra = dict(env) if env else {}
+    if _is_destructive_script(args):
+        _require_isolated_job_dirs(extra)
     return subprocess.run(
         args,
         cwd=str(ROOT),
@@ -478,7 +550,7 @@ def test_terminate_self_fails_without_pod_id() -> None:
 def test_run_job_trap_reaches_terminate(tmp_path: Path) -> None:
     result = _run(
         [str(RUN_JOB)],
-        env={"CC_VOLUME_DIR": str(tmp_path)},
+        env={"CC_VOLUME_DIR": str(tmp_path), **_job_dirs(tmp_path)},
     )
     assert result.returncode != 0
     assert "CC_TTL_S" in result.stderr or "TTL" in result.stderr
@@ -523,7 +595,7 @@ exit 0
 
     trapped = _run(
         [str(RUN_JOB)],
-        env={"CC_VOLUME_DIR": str(tmp_path / "vol")},
+        env={"CC_VOLUME_DIR": str(tmp_path / "vol"), **_job_dirs(tmp_path)},
     )
     assert trapped.returncode != 0
     assert "RUNPOD_POD_ID is missing" in trapped.stderr
@@ -631,8 +703,10 @@ def test_wait_job_passed_does_not_exit_zero_if_pod_remains(tmp_path: Path) -> No
     aws = tmp_path / "aws"
     aws.write_text(
         """#!/usr/bin/env bash
-if [[ "$1" == "s3" && "$2" == "cp" ]]; then
-  printf 'passed\\n'
+out=""
+for out; do :; done
+if [[ "$1" == "s3api" && "$2" == "get-object" && -n "$out" && "$out" != "-" ]]; then
+  printf 'passed\\n' > "$out"
   exit 0
 fi
 exit 1
@@ -751,11 +825,13 @@ if [[ -f "{state}" ]]; then
 fi
 n=$((n + 1))
 printf '%s' "$n" > "{state}"
+out=""
+for out; do :; done
 if [[ "$n" -lt 3 ]]; then
   echo "SignatureDoesNotMatch" >&2
   exit 1
 fi
-printf 'passed\\n'
+printf 'passed\\n' > "$out"
 exit 0
 """,
         encoding="utf-8",
@@ -786,11 +862,13 @@ if [[ -f "{state}" ]]; then
 fi
 n=$((n + 1))
 printf '%s' "$n" > "{state}"
+out=""
+for out; do :; done
 if [[ "$n" -lt 3 ]]; then
   echo "{live_err}" >&2
   exit 1
 fi
-printf 'passed\\n'
+printf 'passed\\n' > "$out"
 exit 0
 """,
         encoding="utf-8",
@@ -807,6 +885,32 @@ exit 0
     assert result.returncode == 0, result.stderr
     assert "passed" in result.stdout
     assert state.read_text(encoding="utf-8") == "3"
+    assert "SignatureDoesNotMatch" not in result.stderr
+    assert result.stderr.count("ERROR: S3 get-object") == 0
+
+
+def test_s3_get_object_summarizes_retry_failure(tmp_path: Path) -> None:
+    aws = tmp_path / "aws"
+    aws.write_text(
+        """#!/usr/bin/env bash
+echo "SignatureDoesNotMatch" >&2
+exit 1
+""",
+        encoding="utf-8",
+    )
+    aws.chmod(0o755)
+    result = _run(
+        [
+            "bash",
+            "-c",
+            f"source {LIB} && cc_s3_cp_stdout s3://vol/runs/job-1/status EU-RO-1 https://s3api-eu-ro-1.runpod.io",
+        ],
+        bin_dir=tmp_path,
+    )
+    assert result.returncode != 0
+    assert result.stderr.count("ERROR: S3 get-object") == 1
+    assert "after 4 attempts" in result.stderr
+    assert result.stderr.count("SignatureDoesNotMatch") == 0
 
 
 def test_run_job_logs_redacted_clone_stderr(tmp_path: Path) -> None:
@@ -829,6 +933,7 @@ exit 1
             "CC_JOB_ID": "job-clone",
             "CC_TTL_S": "60",
             "CC_REPO_TOKEN": token,
+            **_job_dirs(tmp_path),
         },
         bin_dir=tmp_path,
     )
@@ -848,7 +953,7 @@ def test_interactive_sigterm_is_stopped_not_failed(tmp_path: Path) -> None:
         [
             "bash",
             "-c",
-            f"source {LIB} && cc_early_cleanup",
+            f"source {LIB} && cc_early_cleanup && echo CONTINUED",
         ],
         env={
             "CC_VOLUME_DIR": str(tmp_path),
@@ -860,9 +965,10 @@ def test_interactive_sigterm_is_stopped_not_failed(tmp_path: Path) -> None:
     status = tmp_path / "runs" / "job-int" / "status"
     assert status.is_file()
     assert status.read_text(encoding="utf-8").strip() == "stopped"
-    assert result.returncode == 0
-    interactive = LIB.read_text(encoding="utf-8").split("CC_INTERACTIVE_READY")[1]
-    assert "exit 0" in interactive.split("cc_terminate_self")[1][:80]
+    assert "CONTINUED" not in result.stdout
+    assert result.returncode != 0
+    assert "terminate failed after interactive stop" in result.stderr
+    assert "RUNPOD_POD_ID is missing" in result.stderr
 
 
 def test_failed_status_rewrite_does_not_ping_webhook(tmp_path: Path) -> None:
@@ -923,6 +1029,7 @@ def test_run_job_skips_finished_status(tmp_path: Path) -> None:
             "CC_GIT_REF": SHA40,
             "CC_JOB_ID": "job-done",
             "CC_TTL_S": "60",
+            **_job_dirs(tmp_path),
         },
     )
     assert "already passed" in result.stdout
@@ -938,7 +1045,12 @@ def test_entrypoint_early_failure_writes_status(tmp_path: Path) -> None:
     script.chmod(0o755)
     result = _run(
         [str(script)],
-        env={"CC_VOLUME_DIR": str(tmp_path), "CC_JOB_ID": "job-early", "CC_JOB": "gpu_tests"},
+        env={
+            "CC_VOLUME_DIR": str(tmp_path),
+            "CC_JOB_ID": "job-early",
+            "CC_JOB": "gpu_tests",
+            **_job_dirs(tmp_path),
+        },
     )
     assert result.returncode != 0
     status = tmp_path / "runs" / "job-early" / "status"
@@ -1047,6 +1159,7 @@ def test_run_job_fails_fast_without_repo_token(tmp_path: Path) -> None:
             "CC_GIT_REF": SHA40,
             "CC_JOB_ID": "job-notoken",
             "CC_TTL_S": "60",
+            **_job_dirs(tmp_path),
         },
     )
     assert result.returncode != 0
@@ -1064,17 +1177,7 @@ def test_run_job_fails_fast_without_repo_token(tmp_path: Path) -> None:
 
 
 def test_run_job_empty_token_pings_webhook(tmp_path: Path) -> None:
-    hits = tmp_path / "webhook.log"
-    curl = tmp_path / "curl"
-    curl.write_text(
-        f"""#!/usr/bin/env bash
-printf '%s\\n' "$*" >> "{hits}"
-printf '200'
-exit 0
-""",
-        encoding="utf-8",
-    )
-    curl.chmod(0o755)
+    hits = _webhook_curl(tmp_path)
     result = _run(
         [str(RUN_JOB)],
         env={
@@ -1084,30 +1187,25 @@ exit 0
             "CC_JOB_ID": "job-hook",
             "CC_TTL_S": "60",
             "CC_WEBHOOK_URL": "https://example.invalid/hook",
+            **_job_dirs(tmp_path),
         },
         bin_dir=tmp_path,
     )
     assert result.returncode != 0
     assert hits.is_file(), result.stderr
-    body = hits.read_text(encoding="utf-8")
-    assert "example.invalid/hook" in body
-    assert "failed" in body
+    logged = hits.read_text(encoding="utf-8")
+    assert logged.count("url=") == 1, logged
+    assert "example.invalid/hook" in logged
+    assert "failed" in logged
+    for line in logged.splitlines():
+        if line.startswith("argv="):
+            assert "example.invalid/hook" not in line
     status = tmp_path / "vol" / "runs" / "job-hook" / "status"
     assert status.read_text(encoding="utf-8").strip() == "failed"
 
 
 def test_run_job_unresolved_token_pings_webhook(tmp_path: Path) -> None:
-    hits = tmp_path / "webhook.log"
-    curl = tmp_path / "curl"
-    curl.write_text(
-        f"""#!/usr/bin/env bash
-printf '%s\\n' "$*" >> "{hits}"
-printf '200'
-exit 0
-""",
-        encoding="utf-8",
-    )
-    curl.chmod(0o755)
+    hits = _webhook_curl(tmp_path)
     result = _run(
         [str(RUN_JOB)],
         env={
@@ -1118,6 +1216,7 @@ exit 0
             "CC_TTL_S": "60",
             "CC_REPO_TOKEN": "{{ RUNPOD_SECRET_cc_repo_token }}",
             "CC_WEBHOOK_URL": "https://example.invalid/hook",
+            **_job_dirs(tmp_path),
         },
         bin_dir=tmp_path,
     )
@@ -1128,9 +1227,13 @@ exit 0
     assert "CC_REPO_TOKEN was not resolved" in log.read_text(encoding="utf-8")
     assert "CC_REPO_TOKEN is empty" not in log.read_text(encoding="utf-8")
     assert hits.is_file(), result.stderr
-    body = hits.read_text(encoding="utf-8")
-    assert "example.invalid/hook" in body
-    assert "failed" in body
+    logged = hits.read_text(encoding="utf-8")
+    assert logged.count("url=") == 1, logged
+    assert "example.invalid/hook" in logged
+    assert "failed" in logged
+    for line in logged.splitlines():
+        if line.startswith("argv="):
+            assert "example.invalid/hook" not in line
     status = tmp_path / "vol" / "runs" / "job-unresolved" / "status"
     assert status.read_text(encoding="utf-8").strip() == "failed"
 
@@ -1154,31 +1257,38 @@ def test_run_logged_streams_before_exit(tmp_path: Path) -> None:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        start_new_session=True,
     )
     deadline = time.time() + 8
     seen = ""
-    while time.time() < deadline:
-        if log.is_file():
-            seen = log.read_text(encoding="utf-8")
-            if "first-line" in seen:
-                break
-        if proc.poll() is not None:
-            break
-        time.sleep(0.05)
-    else:
-        proc.kill()
-        proc.wait(timeout=5)
-        raise AssertionError("log was not streamed before the command exited")
-    assert "first-line" in seen
-    assert token not in seen
-    assert "REDACTED" in seen
-    assert "second-line" not in seen
-    proc.terminate()
     try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait(timeout=5)
+        while time.time() < deadline:
+            if log.is_file():
+                seen = log.read_text(encoding="utf-8")
+                if "first-line" in seen:
+                    break
+            if proc.poll() is not None:
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("log was not streamed before the command exited")
+        assert "first-line" in seen
+        assert token not in seen
+        assert "REDACTED" in seen
+        assert "second-line" not in seen
+    finally:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait(timeout=5)
 
 
 def test_run_job_rerun_after_clone_reaches_ml_jobs(tmp_path: Path) -> None:
@@ -1230,6 +1340,7 @@ exec /usr/bin/python3 "$@"
             "CC_JOB_ID": "job-rerun",
             "CC_TTL_S": "60",
             "CC_REPO_TOKEN": "clone-then-clear-token",
+            **_job_dirs(tmp_path),
             "CC_SRC_DIR": str(src),
         },
         bin_dir=tmp_path,
@@ -1317,6 +1428,7 @@ exec /usr/bin/python3 "$@"
             "CC_TTL_S": "60",
             "CC_REPO_TOKEN": "tok",
             "CC_RUN_JOB_READY": "1",
+            **_job_dirs(tmp_path),
             "CC_SRC_DIR": str(src),
         },
         bin_dir=tmp_path,
@@ -1424,6 +1536,135 @@ def test_entrypoint_sleeps_in_background() -> None:
     text = ENTRYPOINT.read_text(encoding="utf-8")
     assert "sleep 3600 &" in text
     assert "wait $!" in text
+
+
+def test_safe_wipe_refuses_repo_and_parents(tmp_path: Path) -> None:
+    script_dir = LIB.parent
+    empty = _run(
+        ["bash", "-c", f"source {LIB} && cc_assert_safe_wipe_dir '' '{script_dir}'"],
+    )
+    assert empty.returncode != 0
+    assert "empty path" in empty.stderr
+    slash = _run(
+        ["bash", "-c", f"source {LIB} && cc_assert_safe_wipe_dir / '{script_dir}'"],
+    )
+    assert slash.returncode != 0
+    assert "rm -rf /" in slash.stderr
+    home = _run(
+        ["bash", "-c", f'source {LIB} && cc_assert_safe_wipe_dir "$HOME" "{script_dir}"'],
+    )
+    assert home.returncode != 0
+    assert "HOME" in home.stderr
+    repo = _run(
+        [
+            "bash",
+            "-c",
+            f"source {LIB} && cc_assert_safe_wipe_dir '{ROOT}' '{script_dir}'",
+        ]
+    )
+    assert repo.returncode != 0
+    assert "live checkout" in repo.stderr
+    parent = _run(
+        [
+            "bash",
+            "-c",
+            f"source {LIB} && cc_assert_safe_wipe_dir '{ROOT.parent}' '{script_dir}'",
+        ]
+    )
+    assert parent.returncode != 0
+    safe = tmp_path / "wipe-me"
+    ok = _run(
+        [
+            "bash",
+            "-c",
+            f"source {LIB} && cc_assert_safe_wipe_dir '{safe}' '{script_dir}'",
+        ]
+    )
+    assert ok.returncode == 0, ok.stderr
+
+
+def test_run_job_refuses_to_wipe_pod_checkout(tmp_path: Path) -> None:
+    assert 'SRC="${CC_SRC_DIR:-/tmp/climbing-coach}"' in RUN_JOB.read_text(
+        encoding="utf-8"
+    )
+    pod = tmp_path / "climbing-coach"
+    gpu = pod / "scripts" / "gpu"
+    gpu.mkdir(parents=True)
+    shutil.copy2(RUN_JOB, gpu / "run_job.sh")
+    shutil.copy2(LIB, gpu / "lib.sh")
+    copied = (gpu / "run_job.sh").read_text(encoding="utf-8")
+    # Isolate the default SRC so this test never targets the live checkout path.
+    (gpu / "run_job.sh").write_text(
+        copied.replace(
+            'SRC="${CC_SRC_DIR:-/tmp/climbing-coach}"',
+            f'SRC="${{CC_SRC_DIR:-{pod}}}"',
+        ),
+        encoding="utf-8",
+    )
+    (gpu / "run_job.sh").chmod(0o755)
+    marker = pod / "KEEP_ME"
+    marker.write_text("checkout-alive\n", encoding="utf-8")
+    result = _run(
+        [str(gpu / "run_job.sh")],
+        env={
+            "CC_VOLUME_DIR": str(tmp_path / "vol"),
+            "CC_JOB": "gpu_tests",
+            "CC_GIT_REF": SHA40,
+            "CC_JOB_ID": "job-wipe",
+            "CC_TTL_S": "60",
+            "CC_REPO_TOKEN": "tok",
+            "CC_SRC_DIR": str(pod),
+            "CC_LIBRARY_DIR": str(tmp_path / "cc-lib"),
+        },
+    )
+    assert result.returncode != 0
+    assert "Refuse to rm -rf" in result.stderr
+    assert marker.is_file()
+    assert marker.read_text(encoding="utf-8") == "checkout-alive\n"
+    assert (ROOT / "scripts" / "gpu" / "run_job.sh").is_file()
+    assert "Clone" in (tmp_path / "vol" / "runs" / "job-wipe" / "log.txt").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_run_job_helpers_require_src_and_library(tmp_path: Path) -> None:
+    with pytest.raises(AssertionError, match="CC_SRC_DIR"):
+        _run(
+            [str(RUN_JOB)],
+            env={"CC_VOLUME_DIR": str(tmp_path), "CC_TTL_S": "60"},
+        )
+    with pytest.raises(AssertionError, match="isolated"):
+        _run(
+            [str(RUN_JOB)],
+            env={
+                "CC_VOLUME_DIR": str(tmp_path),
+                "CC_TTL_S": "60",
+                "CC_SRC_DIR": "/tmp/climbing-coach",
+                "CC_LIBRARY_DIR": str(tmp_path / "cc-lib"),
+            },
+        )
+
+
+def test_s3_get_object_is_used_not_cp_stdout() -> None:
+    text = LIB.read_text(encoding="utf-8")
+    assert "s3api get-object" in text
+    assert "aws s3 cp" not in text
+
+
+def test_run_logged_fifo_uses_mktemp_dir() -> None:
+    text = LIB.read_text(encoding="utf-8")
+    assert 'fifo_dir="$(mktemp -d)"' in text
+    assert "mktemp -u" not in text
+    assert "cc_redact_text" in text
+    assert "head -c 400" in text
+
+
+def test_webhook_url_stays_off_curl_argv() -> None:
+    for path in (LIB, RUN_JOB):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if "curl " in line:
+                assert "CC_WEBHOOK_URL" not in line
+                assert "WEBHOOK_URL" not in line
 
 
 def test_gpu_scripts_pass_shellcheck() -> None:

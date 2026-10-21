@@ -57,6 +57,22 @@ Copy this block for a new entry.
 - Fix: `run_job.sh` now fails fast when `CC_REPO_TOKEN` is empty, sets `GIT_TERMINAL_PROMPT=0`, and writes redacted git stderr to `runs/<id>/log.txt`.
 - Prevention: Do not hand-paste the repo token. Confirm the secret with `ls-remote` before the next live pod.
 
+### 2026-10-21 — live gpu_tests deleted /tmp/climbing-coach
+
+- Symptom: The second live `gpu_tests` pod at `73be826` used CUDA and `CUDAExecutionProvider`. Pytest reported 82 passed, 28 failed, and 1 skipped. Many of the failures were missing repo files.
+- Where it failed: pod
+- Cause: `test_run_job_logs_redacted_clone_stderr` ran `run_job.sh` with `CC_SRC_DIR` unset. `SRC` defaulted to `/tmp/climbing-coach`. `rm -rf "$SRC"` deleted the live checkout.
+- Fix: Tests that run `run_job.sh` now set `CC_SRC_DIR` and `CC_LIBRARY_DIR` under `tmp_path`. `run_job.sh` refuses to remove `SRC` when it is empty, `/`, `$HOME`, the script directory, the repo root, or a parent of those paths.
+- Prevention: Keep destructive paths on `tmp_path`. Do not run `run_job.sh` against the live checkout.
+
+### 2026-10-21 — wait_job S3 cp-to-stdout failed
+
+- Symptom: `wait_job` did not read `runs/<id>/status`. It only stopped when the pod returned 404.
+- Where it failed: bot computer / volume S3
+- Cause: `aws s3 cp s3://... -` returned `SignatureDoesNotMatch` on all four retries against `https://s3api-eu-ro-1.runpod.io/`. `aws s3api get-object` with the same profile worked.
+- Fix: Read objects with `aws s3api get-object`. Keep the 403 and `SignatureDoesNotMatch` retry. Print one summary line per poll.
+- Prevention: Do not use `aws s3 cp ... -` against the Runpod S3 endpoint.
+
 ### 2026-10-21 — Shared SSH host keys in the GPU image
 
 - Symptom: Every pod would have used the same SSH host private keys.

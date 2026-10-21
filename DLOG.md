@@ -172,3 +172,22 @@ The first live `gpu_tests` pod at `bd99ed3` printed `Clone LittleSadFox/project-
 `pod_down` treats only HTTP 404 or `desiredStatus: TERMINATED` as gone. `EXITED` still bills disk. `wait_job` may still treat `EXITED` as an early job exit, then `pod_down` must see 404 or `TERMINATED`.
 
 See `TROUBLESHOOTING_LOG.md` for the allowedCudaVersions 500 and the clone failure.
+
+## 2026-10-21 — second live gpu_tests deleted the checkout
+
+The second live `gpu_tests` pod at `73be826` used an RTX 4090, driver 595.91.07, and CUDA 13.2. `CUDAExecutionProvider` was in use. Pytest reported 82 passed, 28 failed, and 1 skipped. The run folder is `s3://wguvx2347m/runs/cc-gpu_tests-73be8269-20261021T134455Z/`.
+
+`test_run_job_logs_redacted_clone_stderr` ran the real `run_job.sh`. The test helper cleared `CC_*`, so `CC_SRC_DIR` was empty. `SRC` then defaulted to `/tmp/climbing-coach`. The script ran `rm -rf "$SRC"` and deleted the live checkout. Later tests that read repo files failed.
+
+Tests that run `run_job.sh` now set `CC_SRC_DIR` and `CC_LIBRARY_DIR` under `tmp_path`.
+`run_job.sh` refuses to remove `SRC` when it is empty, `/`, `$HOME`, the script directory, the repo root, or a parent of those paths.
+
+`wait_job` did not see `status=failed` from S3. `aws s3 cp ... -` returned `SignatureDoesNotMatch` on all four retries. `aws s3api get-object` with the same profile worked on the first try. The wait ended when the pod returned 404.
+
+`cc_s3_cp_stdout` now uses `aws s3api get-object` into a temp file.
+It retries 403 and `SignatureDoesNotMatch`.
+It prints one summary line per poll.
+
+The GPU image now includes `shellcheck`.
+
+See `TROUBLESHOOTING_LOG.md`.

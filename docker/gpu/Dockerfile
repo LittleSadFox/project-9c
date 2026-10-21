@@ -37,6 +37,7 @@ RUN apt-get update \
         python3 \
         python3-pip \
         python3-venv \
+        shellcheck \
         tini \
         xz-utils \
         zlib1g \
@@ -82,6 +83,7 @@ RUN python3 -m venv /opt/cc/venv \
     && command -v git \
     && command -v curl \
     && command -v jq \
+    && command -v shellcheck \
     && command -v tini
 
 COPY docker/gpu/entrypoint.sh /opt/cc/bin/entrypoint.sh

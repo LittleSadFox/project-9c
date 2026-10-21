@@ -42,10 +42,9 @@ ping_webhook() {
     summary="$(jq -c '{job: .job, status: .status, pytest: .pytest, cuda: .cuda}' "$RUN_DIR/metrics.json" 2>/dev/null || echo '{}')"
   fi
   local body
-  body="$(jq -n --arg id "$CC_JOB_ID" --arg status "$status" --argjson metrics "$summary" \
+  body="$(jq -nc --arg id "$CC_JOB_ID" --arg status "$status" --argjson metrics "$summary" \
     '{job_id: $id, status: $status, metrics: $metrics}')"
-  curl -sS --max-time 15 -X POST -H "Content-Type: application/json" -d "$body" "$CC_WEBHOOK_URL" \
-    >/dev/null || echo "Webhook ping failed."
+  cc_curl_post_json "$CC_WEBHOOK_URL" "$body" >/dev/null || echo "Webhook ping failed."
 }
 
 # Invoked from trap EXIT INT TERM HUP.
@@ -150,6 +149,7 @@ if [[ "${CC_RUN_JOB_READY:-}" != "1" ]]; then
       "CC_REPO_TOKEN was not resolved"
   fi
   echo "Clone LittleSadFox/project-9c at ${CC_GIT_REF}" | tee -a "$RUN_DIR/log.txt"
+  cc_assert_safe_wipe_dir "$SRC" "$SCRIPT_DIR"
   rm -rf "$SRC"
   mkdir -p "$SRC"
   cc_run_logged git init "$SRC"

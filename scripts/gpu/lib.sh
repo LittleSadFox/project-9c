@@ -343,8 +343,11 @@ cc_early_cleanup() {
     if [[ "$existing" != "passed" && "$existing" != "failed" && "$existing" != "stopped" ]]; then
       printf 'stopped\n' >"${run_dir}/status"
     fi
-    cc_terminate_self
-    exit 0
+    if cc_terminate_self; then
+      exit 0
+    fi
+    echo "ERROR: terminate failed after interactive stop." >&2
+    exit 1
   fi
   if [[ "$existing" == "passed" || "$existing" == "failed" || "$existing" == "stopped" ]]; then
     cc_terminate_self
@@ -356,9 +359,8 @@ cc_early_cleanup() {
       '{job: $job, status: "failed", error: $err}' >"${run_dir}/metrics.json"
   fi
   if [[ -n "${CC_WEBHOOK_URL:-}" && "${CC_WEBHOOK_URL}" != *"{{"* ]]; then
-    curl -sS --max-time 15 -X POST -H "Content-Type: application/json" \
-      -d "{\"job_id\":\"${CC_JOB_ID:-unknown}\",\"status\":\"failed\"}" \
-      "$CC_WEBHOOK_URL" >/dev/null || true
+    cc_curl_post_json "$CC_WEBHOOK_URL" \
+      "{\"job_id\":\"${CC_JOB_ID:-unknown}\",\"status\":\"failed\"}" >/dev/null || true
   fi
   cc_terminate_self
   return 0
@@ -502,6 +504,57 @@ cc_redact_text() {
   printf '%s' "$1" | cc_redact_stream
 }
 
+cc_curl_post_json() {
+  local url="$1"
+  local body="$2"
+  local cfg
+  command -v python3 >/dev/null 2>&1 || cc_fail "python3 is required to post JSON."
+  cfg="$(mktemp)"
+  python3 -c '
+import sys
+url = sys.argv[1].replace("\\", "\\\\").replace("\"", "\\\"")
+sys.stdout.write("url = \"%s\"\n" % url)
+' "$url" >"$cfg"
+  chmod 600 "$cfg"
+  local ec=0
+  curl -sS --max-time 15 -X POST -H "Content-Type: application/json" -d "$body" --config "$cfg" || ec=$?
+  rm -f "$cfg"
+  return "$ec"
+}
+
+cc_realpath() {
+  local path="$1"
+  command -v python3 >/dev/null 2>&1 || cc_fail "python3 is required to resolve paths."
+  python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$path"
+}
+
+cc_assert_safe_wipe_dir() {
+  local target="${1:-}"
+  local script_dir="${2:-}"
+  [[ -n "$target" ]] || cc_fail "Refuse to rm -rf an empty path."
+  local resolved home here repo_root protected
+  resolved="$(cc_realpath "$target")"
+  [[ "$resolved" != "/" ]] || cc_fail "Refuse to rm -rf /."
+  if [[ -n "${HOME:-}" ]]; then
+    home="$(cc_realpath "$HOME")"
+    if [[ "$resolved" == "$home" ]]; then
+      cc_fail "Refuse to rm -rf HOME ${target}."
+    fi
+  fi
+  here="$(pwd -P)"
+  repo_root=""
+  if [[ -n "$script_dir" ]]; then
+    repo_root="$(cc_realpath "${script_dir}/../..")"
+    script_dir="$(cc_realpath "$script_dir")"
+  fi
+  for protected in "$here" "$script_dir" "$repo_root"; do
+    [[ -n "$protected" ]] || continue
+    if [[ "$protected" == "$resolved" || "$protected" == "$resolved"/* ]]; then
+      cc_fail "Refuse to rm -rf ${target}. It is a live checkout path or a parent of one."
+    fi
+  done
+}
+
 cc_git_sanitize_env() {
   export GIT_TERMINAL_PROMPT=0
   export GIT_TRACE_REDACT=1
@@ -526,8 +579,9 @@ cc_run_logged() {
     shift
   fi
   cc_git_sanitize_env
-  local fifo reader ec
-  fifo="$(mktemp -u)"
+  local fifo_dir fifo reader ec
+  fifo_dir="$(mktemp -d)"
+  fifo="${fifo_dir}/out.fifo"
   mkfifo "$fifo"
   cc_redact_stream <"$fifo" | tee -a "${CC_RUN_LOG:-/dev/null}" &
   reader=$!
@@ -542,7 +596,7 @@ cc_run_logged() {
   fi
   set -e
   wait "$reader" || true
-  rm -f "$fifo"
+  rm -rf "$fifo_dir"
   return "$ec"
 }
 
@@ -557,22 +611,44 @@ cc_run_timeout() {
   return $?
 }
 
+cc_s3_uri_parts() {
+  local uri="$1"
+  local rest bucket key
+  rest="${uri#s3://}"
+  bucket="${rest%%/*}"
+  key="${rest#*/}"
+  if [[ -z "$bucket" || -z "$key" || "$key" == "$rest" ]]; then
+    cc_fail "S3 URI ${uri} is not s3://bucket/key."
+  fi
+  printf '%s\n%s\n' "$bucket" "$key"
+}
+
 cc_s3_cp_stdout() {
   local uri="$1"
   local region="$2"
   local endpoint="$3"
-  local err attempt delay out
+  local err attempt delay dest parts bucket key
   command -v aws >/dev/null 2>&1 || cc_fail "Install AWS CLI v2."
+  parts="$(cc_s3_uri_parts "$uri")"
+  bucket="$(printf '%s\n' "$parts" | sed -n '1p')"
+  key="$(printf '%s\n' "$parts" | sed -n '2p')"
   err="$(mktemp)"
+  dest="$(mktemp)"
   for attempt in 1 2 3 4; do
     # shellcheck disable=SC2046
-    if out="$(aws s3 cp "$uri" - --region "$region" --endpoint-url "$endpoint" $(cc_aws_args) 2>"$err")"; then
-      rm -f "$err"
-      printf '%s' "$out"
+    if aws s3api get-object \
+      --bucket "$bucket" \
+      --key "$key" \
+      --region "$region" \
+      --endpoint-url "$endpoint" \
+      $(cc_aws_args) \
+      "$dest" >/dev/null 2>"$err"; then
+      cat "$dest"
+      rm -f "$err" "$dest"
       return 0
     fi
     if grep -qiE 'NoSuchKey|Not Found|404' "$err"; then
-      rm -f "$err"
+      rm -f "$err" "$dest"
       return 1
     fi
     if grep -qiE 'SignatureDoesNotMatch|403 Forbidden|Status Code: 403|HTTPStatusCode: 403|\(403\)' "$err"; then
@@ -580,21 +656,17 @@ cc_s3_cp_stdout() {
         break
       fi
       delay=$((attempt * 2))
-      echo "S3 transient error attempt=${attempt}; sleep ${delay}s" >&2
-      cat "$err" >&2 || true
       if [[ "${CC_TERMINATE_NO_SLEEP:-}" != "1" ]]; then
         sleep "$delay"
       fi
       continue
     fi
-    echo "ERROR: aws s3 cp failed for ${uri}." >&2
-    cat "$err" >&2 || true
-    rm -f "$err"
+    echo "ERROR: S3 get-object ${uri} failed." >&2
+    rm -f "$err" "$dest"
     return 1
   done
-  echo "ERROR: aws s3 cp failed for ${uri} after retries." >&2
-  cat "$err" >&2 || true
-  rm -f "$err"
+  echo "ERROR: S3 get-object ${uri} failed after ${attempt} attempts." >&2
+  rm -f "$err" "$dest"
   return 1
 }
 
@@ -735,7 +807,7 @@ cc_terminate_self() {
         cc_log "terminate ok via runpodctl attempt=${attempt}"
         return 0
       fi
-      cc_log "runpodctl failed attempt=${attempt}: ${ctl}"
+      cc_log "runpodctl failed attempt=${attempt}: $(printf '%s' "$(cc_redact_text "$ctl")" | head -c 400)"
     fi
     if cc_rest DELETE "/pods/${RUNPOD_POD_ID}" >/dev/null; then
       cc_log "terminate ok via curl attempt=${attempt}"

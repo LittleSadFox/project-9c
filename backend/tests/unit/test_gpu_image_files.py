@@ -32,6 +32,7 @@ def test_dockerfile_pins_and_omits_trainer_stack() -> None:
     assert "requirements-gpu.txt" in text
     assert "PIP_NO_CACHE_DIR=1" in text
     assert "pip==25.2" in text
+    assert "shellcheck" in text
     assert "ssh-keygen" not in text
     assert "rm -f /etc/ssh/ssh_host_*" in text
     assert "ssh_host_*" in text
