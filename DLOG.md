@@ -144,7 +144,31 @@ The Dockerfile deletes `/etc/ssh/ssh_host_*` after apt install.
 I did not confirm that `onnxruntime-gpu==1.23.2` (CUDA 12) supports Blackwell `sm_120`.
 The default GPU list keeps RTX PRO 4500/4000 Blackwell and RTX 5090 at the end.
 
-The create payload sends `allowedCudaVersions` `12.8`, `12.9`, `13.0`. The live API rejects `13.1` and `13.2`. The image CUDA driver guard (>=12.8, fail closed) is the real floor. If the filter excludes 13.x hosts in practice, drop the field.
+The create payload originally sent `allowedCudaVersions` `12.8`, `12.9`, `13.0`.
 An early entrypoint failure writes `status=failed`, pings, and terminates the pod.
 `run_job.sh` skips a finished job on restart and only retries terminate.
 `--ref` must be a 40-character sha, or the bot box resolves it to one.
+
+## 2026-10-21 — first live gpu_tests findings
+
+The first live `gpu_tests` pod at `bd99ed3` reached `Clone LittleSadFox/project-9c at bd99ed3`, wrote `status=failed`, and self-terminated in about 40s. Safety paths worked.
+
+`allowedCudaVersions` in the create payload made Runpod return 500 "no instances available" on all listed GPU types, even with stock showing. The field is now opt-in via `CC_ALLOWED_CUDA` (unset by default). The image CUDA driver guard (>=12.8, fail closed) is the real floor.
+
+`run_job.sh` now writes redacted git/pip stderr into `runs/<id>/log.txt`.
+`wait_job` detects a 404 or `TERMINATED` pod without losing `CC_LAST_HTTP_CODE`, and retries S3 status/metrics reads on transient `SignatureDoesNotMatch`/403.
+`pod_up` errors if a flag is missing its value and does not swallow the next flag.
+Interactive SIGTERM writes `stopped`, not `failed`.
+`pod_down` treats `desiredStatus: TERMINATED` as gone.
+A failed-status rewrite does not ping the webhook a second time.
+`cc_terminate_self` times out `runpodctl`.
+
+## 2026-10-21 — first live gpu_tests follow-up
+
+The first live `gpu_tests` pod at `bd99ed3` printed `Clone LittleSadFox/project-9c at bd99ed3` and then failed. The pod console was deleted with the pod. The git error was not on the volume. The suspected cause was a bad hand-pasted `cc_repo_token`. On 2026-10-21 the Runpod bot re-set that secret from a verified token. That token passed `ls-remote` and a shallow fetch.
+
+`run_job.sh` now fails fast when `CC_REPO_TOKEN` is empty and writes that error to `status` and `log.txt`. Git runs with `GIT_TERMINAL_PROMPT=0` and `GIT_TRACE_REDACT=1`. Clone stdout and stderr are redacted together. The raw token, the `x-access-token` base64, and basic/bearer header values do not go to the log.
+
+`pod_down` treats only HTTP 404 or `desiredStatus: TERMINATED` as gone. `EXITED` still bills disk. `wait_job` may still treat `EXITED` as an early job exit, then `pod_down` must see 404 or `TERMINATED`.
+
+See `TROUBLESHOOTING_LOG.md` for the allowedCudaVersions 500 and the clone failure.

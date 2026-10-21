@@ -31,11 +31,13 @@ GPU_CSV=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --job)
-      JOB="${2:-}"
+      cc_require_optarg "$1" "${2:-}"
+      JOB="$2"
       shift 2
       ;;
     --ref)
-      REF="${2:-}"
+      cc_require_optarg "$1" "${2:-}"
+      REF="$2"
       shift 2
       ;;
     --interactive)
@@ -47,11 +49,13 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --ttl)
-      TTL_RAW="${2:-}"
+      cc_require_optarg "$1" "${2:-}"
+      TTL_RAW="$2"
       shift 2
       ;;
     --gpu)
-      GPU_CSV="${2:-}"
+      cc_require_optarg "$1" "${2:-}"
+      GPU_CSV="$2"
       shift 2
       ;;
     --dry-run)
@@ -145,7 +149,10 @@ cc_verify_registry_auth
 RESPONSE="$(cc_rest POST /pods "$PAYLOAD")"
 POD_ID="$(jq -r '.id // .podId // empty' <<<"$RESPONSE")"
 if [[ -z "$POD_ID" || "$POD_ID" == "null" ]]; then
-  echo "$RESPONSE" >&2
+  tmp_err="$(mktemp)"
+  printf '%s\n' "$RESPONSE" >"$tmp_err"
+  cc_print_api_error "$tmp_err"
+  rm -f "$tmp_err"
   cc_fail "Runpod did not return a pod id."
 fi
 echo "pod_id=${POD_ID}"

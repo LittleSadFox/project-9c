@@ -80,6 +80,7 @@ def test_gpu_image_workflow_tags_sha_and_latest() -> None:
     assert "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in text
     assert "Free disk" in text
     assert "refs/heads/main" in text
+    assert "branches: [main]" in text
 
 
 def test_gpu_image_workflow_pins_actions_by_sha() -> None:

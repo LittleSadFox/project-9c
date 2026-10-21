@@ -108,10 +108,31 @@ cc_default_gpu_csv() {
 }
 
 cc_allowed_cuda_versions() {
-  # Live Runpod POST /pods enum is 13.0, 12.9, … 12.0, 11.8. 13.1/13.2 return 400.
-  # The image's CUDA driver guard (>=12.8, fail closed) is the real floor.
-  # If this filter excludes 13.x hosts in practice, drop the field.
-  printf '%s' '["12.8","12.9","13.0"]'
+  # Opt-in via CC_ALLOWED_CUDA (CSV or JSON). Unset by default.
+  # Sending allowedCudaVersions made the live API return 500
+  # "no instances available" on every listed GPU, even with stock showing.
+  # The image CUDA driver guard (>=12.8, fail closed) is the real floor.
+  # If a filter is needed again and it excludes 13.x hosts, drop the field.
+  local raw="${CC_ALLOWED_CUDA:-}"
+  [[ -n "$raw" ]] || return 1
+  command -v jq >/dev/null 2>&1 || cc_fail "Install jq. The pod scripts need it."
+  local json
+  if [[ "$raw" == "["* ]]; then
+    json="$raw"
+  else
+    json="$(jq -nc --arg s "$raw" '$s | split(",") | map(gsub("^ +| +$";"")) | map(select(length > 0))')"
+  fi
+  if ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$json"; then
+    cc_fail "CC_ALLOWED_CUDA is not a JSON array of version strings. Got ${raw}."
+  fi
+  if ! jq -e --argjson allowed '["11.8","12.0","12.1","12.2","12.3","12.4","12.5","12.6","12.7","12.8","12.9","13.0"]' '
+    length > 0
+    and all(.[]; type == "string")
+    and all(.[]; . as $v | ($allowed | index($v)) != null)
+  ' >/dev/null 2>&1 <<<"$json"; then
+    cc_fail "CC_ALLOWED_CUDA must be a non-empty list of 11.8 or 12.0-13.0 strings. Got ${raw}."
+  fi
+  printf '%s' "$json"
 }
 
 cc_load_defaults() {
@@ -200,9 +221,13 @@ cc_build_pod_payload() {
     interruptible=true
   fi
   local dc="${CC_RUNPOD_DATACENTER:-EU-RO-1}"
+  local cuda_json=""
+  if [[ -n "${CC_ALLOWED_CUDA:-}" ]]; then
+    cuda_json="$(cc_allowed_cuda_versions)" || cc_fail "Could not build the pod payload. Check CC_ALLOWED_CUDA."
+  fi
 
   local payload
-  payload="$(
+  if ! payload="$(
     jq -n \
       --arg name "$name" \
       --argjson env "$env_json" \
@@ -213,7 +238,7 @@ cc_build_pod_payload() {
       --arg image "${CC_GPU_IMAGE:-}" \
       --arg dc "$dc" \
       --arg registry "${CC_RUNPOD_REGISTRY_AUTH_ID:-}" \
-      --argjson cuda "$(cc_allowed_cuda_versions)" \
+      --arg cuda "$cuda_json" \
       --argjson disk 20 \
       '{
         name: $name,
@@ -222,7 +247,6 @@ cc_build_pod_payload() {
         gpuCount: 1,
         gpuTypePriority: "custom",
         gpuTypeIds: ($gpus | split(",") | map(gsub("^ +| +$";""))),
-        allowedCudaVersions: $cuda,
         containerDiskInGb: $disk,
         volumeInGb: 0,
         volumeMountPath: "/workspace",
@@ -234,8 +258,11 @@ cc_build_pod_payload() {
       + (if $template != "" then {templateId: $template} else {} end)
       + (if $volume != "" then {networkVolumeId: $volume} else {} end)
       + (if $image != "" then {imageName: $image} else {} end)
-      + (if $registry != "" then {containerRegistryAuthId: $registry} else {} end)'
-  )"
+      + (if $registry != "" then {containerRegistryAuthId: $registry} else {} end)
+      + (if $cuda != "" then {allowedCudaVersions: ($cuda | fromjson)} else {} end)'
+  )"; then
+    cc_fail "Could not build the pod payload. Check CC_ALLOWED_CUDA."
+  fi
   cc_assert_no_account_key "$payload"
   if ! jq -e '.env.CC_TTL_S' >/dev/null <<<"$payload"; then
     cc_fail "Pod payload is missing CC_TTL_S."
@@ -285,6 +312,9 @@ cc_ttl_from_pod_body() {
 
 cc_wait_timeout_s() {
   if [[ -n "${CC_WAIT_TIMEOUT_S:-}" ]]; then
+    if [[ ! "${CC_WAIT_TIMEOUT_S}" =~ ^[1-9][0-9]*$ ]]; then
+      cc_fail "CC_WAIT_TIMEOUT_S must be a positive integer. Got ${CC_WAIT_TIMEOUT_S}."
+    fi
     printf '%s' "$CC_WAIT_TIMEOUT_S"
     return 0
   fi
@@ -309,7 +339,14 @@ cc_early_cleanup() {
   if [[ -f "${run_dir}/status" ]]; then
     existing="$(tr -d '[:space:]' <"${run_dir}/status")"
   fi
-  if [[ "$existing" == "passed" ]]; then
+  if [[ "${CC_INTERACTIVE:-}" == "1" && "${CC_INTERACTIVE_READY:-}" == "1" ]]; then
+    if [[ "$existing" != "passed" && "$existing" != "failed" && "$existing" != "stopped" ]]; then
+      printf 'stopped\n' >"${run_dir}/status"
+    fi
+    cc_terminate_self
+    exit 0
+  fi
+  if [[ "$existing" == "passed" || "$existing" == "failed" || "$existing" == "stopped" ]]; then
     cc_terminate_self
     return 0
   fi
@@ -327,9 +364,238 @@ cc_early_cleanup() {
   return 0
 }
 
+cc_print_api_error() {
+  local file="$1"
+  [[ -s "$file" ]] || return 0
+  python3 - "$file" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
+text = re.sub(r"(authorization:\s*)(basic|bearer)\s+\S+", r"\1\2 REDACTED", text, flags=re.I)
+text = re.sub(r"(?i)(api[_-]?key|token|secret)(\"?\s*[:=]\s*\"?)[^\"\s]+", r"\1REDACTED", text)
+text = text.replace("\n", " ")
+if len(text) > 400:
+    text = text[:400] + "…"
+sys.stderr.write(text + "\n")
+PY
+}
+
 cc_valid_pod_id() {
   local id="$1"
   [[ "$id" =~ ^[A-Za-z0-9_-]{4,64}$ ]]
+}
+
+cc_require_optarg() {
+  local flag="$1"
+  local value="${2:-}"
+  if [[ -z "$value" || "$value" == --* ]]; then
+    cc_fail "${flag} requires a value."
+  fi
+}
+
+cc_pod_lookup_desired() {
+  local pod_id="$1"
+  local dest="$2"
+  cc_rest GET "/pods/${pod_id}" >"$dest"
+}
+
+cc_pod_gone() {
+  # wait_job early-exit: the job cannot still be running.
+  local pod_id="$1"
+  local tmp desired
+  [[ -n "$pod_id" ]] || return 1
+  tmp="$(mktemp)"
+  if cc_pod_lookup_desired "$pod_id" "$tmp"; then
+    desired="$(jq -r '.desiredStatus // .status // empty' <"$tmp")"
+    rm -f "$tmp"
+    case "$desired" in
+      EXITED|TERMINATED)
+        printf '%s\n' "$desired"
+        return 0
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+  fi
+  rm -f "$tmp"
+  if [[ "${CC_LAST_HTTP_CODE:-}" == "404" ]]; then
+    echo "missing"
+    return 0
+  fi
+  echo "ERROR: pod lookup HTTP ${CC_LAST_HTTP_CODE:-unknown}." >&2
+  return 1
+}
+
+cc_pod_deleted() {
+  # pod_down: EXITED still bills disk. Only 404 or TERMINATED is gone.
+  local pod_id="$1"
+  local tmp desired
+  [[ -n "$pod_id" ]] || return 1
+  tmp="$(mktemp)"
+  if cc_pod_lookup_desired "$pod_id" "$tmp"; then
+    desired="$(jq -r '.desiredStatus // .status // empty' <"$tmp")"
+    rm -f "$tmp"
+    if [[ "$desired" == "TERMINATED" ]]; then
+      echo "TERMINATED"
+      return 0
+    fi
+    return 1
+  fi
+  rm -f "$tmp"
+  if [[ "${CC_LAST_HTTP_CODE:-}" == "404" ]]; then
+    echo "missing"
+    return 0
+  fi
+  echo "ERROR: pod lookup HTTP ${CC_LAST_HTTP_CODE:-unknown}." >&2
+  return 1
+}
+
+cc_redact_stream() {
+  command -v python3 >/dev/null 2>&1 || cc_fail "python3 is required to redact git logs."
+  # Line-by-line so a hang or TTL kill still leaves output on the volume.
+  python3 -u -c '
+import base64
+import os
+import re
+import sys
+
+token = os.environ.get("CC_REPO_TOKEN") or ""
+header = os.environ.get("GIT_CONFIG_VALUE_0") or ""
+b64 = ""
+b64_nopad = ""
+if token:
+    b64 = base64.b64encode(("x-access-token:" + token).encode("utf-8")).decode("ascii")
+    b64_nopad = b64.rstrip("=")
+
+def redact(text):
+    text = re.sub(
+        r"(authorization:\s*)(basic|bearer)\s+[^\s\]]+",
+        r"\1\2 REDACTED",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"(\[authorization:\s*)(basic|bearer)\s+[^]\s]+",
+        r"\1\2 REDACTED",
+        text,
+        flags=re.I,
+    )
+    if token:
+        text = re.sub(re.escape(token), "REDACTED", text, flags=re.I)
+        if b64:
+            text = text.replace(b64, "REDACTED")
+            text = text.replace(b64_nopad, "REDACTED")
+    if header:
+        text = re.sub(re.escape(header), "AUTHORIZATION: basic REDACTED", text, flags=re.I)
+    return text
+
+for line in sys.stdin:
+    sys.stdout.write(redact(line))
+    sys.stdout.flush()
+'
+}
+
+cc_redact_text() {
+  printf '%s' "$1" | cc_redact_stream
+}
+
+cc_git_sanitize_env() {
+  export GIT_TERMINAL_PROMPT=0
+  export GIT_TRACE_REDACT=1
+  unset GIT_CURL_VERBOSE
+  local key
+  if command -v compgen >/dev/null 2>&1; then
+    for key in $(compgen -e GIT_TRACE || true); do
+      if [[ "$key" != "GIT_TRACE_REDACT" ]]; then
+        unset "$key"
+      fi
+    done
+  else
+    unset GIT_TRACE GIT_TRACE_CURL GIT_TRACE_PACKET GIT_TRACE2 \
+      GIT_TRACE2_EVENT GIT_TRACE2_PERF GIT_TRACE_SETUP GIT_TRACE_SHALLOW
+  fi
+}
+
+cc_run_logged() {
+  local wait_bg=0
+  if [[ "${1:-}" == "--wait" ]]; then
+    wait_bg=1
+    shift
+  fi
+  cc_git_sanitize_env
+  local fifo reader ec
+  fifo="$(mktemp -u)"
+  mkfifo "$fifo"
+  cc_redact_stream <"$fifo" | tee -a "${CC_RUN_LOG:-/dev/null}" &
+  reader=$!
+  set +e
+  if [[ "$wait_bg" == "1" ]]; then
+    "$@" >"$fifo" 2>&1 &
+    wait $!
+    ec=$?
+  else
+    "$@" >"$fifo" 2>&1
+    ec=$?
+  fi
+  set -e
+  wait "$reader" || true
+  rm -f "$fifo"
+  return "$ec"
+}
+
+cc_run_timeout() {
+  local secs="$1"
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout --signal=KILL "$secs" "$@"
+    return $?
+  fi
+  "$@"
+  return $?
+}
+
+cc_s3_cp_stdout() {
+  local uri="$1"
+  local region="$2"
+  local endpoint="$3"
+  local err attempt delay out
+  command -v aws >/dev/null 2>&1 || cc_fail "Install AWS CLI v2."
+  err="$(mktemp)"
+  for attempt in 1 2 3 4; do
+    # shellcheck disable=SC2046
+    if out="$(aws s3 cp "$uri" - --region "$region" --endpoint-url "$endpoint" $(cc_aws_args) 2>"$err")"; then
+      rm -f "$err"
+      printf '%s' "$out"
+      return 0
+    fi
+    if grep -qiE 'NoSuchKey|Not Found|404' "$err"; then
+      rm -f "$err"
+      return 1
+    fi
+    if grep -qiE 'SignatureDoesNotMatch|403 Forbidden|Status Code: 403|HTTPStatusCode: 403|\(403\)' "$err"; then
+      if (( attempt >= 4 )); then
+        break
+      fi
+      delay=$((attempt * 2))
+      echo "S3 transient error attempt=${attempt}; sleep ${delay}s" >&2
+      cat "$err" >&2 || true
+      if [[ "${CC_TERMINATE_NO_SLEEP:-}" != "1" ]]; then
+        sleep "$delay"
+      fi
+      continue
+    fi
+    echo "ERROR: aws s3 cp failed for ${uri}." >&2
+    cat "$err" >&2 || true
+    rm -f "$err"
+    return 1
+  done
+  echo "ERROR: aws s3 cp failed for ${uri} after retries." >&2
+  cat "$err" >&2 || true
+  rm -f "$err"
+  return 1
 }
 
 cc_rest() {
@@ -363,7 +629,7 @@ cc_rest() {
   export CC_LAST_HTTP_CODE
   if [[ ! "$code" =~ ^2[0-9][0-9]$ ]]; then
     echo "ERROR: Runpod ${method} ${path} returned HTTP ${code}." >&2
-    cat "$tmp" >&2 || true
+    cc_print_api_error "$tmp"
     rm -f "$tmp"
     return 1
   fi
@@ -428,8 +694,11 @@ cc_require_cuda_driver() {
     echo "nvidia-smi is not available. Skip the driver check."
     return 0
   fi
-  local ver
+  local ver driver
   ver="$(nvidia-smi | sed -n 's/.*CUDA Version: \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -n 1)"
+  driver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n 1 | tr -d '[:space:]')"
+  cc_log "nvidia_driver=${driver:-unknown}"
+  cc_log "cuda_version=${ver:-unknown}"
   [[ -n "$ver" ]] || cc_fail "Could not read the CUDA version from nvidia-smi."
   local major minor
   major="${ver%%.*}"
@@ -457,14 +726,16 @@ cc_terminate_self() {
     echo "ERROR: No pod-scoped RUNPOD_API_KEY. Cannot terminate this pod." >&2
     return 1
   fi
-  local attempt delay
+  local attempt delay ctl
   for attempt in 1 2 3 4; do
     if command -v runpodctl >/dev/null 2>&1; then
-      if runpodctl remove pod "$RUNPOD_POD_ID" >/dev/null 2>&1 \
-        || runpodctl pod delete "$RUNPOD_POD_ID" >/dev/null 2>&1; then
+      ctl=""
+      if ctl="$(cc_run_timeout 20 runpodctl remove pod "$RUNPOD_POD_ID" 2>&1)" \
+        || ctl="$(cc_run_timeout 20 runpodctl pod delete "$RUNPOD_POD_ID" 2>&1)"; then
         cc_log "terminate ok via runpodctl attempt=${attempt}"
         return 0
       fi
+      cc_log "runpodctl failed attempt=${attempt}: ${ctl}"
     fi
     if cc_rest DELETE "/pods/${RUNPOD_POD_ID}" >/dev/null; then
       cc_log "terminate ok via curl attempt=${attempt}"
@@ -509,10 +780,18 @@ cc_watchdog_start() {
   disown || true
 }
 
-cc_git_auth_setup() {
+cc_require_repo_token() {
   if [[ -z "${CC_REPO_TOKEN:-}" ]]; then
-    return 0
+    cc_fail "CC_REPO_TOKEN is empty. The Runpod secret cc_repo_token is missing or blank."
   fi
+  if [[ "${CC_REPO_TOKEN}" == *"{{"* ]]; then
+    cc_fail "CC_REPO_TOKEN was not resolved. The Runpod secret cc_repo_token is missing."
+  fi
+}
+
+cc_git_auth_setup() {
+  cc_require_repo_token
+  cc_git_sanitize_env
   local b64
   b64="$(printf 'x-access-token:%s' "$CC_REPO_TOKEN" | base64 | tr -d '\n')"
   export GIT_CONFIG_COUNT=1

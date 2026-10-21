@@ -28,6 +28,8 @@ if [[ -x /usr/sbin/sshd ]]; then
 fi
 
 if [[ -n "${CC_JOB_ID:-}" ]]; then
+  mkdir -p "${CC_VOLUME_DIR:-/workspace}/runs/${CC_JOB_ID}"
+  export CC_RUN_LOG="${CC_VOLUME_DIR:-/workspace}/runs/${CC_JOB_ID}/log.txt"
   cc_watchdog_start "${CC_VOLUME_DIR:-/workspace}/runs/${CC_JOB_ID}"
 else
   cc_watchdog_start
@@ -42,6 +44,8 @@ if [[ -n "${CC_JOB:-}" ]]; then
 fi
 
 echo "Interactive pod. SSH is up. TTL is ${CC_TTL_S}s."
+export CC_INTERACTIVE_READY=1
 while true; do
-  sleep 3600
+  sleep 3600 &
+  wait $! || true
 done

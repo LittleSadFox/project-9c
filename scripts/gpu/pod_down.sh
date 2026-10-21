@@ -45,8 +45,8 @@ cc_require_bot_api_key
 
 deleted=0
 if command -v runpodctl >/dev/null 2>&1; then
-  if runpodctl remove pod "$POD_ID" >/dev/null 2>&1 \
-    || runpodctl pod delete "$POD_ID" >/dev/null 2>&1; then
+  if cc_run_timeout 20 runpodctl remove pod "$POD_ID" >/dev/null 2>&1 \
+    || cc_run_timeout 20 runpodctl pod delete "$POD_ID" >/dev/null 2>&1; then
     deleted=1
   fi
 fi
@@ -61,14 +61,9 @@ fi
 attempt=0
 while [[ "$attempt" -lt 8 ]]; do
   attempt=$((attempt + 1))
-  if cc_rest GET "/pods/${POD_ID}" >/dev/null; then
-    if (( delay > 0 )); then
-      sleep "$delay"
-    fi
-    continue
-  fi
-  if [[ "${CC_LAST_HTTP_CODE:-}" == "404" ]]; then
+  if gone="$(cc_pod_deleted "$POD_ID")"; then
     echo "terminated=${POD_ID}"
+    echo "pod_state=${gone}"
     exit 0
   fi
   if (( delay > 0 )); then
