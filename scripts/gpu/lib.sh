@@ -254,15 +254,20 @@ cc_rest() {
   tmp="$(mktemp)"
   printf 'Authorization: Bearer %s\n' "${RUNPOD_API_KEY}" >"$hdr"
   chmod 600 "$hdr"
-  local extra=()
+  # Bash 3.2 + set -u cannot expand an empty array.
   if [[ -n "$body" ]]; then
-    extra+=(-d "$body")
+    code="$(
+      curl -sS --fail-with-body -o "$tmp" -w '%{http_code}' -X "$method" \
+        -H "@${hdr}" -H "Content-Type: application/json" \
+        -d "$body" "$url" || true
+    )"
+  else
+    code="$(
+      curl -sS --fail-with-body -o "$tmp" -w '%{http_code}' -X "$method" \
+        -H "@${hdr}" -H "Content-Type: application/json" \
+        "$url" || true
+    )"
   fi
-  code="$(
-    curl -sS --fail-with-body -o "$tmp" -w '%{http_code}' -X "$method" \
-      -H "@${hdr}" -H "Content-Type: application/json" \
-      "${extra[@]}" "$url" || true
-  )"
   rm -f "$hdr"
   if [[ ! "$code" =~ ^2[0-9][0-9]$ ]]; then
     echo "ERROR: Runpod ${method} ${path} returned HTTP ${code}." >&2
@@ -290,11 +295,9 @@ cc_volume_id() {
 }
 
 cc_aws_args() {
-  local args=()
   if [[ -n "${CC_AWS_PROFILE:-}" ]]; then
-    args+=(--profile "$CC_AWS_PROFILE")
+    printf '%s\n' --profile "$CC_AWS_PROFILE"
   fi
-  printf '%s\n' "${args[@]}"
 }
 
 cc_setup_ssh() {

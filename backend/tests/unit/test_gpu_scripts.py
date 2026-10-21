@@ -214,6 +214,15 @@ def test_run_job_uses_basic_git_auth() -> None:
     assert "set +e" in text
 
 
+def test_lib_is_safe_on_bash_32_empty_arrays() -> None:
+    text = LIB.read_text(encoding="utf-8")
+    assert '"${extra[@]}"' not in text
+    assert '"${args[@]}"' not in text
+    assert "@Q}" not in text
+    assert "${JOB@Q}" not in POD_UP.read_text(encoding="utf-8")
+    assert "${status@Q}" not in WAIT_JOB.read_text(encoding="utf-8")
+
+
 def test_lib_keeps_account_key_off_curl_argv() -> None:
     text = LIB.read_text(encoding="utf-8")
     assert '-H "@${hdr}"' in text

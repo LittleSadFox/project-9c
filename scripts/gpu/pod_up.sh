@@ -75,7 +75,7 @@ if [[ "$INTERACTIVE" != "1" && -z "$JOB" ]]; then
   cc_fail "Never start a pod without CC_JOB or --interactive."
 fi
 if [[ "$INTERACTIVE" != "1" ]]; then
-  cc_is_known_job "$JOB" || cc_fail "Unknown job ${JOB@Q}. Known jobs: $(cc_known_jobs | tr '\n' ' ')"
+  cc_is_known_job "$JOB" || cc_fail "Unknown job ${JOB}. Known jobs: $(cc_known_jobs | tr '\n' ' ')"
 fi
 if [[ -z "$REF" ]]; then
   if [[ "$INTERACTIVE" == "1" ]]; then

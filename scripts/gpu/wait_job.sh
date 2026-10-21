@@ -103,7 +103,7 @@ while (( SECONDS < deadline )); do
       passed) exit 0 ;;
       failed) exit 1 ;;
       running|"") ;;
-      *) echo "Unknown status ${status@Q}" ;;
+      *) echo "Unknown status ${status}" ;;
     esac
   fi
   if gone="$(pod_gone)"; then
