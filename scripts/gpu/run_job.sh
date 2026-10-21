@@ -48,6 +48,8 @@ ping_webhook() {
     >/dev/null || echo "Webhook ping failed."
 }
 
+# Invoked from trap EXIT INT TERM HUP.
+# shellcheck disable=SC2317
 cleanup() {
   local ec=$?
   if [[ "$CLEANING" == "1" ]]; then

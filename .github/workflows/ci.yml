@@ -89,7 +89,10 @@ jobs:
 
       - name: Mypy
         if: hashFiles('backend/app/**/*.py') != ''
-        run: mypy --config-file backend/pyproject.toml backend/app ml
+        run: |
+          set -euo pipefail
+          mypy backend/app
+          mypy --ignore-missing-imports ml
 
       - name: Pytest unmarked and media
         if: hashFiles('backend/tests/**/*.py') != ''

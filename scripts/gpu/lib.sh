@@ -112,8 +112,8 @@ cc_load_defaults() {
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   local file="${here}/defaults.env"
   if [[ -f "$file" ]]; then
-    # shellcheck disable=SC1090
     set -a
+    # shellcheck disable=SC1090
     source "$file"
     set +a
   fi

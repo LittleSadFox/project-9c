@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+
 from ml.jobs import check_cuda_session
 
 

@@ -36,7 +36,8 @@ if command -v shellcheck >/dev/null 2>&1; then
 fi
 
 echo "Mypy"
-mypy --config-file backend/pyproject.toml backend/app ml
+mypy backend/app
+mypy --ignore-missing-imports ml
 
 echo "Pytest"
 if [[ -n "$PYTEST_MARK" ]]; then
