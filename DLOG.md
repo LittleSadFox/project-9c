@@ -107,6 +107,7 @@ Add the Phase 0 GPU runner.
 - `ml/jobs.py` registers `gpu_tests`.
 - `scripts/sync_volume.sh` and `scripts/export_labels.py` copy labels and new golden files.
 
-The first live `pod_up.sh --job gpu_tests` waits on Ryan and the Runpod bot.
-They must finish the section 2.2 credential setup.
+Section 2.2 setup is complete.
+The first live `pod_up.sh --job gpu_tests` waits on this pull request merging and on green CI plus a green GPU image build.
+After that, the Runpod bot runs it.
 This change does not start a pod.

@@ -153,12 +153,13 @@ The runner files are in the tree: `docker/gpu/`, `scripts/gpu/`, `ml/jobs.py`, a
 
 Do not start a live pod from a coding agent.
 Only the Runpod bot starts pods.
-The first live `scripts/gpu/pod_up.sh --job gpu_tests` waits on Ryan and the Runpod bot.
-They must finish the section 2.2 setup and add the GHCR `read:packages` credential.
+Section 2.2 setup is complete.
+The first live `scripts/gpu/pod_up.sh --job gpu_tests` waits on this pull request merging and on green CI plus a green GPU image build.
+After that, the Runpod bot runs it.
 
 Phase 0 needs only a small sample upload.
 One or two videos are enough.
-Upload them with `scripts/sync_volume.sh` after the volume exists.
+Upload them with `scripts/sync_volume.sh`.
 The golden set of at least 10 videos is a post–Phase 1 todo.
 
 ## 5. Commands
@@ -278,10 +279,11 @@ Bot and CI
 - [ ] `npm run build` and Vitest pass.
 - [ ] A Playwright Chromium smoke test opens the shell.
 
-Pod (after Runpod credentials exist)
+Pod (after this pull request merges)
 
-The first live `pod_up.sh --job gpu_tests` waits on Ryan and the Runpod bot.
-They must finish the section 2.2 setup.
+Section 2.2 setup is complete.
+The first live `pod_up.sh --job gpu_tests` waits on this pull request merging and on green CI plus a green GPU image build.
+After that, the Runpod bot runs it.
 This repo change does not start a pod.
 
 - [ ] `pod_up.sh --job gpu_tests` clones the commit and runs the suite with real ffmpeg.
@@ -431,7 +433,7 @@ The macOS job proves that every pinned wheel installs on Apple Silicon.
 It runs when `docker/gpu/` or `requirements*.txt` change.
 Tags are the git sha and, on `main`, `latest`.
 The image is private.
-Add a Runpod registry credential with GitHub `read:packages` before the first pod.
+The Runpod registry credential is already in place.
 
 ## 11. Licence
 

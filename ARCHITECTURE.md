@@ -340,7 +340,9 @@ Phase 6 image `climbing-coach-train`:
 `docker/gpu/` and `.github/workflows/gpu-image.yml` build `climbing-coach-gpu`.
 The image is private on GHCR.
 Tags are the git sha and, on `main`, `latest`.
-The first live `gpu_tests` pod waits on the section 2.2 credentials.
+Section 2.2 setup is complete.
+The first live `gpu_tests` pod waits on this pull request merging and on green CI plus a green GPU image build.
+After that, the Runpod bot runs it.
 Do not put the account API key in the pod template or in pod env.
 
 The Docker files for `climbing-coach-train` land in the Phase 6 todo.
