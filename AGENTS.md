@@ -176,7 +176,7 @@ It has no CoreML, no VideoToolbox, no Safari, no model weights, and no sample vi
 
 Pods run only pushed commits.
 Push first.
-Then start the pod with that sha.
+Then the Runpod bot starts the pod with that sha.
 
 CI (when it exists) runs on every push and pull request: `ubuntu-24.04` and `macos-15`.
 
@@ -185,16 +185,18 @@ CI (when it exists) runs on every push and pull request: `ubuntu-24.04` and `mac
 These rules are mandatory.
 A missing rule is a hard fail.
 
-### 9.1 What the bot computer may hold
+### 9.1 Owner on the shared bot computer
 
-The bot computer may hold only this project's Runpod API key, this project's S3 API key, and this project's SSH key.
+The dedicated Grok Bot teammate named Runpod owns the project Runpod credentials.
+The Runpod bot holds this project's Runpod API key, this project's S3 API key, and this project's SSH key on the shared bot computer.
 The dedicated Runpod account holds only this project.
 Do not put cloud root credentials on the bot computer.
 Do not put GitHub admin tokens on the bot computer.
 Every bot on that computer can see the keys.
+Other bots must not touch those secrets except through coordination with the Runpod bot or the Orchestrator.
 Rotate the keys when a bot is removed.
 
-Ryan configures these keys.
+Ryan and the Runpod bot configure these keys.
 Do not invent key values.
 Do not write example credentials.
 
@@ -204,18 +206,23 @@ A pod gets only:
 
 - the pod-scoped key that Runpod injects
 - Runpod secret `cc_repo_token` (read-only GitHub access to this repo's contents)
-- Runpod secret `cc_webhook_url` (a routine webhook)
+- Runpod secret `cc_webhook_url` (the completion webhook)
 
 The account API key never goes in the pod template.
 The account API key never goes in pod env.
 Do not copy the account key into a pod.
 
-`cc_webhook_url` is a routine webhook.
-Anyone who has the URL can wake the orchestrating bot.
-Do not invent which bot owns the webhook.
-Ryan must configure the webhook.
+The Runpod bot owns `cc_webhook_url`.
+`cc_webhook_url` is a routine completion webhook.
+Anyone who has the URL can wake the Runpod bot.
+Ryan and the Runpod bot configure the webhook URL.
+Do not invent a webhook URL.
+Do not write the URL in this file.
 
 ### 9.3 Start and stop rules
+
+Only the Runpod bot starts pods.
+Other bots must not start pods except through coordination with the Runpod bot or the Orchestrator.
 
 Never start a pod without `CC_TTL_S`.
 Never start a pod without `CC_JOB` or `--interactive`.
@@ -230,7 +237,7 @@ The volume bills continuously, but it is small.
 
 The GPU image `climbing-coach-gpu` is private.
 Before the first `pod_up`, the Runpod account must have a registry credential with GitHub `read:packages`.
-Do not start a pod if that credential is missing.
+The Runpod bot must not start a pod if that credential is missing.
 
 ## 10. Footage and models
 
