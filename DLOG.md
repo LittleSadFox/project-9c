@@ -79,3 +79,9 @@ Scripts:
 Out of scope:
 
 - Runpod runner, `docker/gpu`, `scripts/gpu`, `gpu-image.yml`, `sync_volume.sh`, and `ml/jobs.py`
+
+## 2026-10-21 — p0-skeleton pytest path
+
+Set `pythonpath = . ..` in `backend/pytest.ini`.
+CI collects tests with that file.
+The repo-root `scripts` package is then visible.
