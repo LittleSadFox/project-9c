@@ -1017,8 +1017,13 @@ def test_redact_covers_token_b64_and_header_case(tmp_path: Path) -> None:
     import base64
 
     token = "FakeRepoTokenValue"
-    b64 = base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
+    b64 = base64.b64encode(f"x-access-token:{token}".encode()).decode("ascii")
     log = tmp_path / "log.txt"
+    logged = (
+        f'printf "stdout {token}\\n"; '
+        f'printf "authorization: basic {b64}\\n" >&2; '
+        f'printf "AUTHORIZATION: BASIC {b64}\\n"'
+    )
     result = _run(
         [
             "bash",
@@ -1028,7 +1033,7 @@ source {LIB}
 export CC_REPO_TOKEN='{token}'
 export CC_RUN_LOG='{log}'
 cc_git_auth_setup
-cc_run_logged bash -c 'printf "stdout {token}\\n"; printf "authorization: basic {b64}\\n" >&2; printf "AUTHORIZATION: BASIC {b64}\\n"'
+cc_run_logged bash -c '{logged}'
 """,
         ]
     )
@@ -1036,7 +1041,7 @@ cc_run_logged bash -c 'printf "stdout {token}\\n"; printf "authorization: basic 
     combined = result.stdout + result.stderr + log.read_text(encoding="utf-8")
     assert token not in combined
     assert b64 not in combined
-    assert "authorization: basic REDACTED" in combined.lower()
+    assert "authorization: basic redacted" in combined.lower()
 
 
 def test_git_sanitize_unsets_trace_and_sets_prompt(tmp_path: Path) -> None:

@@ -222,7 +222,9 @@ cc_build_pod_payload() {
   fi
   local dc="${CC_RUNPOD_DATACENTER:-EU-RO-1}"
   local cuda_json=""
-  cuda_json="$(cc_allowed_cuda_versions)" || cuda_json=""
+  if [[ -n "${CC_ALLOWED_CUDA:-}" ]]; then
+    cuda_json="$(cc_allowed_cuda_versions)" || cc_fail "Could not build the pod payload. Check CC_ALLOWED_CUDA."
+  fi
 
   local payload
   if ! payload="$(
@@ -453,13 +455,21 @@ cc_pod_deleted() {
 
 cc_redact_stream() {
   command -v python3 >/dev/null 2>&1 || cc_fail "python3 is required to redact git logs."
-  python3 - <<'PY'
+  local src="${1:-}"
+  local tmp=""
+  if [[ -z "$src" ]]; then
+    tmp="$(mktemp)"
+    cat >"$tmp"
+    src="$tmp"
+  fi
+  python3 - "$src" <<'PY'
 import base64
 import os
 import re
 import sys
+from pathlib import Path
 
-text = sys.stdin.read()
+text = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
 token = os.environ.get("CC_REPO_TOKEN") or ""
 header = os.environ.get("GIT_CONFIG_VALUE_0") or ""
 text = re.sub(
@@ -476,13 +486,18 @@ text = re.sub(
 )
 if token:
     text = re.sub(re.escape(token), "REDACTED", text, flags=re.I)
-    b64 = base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
+    b64 = base64.b64encode(("x-access-token:" + token).encode("utf-8")).decode("ascii")
     text = text.replace(b64, "REDACTED")
     text = text.replace(b64.rstrip("="), "REDACTED")
 if header:
     text = re.sub(re.escape(header), "AUTHORIZATION: basic REDACTED", text, flags=re.I)
 sys.stdout.write(text)
 PY
+  local ec=$?
+  if [[ -n "$tmp" ]]; then
+    rm -f "$tmp"
+  fi
+  return "$ec"
 }
 
 cc_redact_text() {
@@ -525,7 +540,7 @@ cc_run_logged() {
     ec=$?
   fi
   set -e
-  cc_redact_stream <"$combined" | tee -a "${CC_RUN_LOG:-/dev/null}"
+  cc_redact_stream "$combined" | tee -a "${CC_RUN_LOG:-/dev/null}"
   rm -f "$combined"
   return "$ec"
 }
