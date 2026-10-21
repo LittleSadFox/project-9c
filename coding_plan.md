@@ -137,7 +137,7 @@ flowchart LR
 
 ### 2.5 Pod settings per job
 - Secure Cloud always (the volume needs it). On-Demand for `eval`, `train_events`, `tune_align` and `finetune_pose`. Interruptible (spot) is allowed for `gpu_tests` and `pose_bench`, where a restart is cheap.
-- GPU preference lists (`gpuTypeIds` with `gpuTypePriority: "custom"`): `NVIDIA L4`, `NVIDIA RTX 2000 Ada Generation`, `NVIDIA GeForce RTX 4090`, `NVIDIA A100 80GB PCIe`, `NVIDIA RTX PRO 4500 Blackwell`, `NVIDIA RTX PRO 4000 Blackwell`, `NVIDIA GeForce RTX 5090`. These types are available in `EU-RO-1`.
+- GPU preference lists (`gpuTypeIds` with `gpuTypePriority: "custom"`): `NVIDIA L4`, `NVIDIA RTX 2000 Ada Generation`, `NVIDIA GeForce RTX 4090`, `NVIDIA A100 80GB PCIe`. Keep `NVIDIA RTX PRO 4500 Blackwell`, `NVIDIA RTX PRO 4000 Blackwell`, and `NVIDIA GeForce RTX 5090` off the default list until a pod shows `CUDAExecutionProvider` working under ONNX Runtime on sm_120. These types are available in `EU-RO-1`.
 - `CC_TTL_S` is the backstop if `run_job.sh` hangs: 2 h for interactive pods, and a limit per job type for job pods (for example 1 h for `gpu_tests` and 12 h for `finetune_pose`).
 
 ### 2.6 Job flow
