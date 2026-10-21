@@ -126,17 +126,29 @@ export CC_RUN_LOG="${RUN_DIR}/log.txt"
   echo "ttl_s=${CC_TTL_S}"
 } | tee -a "$RUN_DIR/log.txt"
 
-if [[ -z "${CC_REPO_TOKEN:-}" || "${CC_REPO_TOKEN}" == *"{{"* ]]; then
-  echo "ERROR: CC_REPO_TOKEN is empty. The Runpod secret cc_repo_token is missing or blank." | tee -a "$RUN_DIR/log.txt" >&2
-  write_status failed
+fail_repo_token() {
+  local msg="$1"
+  local err="$2"
+  echo "ERROR: ${msg}" | tee -a "$RUN_DIR/log.txt" >&2
   if [[ ! -f "$RUN_DIR/metrics.json" ]]; then
-    jq -n --arg job "${CC_JOB:-unknown}" --arg err "CC_REPO_TOKEN is empty" \
+    jq -n --arg job "${CC_JOB:-unknown}" --arg err "$err" \
       '{job: $job, status: "failed", error: $err}' >"$RUN_DIR/metrics.json"
   fi
-  cc_fail "CC_REPO_TOKEN is empty. The Runpod secret cc_repo_token is missing or blank."
-fi
+  # Leave status as running so cleanup writes failed and pings the webhook.
+  cc_fail "$msg"
+}
 
 if [[ "${CC_RUN_JOB_READY:-}" != "1" ]]; then
+  if [[ -z "${CC_REPO_TOKEN:-}" ]]; then
+    fail_repo_token \
+      "CC_REPO_TOKEN is empty. The Runpod secret cc_repo_token is missing or blank." \
+      "CC_REPO_TOKEN is empty"
+  fi
+  if [[ "${CC_REPO_TOKEN}" == *"{{"* ]]; then
+    fail_repo_token \
+      "CC_REPO_TOKEN was not resolved. The Runpod secret cc_repo_token is missing." \
+      "CC_REPO_TOKEN was not resolved"
+  fi
   echo "Clone LittleSadFox/project-9c at ${CC_GIT_REF}" | tee -a "$RUN_DIR/log.txt"
   rm -rf "$SRC"
   mkdir -p "$SRC"
@@ -172,8 +184,8 @@ cc_run_logged --wait "$PY" -m pip install --cache-dir "$VOLUME/cache/pip" -r "$S
 cc_run_logged --wait "$PY" -m pip install --cache-dir "$VOLUME/cache/pip" --no-deps -r "$SRC/backend/requirements-nodeps.txt"
 
 echo "Run ml.jobs ${CC_JOB}" | tee -a "$RUN_DIR/log.txt"
-cc_run_logged --wait "$PY" -m ml.jobs "$CC_JOB" --run-dir "$RUN_DIR"
-ec=$?
+ec=0
+cc_run_logged --wait "$PY" -m ml.jobs "$CC_JOB" --run-dir "$RUN_DIR" || ec=$?
 
 if [[ "$ec" -eq 0 ]]; then
   STATUS="passed"

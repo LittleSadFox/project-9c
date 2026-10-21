@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -125,12 +126,11 @@ def _payload(stdout: str) -> dict[str, object]:
     return data
 
 
-def _run(
-    args: list[str],
+def _isolated_env(
     env: dict[str, str] | None = None,
     *,
     bin_dir: Path | None = None,
-) -> subprocess.CompletedProcess[str]:
+) -> dict[str, str]:
     merged = os.environ.copy()
     for key in list(merged):
         if _should_strip(key):
@@ -151,10 +151,19 @@ def _run(
     path_parts.append(merged.get("PATH", ""))
     merged["PATH"] = os.pathsep.join(part for part in path_parts if part)
     merged.update(extra)
+    return merged
+
+
+def _run(
+    args: list[str],
+    env: dict[str, str] | None = None,
+    *,
+    bin_dir: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         args,
         cwd=str(ROOT),
-        env=merged,
+        env=_isolated_env(env, bin_dir=bin_dir),
         check=False,
         capture_output=True,
         text=True,
@@ -765,6 +774,41 @@ exit 0
     assert state.read_text(encoding="utf-8") == "3"
 
 
+def test_s3_cp_retries_headobject_403_forbidden(tmp_path: Path) -> None:
+    aws = tmp_path / "aws"
+    state = tmp_path / "aws-state"
+    live_err = "An error occurred (403) when calling the HeadObject operation: Forbidden"
+    aws.write_text(
+        f"""#!/usr/bin/env bash
+n=0
+if [[ -f "{state}" ]]; then
+  n="$(cat "{state}")"
+fi
+n=$((n + 1))
+printf '%s' "$n" > "{state}"
+if [[ "$n" -lt 3 ]]; then
+  echo "{live_err}" >&2
+  exit 1
+fi
+printf 'passed\\n'
+exit 0
+""",
+        encoding="utf-8",
+    )
+    aws.chmod(0o755)
+    result = _run(
+        [
+            "bash",
+            "-c",
+            f"source {LIB} && cc_s3_cp_stdout s3://vol/runs/job-1/status EU-RO-1 https://s3api-eu-ro-1.runpod.io",
+        ],
+        bin_dir=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "passed" in result.stdout
+    assert state.read_text(encoding="utf-8") == "3"
+
+
 def test_run_job_logs_redacted_clone_stderr(tmp_path: Path) -> None:
     token = "secret-repo-token-value"
     git = tmp_path / "git"
@@ -817,6 +861,8 @@ def test_interactive_sigterm_is_stopped_not_failed(tmp_path: Path) -> None:
     assert status.is_file()
     assert status.read_text(encoding="utf-8").strip() == "stopped"
     assert result.returncode == 0
+    interactive = LIB.read_text(encoding="utf-8").split("CC_INTERACTIVE_READY")[1]
+    assert "exit 0" in interactive.split("cc_terminate_self")[1][:80]
 
 
 def test_failed_status_rewrite_does_not_ping_webhook(tmp_path: Path) -> None:
@@ -1007,22 +1053,298 @@ def test_run_job_fails_fast_without_repo_token(tmp_path: Path) -> None:
     assert "CC_REPO_TOKEN is empty" in result.stderr
     log = tmp_path / "runs" / "job-notoken" / "log.txt"
     status = tmp_path / "runs" / "job-notoken" / "status"
+    metrics = json.loads(
+        (tmp_path / "runs" / "job-notoken" / "metrics.json").read_text(encoding="utf-8")
+    )
     assert log.is_file()
     assert "CC_REPO_TOKEN is empty" in log.read_text(encoding="utf-8")
     assert status.read_text(encoding="utf-8").strip() == "failed"
+    assert metrics["error"] == "CC_REPO_TOKEN is empty"
     assert "Clone" not in log.read_text(encoding="utf-8")
+
+
+def test_run_job_empty_token_pings_webhook(tmp_path: Path) -> None:
+    hits = tmp_path / "webhook.log"
+    curl = tmp_path / "curl"
+    curl.write_text(
+        f"""#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "{hits}"
+printf '200'
+exit 0
+""",
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+    result = _run(
+        [str(RUN_JOB)],
+        env={
+            "CC_VOLUME_DIR": str(tmp_path / "vol"),
+            "CC_JOB": "gpu_tests",
+            "CC_GIT_REF": SHA40,
+            "CC_JOB_ID": "job-hook",
+            "CC_TTL_S": "60",
+            "CC_WEBHOOK_URL": "https://example.invalid/hook",
+        },
+        bin_dir=tmp_path,
+    )
+    assert result.returncode != 0
+    assert hits.is_file(), result.stderr
+    body = hits.read_text(encoding="utf-8")
+    assert "example.invalid/hook" in body
+    assert "failed" in body
+    status = tmp_path / "vol" / "runs" / "job-hook" / "status"
+    assert status.read_text(encoding="utf-8").strip() == "failed"
+
+
+def test_run_job_unresolved_token_pings_webhook(tmp_path: Path) -> None:
+    hits = tmp_path / "webhook.log"
+    curl = tmp_path / "curl"
+    curl.write_text(
+        f"""#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "{hits}"
+printf '200'
+exit 0
+""",
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+    result = _run(
+        [str(RUN_JOB)],
+        env={
+            "CC_VOLUME_DIR": str(tmp_path / "vol"),
+            "CC_JOB": "gpu_tests",
+            "CC_GIT_REF": SHA40,
+            "CC_JOB_ID": "job-unresolved",
+            "CC_TTL_S": "60",
+            "CC_REPO_TOKEN": "{{ RUNPOD_SECRET_cc_repo_token }}",
+            "CC_WEBHOOK_URL": "https://example.invalid/hook",
+        },
+        bin_dir=tmp_path,
+    )
+    assert result.returncode != 0
+    assert "CC_REPO_TOKEN was not resolved" in result.stderr
+    assert "CC_REPO_TOKEN is empty" not in result.stderr
+    log = tmp_path / "vol" / "runs" / "job-unresolved" / "log.txt"
+    assert "CC_REPO_TOKEN was not resolved" in log.read_text(encoding="utf-8")
+    assert "CC_REPO_TOKEN is empty" not in log.read_text(encoding="utf-8")
+    assert hits.is_file(), result.stderr
+    body = hits.read_text(encoding="utf-8")
+    assert "example.invalid/hook" in body
+    assert "failed" in body
+    status = tmp_path / "vol" / "runs" / "job-unresolved" / "status"
+    assert status.read_text(encoding="utf-8").strip() == "failed"
+
+
+def test_run_logged_streams_before_exit(tmp_path: Path) -> None:
+    log = tmp_path / "log.txt"
+    token = "StreamTokenSecret"
+    cmd = tmp_path / "slow.sh"
+    cmd.write_text(
+        "#!/usr/bin/env bash\n"
+        f"printf 'first-line {token}\\n'\n"
+        "sleep 30\n"
+        "printf 'second-line\\n'\n",
+        encoding="utf-8",
+    )
+    cmd.chmod(0o755)
+    proc = subprocess.Popen(
+        ["bash", "-c", f"source {LIB} && cc_run_logged --wait {cmd}"],
+        cwd=str(ROOT),
+        env=_isolated_env({"CC_REPO_TOKEN": token, "CC_RUN_LOG": str(log)}),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    deadline = time.time() + 8
+    seen = ""
+    while time.time() < deadline:
+        if log.is_file():
+            seen = log.read_text(encoding="utf-8")
+            if "first-line" in seen:
+                break
+        if proc.poll() is not None:
+            break
+        time.sleep(0.05)
+    else:
+        proc.kill()
+        proc.wait(timeout=5)
+        raise AssertionError("log was not streamed before the command exited")
+    assert "first-line" in seen
+    assert token not in seen
+    assert "REDACTED" in seen
+    assert "second-line" not in seen
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
+def test_run_job_rerun_after_clone_reaches_ml_jobs(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    git = tmp_path / "git"
+    git.write_text(
+        f"""#!/usr/bin/env bash
+dest=""
+if [[ "$1" == "init" ]]; then
+  dest="$2"
+elif [[ "$1" == "-C" ]]; then
+  dest="$2"
+fi
+if [[ -n "$dest" ]]; then
+  mkdir -p "$dest/scripts/gpu" "$dest/backend"
+  cp "{RUN_JOB}" "$dest/scripts/gpu/run_job.sh"
+  cp "{LIB}" "$dest/scripts/gpu/lib.sh"
+  chmod +x "$dest/scripts/gpu/run_job.sh"
+  for name in requirements-gpu.txt requirements-dev.txt requirements-nodeps.txt; do
+    printf '# pin\\n' > "$dest/backend/$name"
+  done
+fi
+exit 0
+""",
+        encoding="utf-8",
+    )
+    git.chmod(0o755)
+    py = tmp_path / "python3"
+    py.write_text(
+        """#!/usr/bin/env bash
+if [[ " $* " == *" -m pip "* ]]; then
+  exit 0
+fi
+if [[ " $* " == *" -m ml.jobs "* ]]; then
+  echo "ml.jobs reached"
+  exit 0
+fi
+exec /usr/bin/python3 "$@"
+""",
+        encoding="utf-8",
+    )
+    py.chmod(0o755)
+    result = _run(
+        [str(RUN_JOB)],
+        env={
+            "CC_VOLUME_DIR": str(tmp_path / "vol"),
+            "CC_JOB": "gpu_tests",
+            "CC_GIT_REF": SHA40,
+            "CC_JOB_ID": "job-rerun",
+            "CC_TTL_S": "60",
+            "CC_REPO_TOKEN": "clone-then-clear-token",
+            "CC_SRC_DIR": str(src),
+        },
+        bin_dir=tmp_path,
+    )
+    log = tmp_path / "vol" / "runs" / "job-rerun" / "log.txt"
+    text = log.read_text(encoding="utf-8") if log.is_file() else ""
+    assert result.returncode == 0, result.stderr + text
+    assert "CC_REPO_TOKEN is empty" not in result.stderr
+    assert "CC_REPO_TOKEN is empty" not in text
+    assert "ml.jobs reached" in text
+    status = tmp_path / "vol" / "runs" / "job-rerun" / "status"
+    assert status.read_text(encoding="utf-8").strip() == "passed"
+
+
+def test_exit_0_trap_runpodctl_fail_falls_back_to_rest(tmp_path: Path) -> None:
+    _fake_curl(tmp_path, "200", '{"id":"pod-abc"}')
+    runpodctl = tmp_path / "runpodctl"
+    runpodctl.write_text(
+        "#!/usr/bin/env bash\necho ctl-fail >&2\nexit 1\n",
+        encoding="utf-8",
+    )
+    runpodctl.chmod(0o755)
+    result = _run(
+        [
+            "bash",
+            "-c",
+            f"source {LIB} && trap 'cc_terminate_self' EXIT && exit 0",
+        ],
+        env={"RUNPOD_POD_ID": "pod-abc", "RUNPOD_API_KEY": "ok-key"},
+        bin_dir=tmp_path,
+    )
+    combined = result.stdout + result.stderr
+    assert "terminate ok via curl" in combined
+    assert "terminate ok via runpodctl" not in combined
+    assert "runpodctl failed" in combined
+    assert "ctl-fail" in combined
+
+
+def test_run_logged_wait_preserves_exit_code() -> None:
+    result = _run(
+        [
+            "bash",
+            "-c",
+            f"source {LIB} && cc_run_logged --wait bash -c 'echo hi; exit 3'",
+        ]
+    )
+    assert result.returncode == 3
+    assert "hi" in result.stdout
+
+
+def test_run_job_records_ml_jobs_exit_code(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    (src / "backend").mkdir(parents=True)
+    for name in (
+        "requirements-gpu.txt",
+        "requirements-dev.txt",
+        "requirements-nodeps.txt",
+    ):
+        (src / "backend" / name).write_text("# pin\n", encoding="utf-8")
+    py = tmp_path / "python3"
+    py.write_text(
+        """#!/usr/bin/env bash
+if [[ " $* " == *" -m pip "* ]]; then
+  exit 0
+fi
+if [[ " $* " == *" -m ml.jobs "* ]]; then
+  echo "pytest failed: 3 failed"
+  exit 7
+fi
+exec /usr/bin/python3 "$@"
+""",
+        encoding="utf-8",
+    )
+    py.chmod(0o755)
+    text = RUN_JOB.read_text(encoding="utf-8")
+    assert "ec=0" in text
+    assert "|| ec=$?" in text
+    result = _run(
+        [str(RUN_JOB)],
+        env={
+            "CC_VOLUME_DIR": str(tmp_path / "vol"),
+            "CC_JOB": "gpu_tests",
+            "CC_GIT_REF": SHA40,
+            "CC_JOB_ID": "job-ec",
+            "CC_TTL_S": "60",
+            "CC_REPO_TOKEN": "tok",
+            "CC_RUN_JOB_READY": "1",
+            "CC_SRC_DIR": str(src),
+        },
+        bin_dir=tmp_path,
+    )
+    assert result.returncode != 0
+    metrics = json.loads(
+        (tmp_path / "vol" / "runs" / "job-ec" / "metrics.json").read_text(encoding="utf-8")
+    )
+    assert metrics["exit_code"] == 7
+    assert metrics["status"] == "failed"
+    status = tmp_path / "vol" / "runs" / "job-ec" / "status"
+    assert status.read_text(encoding="utf-8").strip() == "failed"
+    log = tmp_path / "vol" / "runs" / "job-ec" / "log.txt"
+    assert "pytest failed" in log.read_text(encoding="utf-8")
 
 
 def test_redact_covers_token_b64_and_header_case(tmp_path: Path) -> None:
     import base64
 
-    token = "FakeRepoTokenValue"
+    token = "Fake*Token?[x]"
     b64 = base64.b64encode(f"x-access-token:{token}".encode()).decode("ascii")
     log = tmp_path / "log.txt"
     logged = (
         f'printf "stdout {token}\\n"; '
         f'printf "authorization: basic {b64}\\n" >&2; '
-        f'printf "AUTHORIZATION: BASIC {b64}\\n"'
+        f'printf "AUTHORIZATION: BASIC {b64}\\n"; '
+        f'printf "{b64}\\n"; '
+        f'printf "[authorization: basic {b64}]\\n"'
     )
     result = _run(
         [
@@ -1042,6 +1364,7 @@ cc_run_logged bash -c '{logged}'
     assert token not in combined
     assert b64 not in combined
     assert "authorization: basic redacted" in combined.lower()
+    assert "[authorization: basic REDACTED]" in combined
 
 
 def test_git_sanitize_unsets_trace_and_sets_prompt(tmp_path: Path) -> None:

@@ -344,7 +344,7 @@ cc_early_cleanup() {
       printf 'stopped\n' >"${run_dir}/status"
     fi
     cc_terminate_self
-    return 0
+    exit 0
   fi
   if [[ "$existing" == "passed" || "$existing" == "failed" || "$existing" == "stopped" ]]; then
     cc_terminate_self
@@ -455,49 +455,47 @@ cc_pod_deleted() {
 
 cc_redact_stream() {
   command -v python3 >/dev/null 2>&1 || cc_fail "python3 is required to redact git logs."
-  local src="${1:-}"
-  local tmp=""
-  if [[ -z "$src" ]]; then
-    tmp="$(mktemp)"
-    cat >"$tmp"
-    src="$tmp"
-  fi
-  python3 - "$src" <<'PY'
+  # Line-by-line so a hang or TTL kill still leaves output on the volume.
+  python3 -u -c '
 import base64
 import os
 import re
 import sys
-from pathlib import Path
 
-text = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
 token = os.environ.get("CC_REPO_TOKEN") or ""
 header = os.environ.get("GIT_CONFIG_VALUE_0") or ""
-text = re.sub(
-    r"(authorization:\s*)(basic|bearer)\s+\S+",
-    r"\1\2 REDACTED",
-    text,
-    flags=re.I,
-)
-text = re.sub(
-    r"(\[authorization:\s*)(basic|bearer)\s+[^]\s]+",
-    r"\1\2 REDACTED",
-    text,
-    flags=re.I,
-)
+b64 = ""
+b64_nopad = ""
 if token:
-    text = re.sub(re.escape(token), "REDACTED", text, flags=re.I)
     b64 = base64.b64encode(("x-access-token:" + token).encode("utf-8")).decode("ascii")
-    text = text.replace(b64, "REDACTED")
-    text = text.replace(b64.rstrip("="), "REDACTED")
-if header:
-    text = re.sub(re.escape(header), "AUTHORIZATION: basic REDACTED", text, flags=re.I)
-sys.stdout.write(text)
-PY
-  local ec=$?
-  if [[ -n "$tmp" ]]; then
-    rm -f "$tmp"
-  fi
-  return "$ec"
+    b64_nopad = b64.rstrip("=")
+
+def redact(text):
+    text = re.sub(
+        r"(authorization:\s*)(basic|bearer)\s+[^\s\]]+",
+        r"\1\2 REDACTED",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"(\[authorization:\s*)(basic|bearer)\s+[^]\s]+",
+        r"\1\2 REDACTED",
+        text,
+        flags=re.I,
+    )
+    if token:
+        text = re.sub(re.escape(token), "REDACTED", text, flags=re.I)
+        if b64:
+            text = text.replace(b64, "REDACTED")
+            text = text.replace(b64_nopad, "REDACTED")
+    if header:
+        text = re.sub(re.escape(header), "AUTHORIZATION: basic REDACTED", text, flags=re.I)
+    return text
+
+for line in sys.stdin:
+    sys.stdout.write(redact(line))
+    sys.stdout.flush()
+'
 }
 
 cc_redact_text() {
@@ -527,21 +525,24 @@ cc_run_logged() {
     wait_bg=1
     shift
   fi
-  local combined ec
-  combined="$(mktemp)"
   cc_git_sanitize_env
+  local fifo reader ec
+  fifo="$(mktemp -u)"
+  mkfifo "$fifo"
+  cc_redact_stream <"$fifo" | tee -a "${CC_RUN_LOG:-/dev/null}" &
+  reader=$!
   set +e
   if [[ "$wait_bg" == "1" ]]; then
-    "$@" >"$combined" 2>&1 &
+    "$@" >"$fifo" 2>&1 &
     wait $!
     ec=$?
   else
-    "$@" >"$combined" 2>&1
+    "$@" >"$fifo" 2>&1
     ec=$?
   fi
   set -e
-  cc_redact_stream "$combined" | tee -a "${CC_RUN_LOG:-/dev/null}"
-  rm -f "$combined"
+  wait "$reader" || true
+  rm -f "$fifo"
   return "$ec"
 }
 
@@ -550,9 +551,10 @@ cc_run_timeout() {
   shift
   if command -v timeout >/dev/null 2>&1; then
     timeout --signal=KILL "$secs" "$@"
-    return
+    return $?
   fi
   "$@"
+  return $?
 }
 
 cc_s3_cp_stdout() {
@@ -573,7 +575,7 @@ cc_s3_cp_stdout() {
       rm -f "$err"
       return 1
     fi
-    if grep -qiE 'SignatureDoesNotMatch|403 Forbidden|Status Code: 403|HTTPStatusCode: 403' "$err"; then
+    if grep -qiE 'SignatureDoesNotMatch|403 Forbidden|Status Code: 403|HTTPStatusCode: 403|\(403\)' "$err"; then
       if (( attempt >= 4 )); then
         break
       fi
@@ -724,14 +726,16 @@ cc_terminate_self() {
     echo "ERROR: No pod-scoped RUNPOD_API_KEY. Cannot terminate this pod." >&2
     return 1
   fi
-  local attempt delay
+  local attempt delay ctl
   for attempt in 1 2 3 4; do
     if command -v runpodctl >/dev/null 2>&1; then
-      if cc_run_timeout 20 runpodctl remove pod "$RUNPOD_POD_ID" >/dev/null 2>&1 \
-        || cc_run_timeout 20 runpodctl pod delete "$RUNPOD_POD_ID" >/dev/null 2>&1; then
+      ctl=""
+      if ctl="$(cc_run_timeout 20 runpodctl remove pod "$RUNPOD_POD_ID" 2>&1)" \
+        || ctl="$(cc_run_timeout 20 runpodctl pod delete "$RUNPOD_POD_ID" 2>&1)"; then
         cc_log "terminate ok via runpodctl attempt=${attempt}"
         return 0
       fi
+      cc_log "runpodctl failed attempt=${attempt}: ${ctl}"
     fi
     if cc_rest DELETE "/pods/${RUNPOD_POD_ID}" >/dev/null; then
       cc_log "terminate ok via curl attempt=${attempt}"
