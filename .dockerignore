@@ -1,0 +1,12 @@
+frontend/
+errors/
+*.md
+**/*.md
+.git
+.venv
+node_modules
+frontend/dist
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/__pycache__

@@ -111,3 +111,22 @@ Section 2.2 setup is complete.
 The first live `pod_up.sh --job gpu_tests` waits on this pull request merging and on green CI plus a green GPU image build.
 After that, the Runpod bot runs it.
 This change does not start a pod.
+
+## 2026-10-21 — Runner review fixes
+
+`gpu_tests` sets `CC_REQUIRE` only in the pytest subprocess.
+Later tests in the same process keep their skip rules.
+
+The GPU image does not generate SSH host keys at build time.
+`entrypoint.sh` generates host keys at start-up, then starts sshd on every pod.
+
+The GPU image workflow frees disk before buildx.
+It does not load the image on the runner.
+It pushes sha and `latest` only from `main`.
+
+Pod scripts use Basic `x-access-token` git auth, the EU-RO-1 GPU list, and retry terminate.
+`wait_job.sh --pod-id` fails if the pod exits before status is `passed`.
+`--spot` is allowed only for `gpu_tests` and `pose_bench`.
+
+Section 2.2 setup is complete.
+The first live `gpu_tests` pod waits on this pull request merging and on green CI plus a green GPU image build.

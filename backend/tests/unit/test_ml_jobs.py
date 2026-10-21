@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -65,6 +66,43 @@ def test_gpu_tests_job_writes_metrics(tmp_path: Path) -> None:
     assert metrics["status"] == "passed"
     assert metrics["pytest"]["passed"] >= 1
     assert (run_dir / "metrics.json").is_file()
+
+
+def test_gpu_tests_does_not_leak_cc_require(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("CC_REQUIRE", raising=False)
+    sample = tmp_path / "sample_test.py"
+    sample.write_text("def test_ok() -> None:\n    assert True\n", encoding="utf-8")
+    gpu_tests(
+        tmp_path / "run",
+        pytest_args=[str(sample), "-q"],
+        require_cuda=False,
+    )
+    assert "CC_REQUIRE" not in os.environ
+
+
+def test_gpu_tests_sets_require_only_in_subprocess(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("CC_REQUIRE", raising=False)
+    monkeypatch.setenv("CC_MODELS_DIR", str(tmp_path / "no-models"))
+    monkeypatch.setenv("CC_GOLDEN_DIR", str(tmp_path / "no-golden"))
+    sample = tmp_path / "sample_test.py"
+    sample.write_text(
+        "import os\n"
+        "def test_child_sees_require() -> None:\n"
+        "    assert 'media' in os.environ.get('CC_REQUIRE', '')\n"
+        "    assert 'model' not in os.environ.get('CC_REQUIRE', '').split(',')\n",
+        encoding="utf-8",
+    )
+    metrics = gpu_tests(
+        tmp_path / "run",
+        pytest_args=[str(sample), "-q"],
+        require_cuda=False,
+    )
+    assert metrics["status"] == "passed"
+    assert "CC_REQUIRE" not in os.environ
 
 
 def test_later_jobs_are_not_ready() -> None:

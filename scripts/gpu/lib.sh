@@ -2,6 +2,8 @@
 # Shared helpers for bot-side pod scripts and the pod entrypoint.
 # Do not put secrets in this file.
 
+# shellcheck disable=SC2034
+
 cc_fail() {
   echo "ERROR: $*" >&2
   exit 1
@@ -22,6 +24,17 @@ cc_is_known_job() {
   return 1
 }
 
+cc_spot_allowed() {
+  case "${1:-}" in
+    gpu_tests|pose_bench) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+cc_max_ttl_s() {
+  echo 43200
+}
+
 cc_default_ttl_s() {
   local job="${1:-}"
   local interactive="${2:-0}"
@@ -40,29 +53,46 @@ cc_default_ttl_s() {
 cc_parse_ttl() {
   local raw="${1:-}"
   [[ -n "$raw" ]] || cc_fail "TTL is empty. Set CC_TTL_S or pass --ttl."
+  local seconds=""
   if [[ "$raw" =~ ^[0-9]+$ ]]; then
-    echo "$raw"
-    return
-  fi
-  if [[ "$raw" =~ ^([0-9]+)([smh])$ ]]; then
+    seconds="$raw"
+  elif [[ "$raw" =~ ^([0-9]+)([smh])$ ]]; then
     local n="${BASH_REMATCH[1]}"
     local unit="${BASH_REMATCH[2]}"
     case "$unit" in
-      s) echo "$n" ;;
-      m) echo $((n * 60)) ;;
-      h) echo $((n * 3600)) ;;
+      s) seconds="$n" ;;
+      m) seconds=$((n * 60)) ;;
+      h) seconds=$((n * 3600)) ;;
     esac
-    return
+  else
+    cc_fail "TTL ${raw} is not an integer second count or a value like 10m / 2h."
   fi
-  cc_fail "TTL ${raw@Q} is not an integer second count or a value like 10m / 2h."
+  if [[ ! "$seconds" =~ ^[1-9][0-9]*$ ]]; then
+    cc_fail "CC_TTL_S must be a positive integer number of seconds. Got ${seconds}."
+  fi
+  local max
+  max="$(cc_max_ttl_s)"
+  if (( seconds > max )); then
+    cc_fail "CC_TTL_S ${seconds} is above the cap of ${max}s."
+  fi
+  echo "$seconds"
 }
 
 cc_require_ttl() {
   local ttl="${CC_TTL_S:-}"
   [[ -n "$ttl" ]] || cc_fail "CC_TTL_S is required. Never start a pod without a TTL."
-  if [[ ! "$ttl" =~ ^[1-9][0-9]*$ ]]; then
-    cc_fail "CC_TTL_S must be a positive integer number of seconds. Got ${ttl@Q}."
+  CC_TTL_S="$(cc_parse_ttl "$ttl")"
+  export CC_TTL_S
+}
+
+cc_require_job_or_interactive() {
+  if [[ -n "${CC_JOB:-}" ]]; then
+    return 0
   fi
+  if [[ "${CC_INTERACTIVE:-}" == "1" ]]; then
+    return 0
+  fi
+  cc_fail "Set CC_JOB or CC_INTERACTIVE=1."
 }
 
 cc_secret_ref_repo_token() {
@@ -73,12 +103,35 @@ cc_secret_ref_webhook() {
   printf '%s' '{{ RUNPOD_SECRET_cc_webhook_url }}'
 }
 
+cc_default_gpu_csv() {
+  printf '%s' "NVIDIA L4,NVIDIA RTX 2000 Ada Generation,NVIDIA GeForce RTX 4090,NVIDIA A100 80GB PCIe,NVIDIA RTX PRO 4500 Blackwell,NVIDIA RTX PRO 4000 Blackwell,NVIDIA GeForce RTX 5090"
+}
+
+cc_load_defaults() {
+  local here
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  local file="${here}/defaults.env"
+  if [[ -f "$file" ]]; then
+    # shellcheck disable=SC1090
+    set -a
+    source "$file"
+    set +a
+  fi
+  if [[ -n "${CC_VOLUME_ID:-}" ]]; then
+    CC_RUNPOD_VOLUME_ID="$CC_VOLUME_ID"
+  fi
+  if [[ -n "${CC_VOLUME_DC:-}" ]]; then
+    CC_RUNPOD_DATACENTER="$CC_VOLUME_DC"
+  fi
+  export CC_RUNPOD_VOLUME_ID="${CC_RUNPOD_VOLUME_ID:-}"
+  export CC_RUNPOD_DATACENTER="${CC_RUNPOD_DATACENTER:-}"
+  export CC_RUNPOD_REGISTRY_AUTH_ID="${CC_RUNPOD_REGISTRY_AUTH_ID:-}"
+  export CC_GPU_IMAGE="${CC_GPU_IMAGE:-}"
+}
+
 cc_assert_no_account_key() {
   local payload="$1"
   if printf '%s' "$payload" | grep -Eq '"RUNPOD_API_KEY"'; then
-    cc_fail "Account API key must not go in the pod template or pod env."
-  fi
-  if [[ -n "${RUNPOD_API_KEY:-}" ]] && printf '%s' "$payload" | grep -F -q -- "$RUNPOD_API_KEY"; then
     cc_fail "Account API key must not go in the pod template or pod env."
   fi
 }
@@ -111,7 +164,9 @@ cc_build_pod_env_json() {
         CC_WEBHOOK_URL: $hook
       }'
   )"
-  if [[ "$interactive" != "1" ]]; then
+  if [[ "$interactive" == "1" ]]; then
+    env="$(jq '. + {CC_INTERACTIVE: "1"}' <<<"$env")"
+  else
     env="$(jq --arg job "$job" '. + {CC_JOB: $job}' <<<"$env")"
   fi
   cc_assert_no_account_key "$env"
@@ -121,16 +176,16 @@ cc_build_pod_env_json() {
 cc_build_pod_payload() {
   local name="$1"
   local env_json="$2"
-  local ttl="$3"
-  local spot="$4"
-  local gpu_csv="$5"
+  local spot="$3"
+  local gpu_csv="$4"
   command -v jq >/dev/null 2>&1 || cc_fail "Install jq. The pod scripts need it."
 
-  local gpus="${gpu_csv:-NVIDIA GeForce RTX 4090,NVIDIA A40,NVIDIA RTX A5000}"
+  local gpus="${gpu_csv:-$(cc_default_gpu_csv)}"
   local interruptible=false
   if [[ "$spot" == "1" ]]; then
     interruptible=true
   fi
+  local dc="${CC_RUNPOD_DATACENTER:-EU-RO-1}"
 
   local payload
   payload="$(
@@ -142,7 +197,7 @@ cc_build_pod_payload() {
       --arg template "${CC_RUNPOD_TEMPLATE_ID:-}" \
       --arg volume "${CC_RUNPOD_VOLUME_ID:-}" \
       --arg image "${CC_GPU_IMAGE:-}" \
-      --arg dc "${CC_RUNPOD_DATACENTER:-}" \
+      --arg dc "$dc" \
       --arg registry "${CC_RUNPOD_REGISTRY_AUTH_ID:-}" \
       --argjson disk 20 \
       '{
@@ -153,7 +208,9 @@ cc_build_pod_payload() {
         gpuTypePriority: "custom",
         gpuTypeIds: ($gpus | split(",") | map(gsub("^ +| +$";""))),
         containerDiskInGb: $disk,
+        volumeInGb: 0,
         volumeMountPath: "/workspace",
+        dataCenterIds: [$dc],
         ports: ["22/tcp"],
         interruptible: $interruptible,
         env: $env
@@ -161,7 +218,6 @@ cc_build_pod_payload() {
       + (if $template != "" then {templateId: $template} else {} end)
       + (if $volume != "" then {networkVolumeId: $volume} else {} end)
       + (if $image != "" then {imageName: $image} else {} end)
-      + (if $dc != "" then {dataCenterIds: [$dc]} else {} end)
       + (if $registry != "" then {containerRegistryAuthId: $registry} else {} end)'
   )"
   cc_assert_no_account_key "$payload"
@@ -175,6 +231,17 @@ cc_require_bot_api_key() {
   [[ -n "${RUNPOD_API_KEY:-}" ]] || cc_fail "RUNPOD_API_KEY is missing on this computer. Ryan and the Runpod bot set it. Do not invent a value."
 }
 
+cc_require_registry_auth() {
+  if [[ -n "${CC_GPU_IMAGE:-}" && -z "${CC_RUNPOD_REGISTRY_AUTH_ID:-}" ]]; then
+    cc_fail "CC_GPU_IMAGE needs CC_RUNPOD_REGISTRY_AUTH_ID. The image is private."
+  fi
+}
+
+cc_valid_pod_id() {
+  local id="$1"
+  [[ "$id" =~ ^[A-Za-z0-9_-]{4,64}$ ]]
+}
+
 cc_rest() {
   local method="$1"
   local path="$2"
@@ -182,25 +249,52 @@ cc_rest() {
   cc_require_bot_api_key
   command -v curl >/dev/null 2>&1 || cc_fail "Install curl. The pod scripts need it."
   local url="https://rest.runpod.io/v1${path}"
-  local args=(-sS -X "$method" -H "Authorization: Bearer ${RUNPOD_API_KEY}" -H "Content-Type: application/json")
+  local hdr tmp code
+  hdr="$(mktemp)"
+  tmp="$(mktemp)"
+  printf 'Authorization: Bearer %s\n' "${RUNPOD_API_KEY}" >"$hdr"
+  chmod 600 "$hdr"
+  local extra=()
   if [[ -n "$body" ]]; then
-    args+=(-d "$body")
+    extra+=(-d "$body")
   fi
-  curl "${args[@]}" "$url"
+  code="$(
+    curl -sS -o "$tmp" -w '%{http_code}' -X "$method" \
+      -H "@${hdr}" -H "Content-Type: application/json" \
+      "${extra[@]}" "$url" || true
+  )"
+  rm -f "$hdr"
+  if [[ ! "$code" =~ ^2[0-9][0-9]$ ]]; then
+    echo "ERROR: Runpod ${method} ${path} returned HTTP ${code}." >&2
+    cat "$tmp" >&2 || true
+    rm -f "$tmp"
+    return 1
+  fi
+  cat "$tmp"
+  rm -f "$tmp"
+  return 0
 }
 
 cc_s3_endpoint() {
-  local dc="${CC_VOLUME_DC:-${CC_RUNPOD_DATACENTER:-}}"
-  [[ -n "$dc" ]] || cc_fail "Set CC_VOLUME_DC or CC_RUNPOD_DATACENTER to the volume datacenter."
+  local dc="${CC_RUNPOD_DATACENTER:-}"
+  [[ -n "$dc" ]] || cc_fail "Set CC_RUNPOD_DATACENTER to the volume datacenter."
   local lower
   lower="$(printf '%s' "$dc" | tr '[:upper:]' '[:lower:]')"
   printf 'https://s3api-%s.runpod.io' "$lower"
 }
 
 cc_volume_id() {
-  local id="${CC_VOLUME_ID:-${CC_RUNPOD_VOLUME_ID:-}}"
-  [[ -n "$id" ]] || cc_fail "Set CC_VOLUME_ID or CC_RUNPOD_VOLUME_ID."
+  local id="${CC_RUNPOD_VOLUME_ID:-}"
+  [[ -n "$id" ]] || cc_fail "Set CC_RUNPOD_VOLUME_ID."
   printf '%s' "$id"
+}
+
+cc_aws_args() {
+  local args=()
+  if [[ -n "${CC_AWS_PROFILE:-}" ]]; then
+    args+=(--profile "$CC_AWS_PROFILE")
+  fi
+  printf '%s\n' "${args[@]}"
 }
 
 cc_setup_ssh() {
@@ -212,27 +306,142 @@ cc_setup_ssh() {
   fi
 }
 
-cc_terminate_self() {
-  if [[ -z "${RUNPOD_POD_ID:-}" ]]; then
-    echo "No RUNPOD_POD_ID. Skip remote terminate."
+cc_pods_from_response() {
+  local response="$1"
+  local items
+  items="$(
+    jq -c '
+      if type == "array" then .
+      elif ((.pods // empty) | type) == "array" then .pods
+      elif ((.data // empty) | type) == "array" then .data
+      else empty
+      end
+    ' <<<"$response"
+  )"
+  if [[ -z "$items" || "$items" == "null" ]]; then
+    echo "$response" >&2
+    cc_fail "Runpod /pods did not return an array."
+  fi
+  printf '%s\n' "$items"
+}
+
+cc_require_cuda_driver() {
+  if ! command -v nvidia-smi >/dev/null 2>&1; then
+    if [[ -n "${CC_JOB:-}" ]]; then
+      cc_fail "nvidia-smi is required on a job pod."
+    fi
+    echo "nvidia-smi is not available. Skip the driver check."
     return 0
   fi
-  if [[ -z "${RUNPOD_API_KEY:-}" ]]; then
-    echo "No pod-scoped RUNPOD_API_KEY. Cannot terminate this pod." >&2
+  local ver
+  ver="$(nvidia-smi | sed -n 's/.*CUDA Version: \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -n 1)"
+  [[ -n "$ver" ]] || cc_fail "Could not read the CUDA version from nvidia-smi."
+  local major minor
+  major="${ver%%.*}"
+  minor="${ver#*.}"
+  minor="${minor%%.*}"
+  if (( major < 12 )) || { (( major == 12 )) && (( minor < 8 )); }; then
+    cc_fail "CUDA driver is ${ver}. Need 12.8 or later."
+  fi
+}
+
+cc_log() {
+  if [[ -n "${CC_RUN_LOG:-}" ]]; then
+    printf '%s\n' "$*" | tee -a "$CC_RUN_LOG"
+  else
+    printf '%s\n' "$*"
+  fi
+}
+
+cc_terminate_self() {
+  if [[ -z "${RUNPOD_POD_ID:-}" ]]; then
+    echo "ERROR: RUNPOD_POD_ID is missing. Cannot terminate this pod." >&2
     return 1
   fi
-  curl -sS -X DELETE \
-    -H "Authorization: Bearer ${RUNPOD_API_KEY}" \
-    "https://rest.runpod.io/v1/pods/${RUNPOD_POD_ID}" \
-    >/dev/null || true
+  if [[ -z "${RUNPOD_API_KEY:-}" ]]; then
+    echo "ERROR: No pod-scoped RUNPOD_API_KEY. Cannot terminate this pod." >&2
+    return 1
+  fi
+  local attempt delay
+  for attempt in 1 2 3 4; do
+    if command -v runpodctl >/dev/null 2>&1; then
+      if runpodctl remove pod "$RUNPOD_POD_ID" >/dev/null 2>&1 \
+        || runpodctl pod delete "$RUNPOD_POD_ID" >/dev/null 2>&1; then
+        cc_log "terminate ok via runpodctl attempt=${attempt}"
+        return 0
+      fi
+    fi
+    if cc_rest DELETE "/pods/${RUNPOD_POD_ID}" >/dev/null; then
+      cc_log "terminate ok via curl attempt=${attempt}"
+      return 0
+    fi
+    delay=$((attempt * 2))
+    cc_log "terminate attempt ${attempt} failed; sleep ${delay}s"
+    sleep "$delay"
+  done
+  cc_log "terminate failed after retries"
+  return 1
 }
 
 cc_watchdog_start() {
+  local run_dir="${1:-}"
   cc_require_ttl
   (
-    sleep "$CC_TTL_S"
+    local started now remain
+    if [[ -n "$run_dir" && -f "${run_dir}/started_at" ]]; then
+      started="$(cat "${run_dir}/started_at")"
+    else
+      started="$(date +%s)"
+      if [[ -n "$run_dir" ]]; then
+        mkdir -p "$run_dir"
+        printf '%s\n' "$started" >"${run_dir}/started_at"
+      fi
+    fi
+    now="$(date +%s)"
+    remain=$((CC_TTL_S - (now - started)))
+    if (( remain < 1 )); then
+      remain=1
+    fi
+    sleep "$remain"
     echo "TTL ${CC_TTL_S}s expired. Terminate the pod."
+    if [[ -n "$run_dir" ]]; then
+      export CC_RUN_LOG="${run_dir}/log.txt"
+    fi
     cc_terminate_self
   ) &
   disown || true
 }
+
+cc_git_auth_setup() {
+  if [[ -z "${CC_REPO_TOKEN:-}" ]]; then
+    return 0
+  fi
+  local b64
+  b64="$(printf 'x-access-token:%s' "$CC_REPO_TOKEN" | base64 | tr -d '\n')"
+  export GIT_CONFIG_COUNT=1
+  export GIT_CONFIG_KEY_0="http.extraHeader"
+  export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${b64}"
+}
+
+cc_git_auth_clear() {
+  unset CC_REPO_TOKEN
+  unset GIT_CONFIG_COUNT
+  unset GIT_CONFIG_KEY_0
+  unset GIT_CONFIG_VALUE_0
+}
+
+cc_resolve_ref() {
+  local ref="$1"
+  if [[ "$ref" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+    printf '%s' "$ref"
+    return 0
+  fi
+  local resolved=""
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    resolved="$(git rev-parse --verify "${ref}^{commit}" 2>/dev/null || true)"
+  fi
+  [[ -n "$resolved" ]] || cc_fail "--ref must be a commit sha. Got ${ref}."
+  printf '%s' "$resolved"
+}
+
+cc_load_defaults

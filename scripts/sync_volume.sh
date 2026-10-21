@@ -36,14 +36,6 @@ else
   GOLDEN="${HOME}/Library/Application Support/ClimbingCoach/golden"
 fi
 
-command -v python3 >/dev/null 2>&1 || fail "Python 3 is required."
-if [ ! -d "$GOLDEN" ]; then
-  mkdir -p "$GOLDEN"
-fi
-
-echo "Export labels"
-python3 "$ROOT/scripts/export_labels.py" --golden-dir "$GOLDEN"
-
 VOLUME="$(cc_volume_id)"
 ENDPOINT="$(cc_s3_endpoint)"
 REGION="${CC_VOLUME_DC:-${CC_RUNPOD_DATACENTER:-}}"
@@ -57,10 +49,19 @@ if [ "$DRY_RUN" -eq 1 ]; then
   exit 0
 fi
 
+command -v python3 >/dev/null 2>&1 || fail "Python 3 is required."
+if [ ! -d "$GOLDEN" ]; then
+  mkdir -p "$GOLDEN"
+fi
+
+echo "Export labels"
+python3 "$ROOT/scripts/export_labels.py" --golden-dir "$GOLDEN"
+
 command -v aws >/dev/null 2>&1 || fail "Install AWS CLI v2 from the official installer."
 
 MANIFEST_LOCAL="$(mktemp)"
-trap 'rm -f "$MANIFEST_LOCAL"' EXIT
+NEW_MANIFEST="$(mktemp)"
+trap 'rm -f "$MANIFEST_LOCAL" "$NEW_MANIFEST"' EXIT
 if aws s3 cp "s3://${VOLUME}/${PREFIX}/manifest.json" "$MANIFEST_LOCAL" \
   --region "$REGION" --endpoint-url "$ENDPOINT" >/dev/null 2>&1; then
   :
@@ -68,10 +69,8 @@ else
   echo '{"files":{}}' >"$MANIFEST_LOCAL"
 fi
 
-NEW_MANIFEST="$(mktemp)"
 python3 - "$MANIFEST_LOCAL" "$NEW_MANIFEST" "$GOLDEN" "$VOLUME" "$PREFIX" "$REGION" "$ENDPOINT" <<'PY'
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path

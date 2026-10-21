@@ -4,16 +4,16 @@ overview: "Detailed coding plan for Climbing Coach. Grok bot builds it in a priv
 todos:
   - id: p0-agents-md
     content: "Write AGENTS.md at the repo root (self-contained rules: pins, layering, test markers and fakes, never-commit list, bot/pod/Mac workflow, Runpod credential and cost rules, docs conventions) and open it as a pull request for review before any code"
-    status: pending
+    status: completed
   - id: p0-repo-ci-docs
     content: "Repo files (.gitignore, .python-version, .nvmrc, pinned requirements and package.json), README with Mac setup, Runpod setup and per-phase checklists, ARCHITECTURE, DATA_MODEL, TROUBLESHOOTING_LOG, DLOG, errors/, GitHub Actions CI (ubuntu-24.04 and macos-15)"
-    status: pending
+    status: completed
   - id: p0-skeleton
     content: "Backend skeleton (config, errors, security, storage, db + 0001 migration, job queue, /health, /auth/launch), frontend shell with the Liquid Glass theme from section 5.9 and DESIGN_GUIDELINES.md, scripts (setup_mac, check, dev, build, run_mac, download_models); CI green, then the first Mac pass"
-    status: pending
+    status: completed
   - id: p0-runpod-runner
     content: "Runpod runner (section 2): docker/gpu image (CUDA 12 + cuDNN 9, Python 3.12, onnxruntime-gpu 1.23.2, static ffmpeg 7, sshd, TTL watchdog) pushed to GHCR by gpu-image.yml; scripts/gpu (pod_up, run_job, wait_job, pod_down, pod_ls); ml/jobs.py with gpu_tests; sync_volume.sh; the first gpu_tests pod run reports and terminates itself"
-    status: pending
+    status: completed
   - id: p1-ingest
     content: "Library CRUD, streaming upload, MediaTool protocol (FfmpegTool, FakeMediaTool), ingest job (ffprobe, CFR H.264 proxy, thumbnails), media endpoints with byte ranges, exact-frame JPEG, trash; media fixture generator and tests"
     status: pending
@@ -48,7 +48,7 @@ todos:
     content: "Bot: launcher (pywebview), PyInstaller spec and package_mac.sh with macOS 13 wheels, LGPL ffmpeg and weights, Settings, Reveal in Finder. Mac: build the .app, clean macOS 13 test, HIG and accessibility pass"
     status: pending
   - id: p6-pose-finetune
-    content: "COCO-style export to the volume, docker/train image (PyTorch, MMCV, MMPose, NumPy 1.26), finetune_pose pod job on A40 or A100, ONNX import, A/B evaluation in the Models page"
+    content: "COCO-style export to the volume, docker/train image (PyTorch, MMCV, MMPose, NumPy 1.26), finetune_pose pod job on A100 80GB PCIe, ONNX import, A/B evaluation in the Models page"
     status: pending
 isProject: false
 ---
@@ -118,7 +118,7 @@ flowchart LR
 - Credentials for the bot computer: an API key; an S3 API key (the access key is your `user_...` id; the `rps_...` secret is shown only once); and the bot computer's SSH public key, added to the account.
 - A container registry credential in Runpod: a GitHub token with only `read:packages`, so pods can pull the private GHCR image.
 - Two Runpod secrets, which the pod template references as `{{ RUNPOD_SECRET_<name> }}`: `cc_repo_token` (a fine-grained GitHub token with read-only access to this repo's contents, for the clone inside the pod) and `cc_webhook_url` (the bot's routine webhook; anyone who has the URL can wake the bot).
-- One network volume, 100 GB to start (it can grow but not shrink). Network volumes exist only in Secure Cloud. Create it in a datacenter that supports the S3 API (for example `EU-RO-1`, `EUR-IS-1`, `US-KS-2` or `US-CA-2`; the full list is in the Runpod S3 API docs) and has good RTX 4090, A40 and A100 availability.
+- One network volume, 100 GB to start (it can grow but not shrink). Network volumes exist only in Secure Cloud. Create it in a datacenter that supports the S3 API (for example `EU-RO-1`, `EUR-IS-1`, `US-KS-2` or `US-CA-2`; the full list is in the Runpod S3 API docs) and has good availability of NVIDIA L4, RTX 2000 Ada, RTX 4090, A100 80GB PCIe, RTX PRO 4500/4000 Blackwell, and GeForce RTX 5090. This project's volume is in `EU-RO-1`.
 
 ### 2.3 Network volume layout (`/workspace`)
 - `videos/`: your golden footage, a copy of the Mac golden folder, with `videos/labels/labels.json` and `videos/manifest.json`.
@@ -131,13 +131,13 @@ flowchart LR
 ### 2.4 GPU images and pod template
 - `climbing-coach-gpu` (from Phase 0), built from `docker/gpu/Dockerfile`: an `nvidia/cuda` 12.x runtime image with cuDNN 9 on Ubuntu 24.04 (its system Python is 3.12); `onnxruntime-gpu==1.23.2` (CUDA 12, cuDNN 9); the repo's pins from `requirements-gpu.txt`; the same pinned static ffmpeg 7 build as CI; `openssh-server`, `git`, `curl`, `jq`. No PyTorch. `.github/workflows/gpu-image.yml` builds it and pushes it to GHCR when `docker/gpu/` or `requirements*.txt` change, tagged with the git sha and `latest`.
 - `climbing-coach-train` (Phase 6), built from `docker/train/Dockerfile`: PyTorch, MMCV 2.2 and MMPose 1.3 with NumPy 1.26. It is a separate image because MMCV and MMPose do not work with NumPy 2, and the app pins NumPy 2.5.
-- `entrypoint.sh` (both images): write `$PUBLIC_KEY` (which Runpod injects) to `~/.ssh/authorized_keys` and start sshd; start a watchdog that terminates the pod after `CC_TTL_S`; if `CC_JOB` is set, run `scripts/gpu/run_job.sh`, else wait for SSH sessions.
+- `entrypoint.sh` (both images): write `$PUBLIC_KEY` (which Runpod injects) to `~/.ssh/authorized_keys`; generate SSH host keys at start-up if they are missing; start sshd on every pod; start a watchdog that terminates the pod after `CC_TTL_S`; if `CC_JOB` is set, run `scripts/gpu/run_job.sh`, else wait for SSH sessions. Do not generate host keys at image build time.
 - Pod template: the GHCR image with the registry credential; a 20 GB container disk; the network volume at `/workspace`; port `22/tcp`; env `CC_JOB`, `CC_GIT_REF`, `CC_JOB_ID`, `CC_TTL_S`, `CC_MODELS_DIR=/workspace/models`, `CC_GOLDEN_DIR=/workspace/videos`, `CC_REPO_TOKEN={{ RUNPOD_SECRET_cc_repo_token }}`, `CC_WEBHOOK_URL={{ RUNPOD_SECRET_cc_webhook_url }}`.
 - The account API key never goes into a pod. A job pod terminates itself with the pod-scoped `RUNPOD_API_KEY` and the `RUNPOD_POD_ID` that Runpod injects.
 
 ### 2.5 Pod settings per job
 - Secure Cloud always (the volume needs it). On-Demand for `eval`, `train_events`, `tune_align` and `finetune_pose`. Interruptible (spot) is allowed for `gpu_tests` and `pose_bench`, where a restart is cheap.
-- GPU preference lists (`gpuTypeIds` with `gpuTypePriority: "custom"`): `NVIDIA GeForce RTX 4090`, then `NVIDIA A40`, then `NVIDIA RTX A5000` for tests and Phase 4 jobs; `NVIDIA A40`, then `NVIDIA A100 80GB PCIe` for `finetune_pose`.
+- GPU preference lists (`gpuTypeIds` with `gpuTypePriority: "custom"`): `NVIDIA L4`, `NVIDIA RTX 2000 Ada Generation`, `NVIDIA GeForce RTX 4090`, `NVIDIA A100 80GB PCIe`, `NVIDIA RTX PRO 4500 Blackwell`, `NVIDIA RTX PRO 4000 Blackwell`, `NVIDIA GeForce RTX 5090`. These types are available in `EU-RO-1`.
 - `CC_TTL_S` is the backstop if `run_job.sh` hangs: 2 h for interactive pods, and a limit per job type for job pods (for example 1 h for `gpu_tests` and 12 h for `finetune_pose`).
 
 ### 2.6 Job flow
@@ -163,9 +163,9 @@ sequenceDiagram
 - Pods run only pushed commits: the bot pushes first, then starts the pod with that sha.
 - `scripts/gpu/pod_up.sh --job <name> --ref <sha> [--gpu ...] [--spot] [--ttl ...]`, or `--interactive`, calls `POST https://rest.runpod.io/v1/pods` (template, volume, GPU list, `interruptible`, job env) and prints the pod id and job id. `runpodctl pod ...` stays available for manual use.
 - `scripts/gpu/run_job.sh` (inside the pod): clone at `CC_GIT_REF`; install from `requirements-gpu.txt` with `/workspace/cache/pip` (a no-op when the image is current); run the job from `ml/jobs.py`, with output copied to `runs/<id>/log.txt`; write `metrics.json` and `status`; POST a summary to `CC_WEBHOOK_URL`; terminate the pod (`DELETE https://rest.runpod.io/v1/pods/$RUNPOD_POD_ID`). A shell `trap` makes sure that a failure still writes `status=failed`, pings and terminates.
-- `wait_job.sh <job_id>` polls `runs/<id>/status` through the S3 API (the fallback when a ping is missed); `pod_down.sh <pod_id>` terminates a pod; `pod_ls.sh` lists running pods and their age.
+- `wait_job.sh <job_id> [--pod-id <pod_id>]` polls `runs/<id>/status` through the S3 API (the fallback when a ping is missed). `--pod-id` fails early if the pod exits before status is `passed`. `pod_down.sh <pod_id>` terminates a pod; `pod_ls.sh` lists pods and their age.
 - Jobs (`ml/jobs.py`): `gpu_tests` (every pytest tier that Linux supports), `pose_bench` (frames per second per pose mode on CUDA, and CUDA vs CPU keypoint parity), `eval` (event, cut and climber metrics of a rule set or model version on the golden footage), `train_events`, `tune_align`, `finetune_pose`.
-- Interactive debugging: `pod_up.sh --interactive`, then `ssh <pod>@ssh.runpod.io -i ~/.ssh/id_ed25519` (Runpod's SSH proxy; it has no SCP, so files move through the volume), then `pod_down.sh`.
+- Interactive debugging: `pod_up.sh --interactive`, then `ssh <pod>@ssh.runpod.io -i ~/.ssh/climbing_coach_ed25519` (Runpod's SSH proxy; it has no SCP, so files move through the volume), then `pod_down.sh`.
 
 ### 2.7 Data path between the Mac and the volume
 - `scripts/sync_volume.sh` (Mac) runs `export_labels.py`, then copies new golden videos and `labels.json` to `videos/` with `aws s3 cp --region <DC> --endpoint-url https://s3api-<dc>.runpod.io/ s3://<volume_id>/...`. It copies file by file and skips files already listed in `videos/manifest.json`, because `aws s3 sync` is unreliable on Runpod's S3 API for large trees. The AWS CLI uploads files over 500 MB in parts by itself.
@@ -763,7 +763,7 @@ Between Phase 1 and Phase 2, you build the golden set (section 11) with the Phas
 - Build
   - `export_dataset.sh --coco`: corrected and confirmed frames with their images, in COCO-style Halpe26 format, uploaded to `datasets/`.
   - The `docker/train/` image (section 2.4) and `ml/finetune_pose/`: MMPose configs, training and ONNX export scripts.
-  - The `finetune_pose` job (A40, then A100 80GB): fine-tune RTMPose-m Halpe26 from its released checkpoint and write the ONNX to `models/pose/<version>/`.
+  - The `finetune_pose` job (A100 80GB PCIe): fine-tune RTMPose-m Halpe26 from its released checkpoint and write the ONNX to `models/pose/<version>/`.
   - Import it as a new `pose` version with `download_models.py --from-volume`; A/B comparison on the Models page.
 - Bot and CI: the export validates against its schema; the trainer image builds.
 - Pod: a 50-iteration smoke run passes first; then the full run completes, and `eval` shows that the candidate's PCK@0.05 (torso-normalized) on held-out corrected frames beats the base model while frames already confirmed correct drop by ≤ 1 point.

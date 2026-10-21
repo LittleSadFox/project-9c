@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# List running pods and their age.
+# List pods and their age. EXITED pods can still bill disk.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -24,24 +24,28 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "$DRY_RUN" == "1" ]]; then
-  echo "GET /pods?desiredStatus=RUNNING"
+  echo "GET /pods"
   exit 0
 fi
 
 cc_require_bot_api_key
-RESPONSE="$(cc_rest GET '/pods?desiredStatus=RUNNING')"
+RESPONSE="$(cc_rest GET '/pods')"
+ITEMS="$(cc_pods_from_response "$RESPONSE")"
 NOW="$(date -u +%s)"
-printf '%s\n' "$RESPONSE" | jq -r --argjson now "$NOW" '
-  (if type=="array" then . else (.pods // .data // []) end)
-  | if length==0 then "no running pods" else
-      .[] | [
-        (.id // .podId // "-"),
-        (.name // "-"),
-        (.desiredStatus // .status // "-"),
-        (if .createdAt then
-            (((.createdAt | sub("\\.[0-9]+Z$"; "Z") | strptime("%Y-%m-%dT%H:%M:%SZ") | mktime) ) as $c
+printf '%s\n' "$ITEMS" | jq -r --argjson now "$NOW" '
+  if length==0 then "no running pods" else
+    .[] | [
+      (.id // .podId // "-"),
+      (.name // "-"),
+      (.desiredStatus // .status // "-"),
+      (
+        (.lastStartedAt // .createdAt // empty) as $raw
+        | if $raw == "" then "-"
+          else
+            (($raw | sub("\\.[0-9]+Z$"; "Z") | strptime("%Y-%m-%dT%H:%M:%SZ") | mktime) as $c
              | (($now - $c) | tostring) + "s")
-          else "-" end)
-      ] | @tsv
-    end
+          end
+      )
+    ] | @tsv
+  end
 '

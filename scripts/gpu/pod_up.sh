@@ -83,6 +83,13 @@ fi
 if [[ "$INTERACTIVE" == "1" && -z "$REF" ]]; then
   REF="main"
 fi
+if [[ "$SPOT" == "1" ]]; then
+  if [[ "$INTERACTIVE" == "1" ]] || ! cc_spot_allowed "$JOB"; then
+    cc_fail "--spot is allowed only for gpu_tests and pose_bench."
+  fi
+fi
+
+REF="$(cc_resolve_ref "$REF")"
 
 if [[ -n "$TTL_RAW" ]]; then
   CC_TTL_S="$(cc_parse_ttl "$TTL_RAW")"
@@ -107,7 +114,7 @@ fi
 
 NAME="cc-${JOB:-interactive}-${JOB_ID}"
 ENV_JSON="$(cc_build_pod_env_json "$JOB" "$REF" "$JOB_ID" "$CC_TTL_S" "$INTERACTIVE")"
-PAYLOAD="$(cc_build_pod_payload "$NAME" "$ENV_JSON" "$CC_TTL_S" "$SPOT" "$GPU_CSV")"
+PAYLOAD="$(cc_build_pod_payload "$NAME" "$ENV_JSON" "$SPOT" "$GPU_CSV")"
 
 if [[ "$DRY_RUN" == "1" ]]; then
   printf '%s\n' "$PAYLOAD"
@@ -117,11 +124,12 @@ if [[ "$DRY_RUN" == "1" ]]; then
 fi
 
 if [[ -z "${CC_RUNPOD_TEMPLATE_ID:-}" && -z "${CC_GPU_IMAGE:-}" ]]; then
-  cc_fail "Set CC_RUNPOD_TEMPLATE_ID or CC_GPU_IMAGE. Ryan and the Runpod bot configure section 2.2."
+  cc_fail "Set CC_RUNPOD_TEMPLATE_ID or CC_GPU_IMAGE."
 fi
 if [[ -z "${CC_RUNPOD_VOLUME_ID:-}" ]]; then
-  cc_fail "Set CC_RUNPOD_VOLUME_ID. Ryan and the Runpod bot configure the network volume."
+  cc_fail "Set CC_RUNPOD_VOLUME_ID."
 fi
+cc_require_registry_auth
 
 cc_require_bot_api_key
 RESPONSE="$(cc_rest POST /pods "$PAYLOAD")"

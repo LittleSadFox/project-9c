@@ -7,7 +7,7 @@ src = ["app", "tests"]
 select = ["E", "F", "I", "UP", "B"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["app", "tests"]
+known-first-party = ["app", "tests", "ml"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -20,5 +20,5 @@ show_error_codes = true
 packages = ["app"]
 
 [[tool.mypy.overrides]]
-module = ["onnxruntime", "onnxruntime.*"]
+module = ["onnxruntime", "onnxruntime.*", "numpy", "numpy.*"]
 ignore_missing_imports = true

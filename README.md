@@ -144,7 +144,7 @@ Do not write example credentials.
    Create the volume in a datacenter that supports the S3 API.
    Examples: `EU-RO-1`, `EUR-IS-1`, `US-KS-2`, `US-CA-2`.
    See the Runpod S3 API docs for the full list.
-   Pick a datacenter with good RTX 4090, A40, and A100 availability.
+   Pick a datacenter with good L4, RTX 2000 Ada, RTX 4090, A100, RTX PRO Blackwell, and RTX 5090 availability.
 
 The account API key never goes in a pod.
 A pod uses only the pod-scoped key that Runpod injects, plus the two secrets.
@@ -180,7 +180,7 @@ This table is the command map.
 | `scripts/export_dataset.sh` | Uploads a Phase 4 or Phase 6 dataset. |
 | `scripts/gpu/pod_up.sh` | Creates a GPU pod for a job or an interactive session. Use `--dry-run` to print the payload. |
 | `scripts/gpu/run_job.sh` | Runs inside the pod. Clone, install, run `ml/jobs.py`, write the run folder, ping, terminate. |
-| `scripts/gpu/wait_job.sh` | Polls `runs/<id>/status` through the S3 API. |
+| `scripts/gpu/wait_job.sh` | Polls `runs/<id>/status` through the S3 API. Pass `--pod-id` to fail if the pod exits first. |
 | `scripts/gpu/pod_down.sh` | Terminates a pod. |
 | `scripts/gpu/pod_ls.sh` | Lists running pods and their age. |
 
@@ -230,7 +230,12 @@ Do not invent the values.
 | `CC_RUNPOD_TEMPLATE_ID` | Pod template id |
 | `CC_RUNPOD_VOLUME_ID` / `CC_VOLUME_ID` | Network volume id |
 | `CC_RUNPOD_DATACENTER` / `CC_VOLUME_DC` | Volume datacenter |
+| `CC_RUNPOD_REGISTRY_AUTH_ID` | Registry credential for the private GHCR image |
 | `CC_GPU_IMAGE` | GHCR image name when the template does not set it |
+| `CC_INTERACTIVE` | Set to `1` on interactive pods |
+| `CC_WAIT_TIMEOUT_S` | `wait_job.sh` timeout in seconds. Default `7200` |
+| `CC_WAIT_POLL_S` | `wait_job.sh` poll interval in seconds. Default `15` |
+| `CC_AWS_PROFILE` | Optional AWS CLI profile for the volume S3 API |
 
 Do not put secrets in this file.
 Do not commit `.env` files that hold tokens.
@@ -429,10 +434,12 @@ GitHub Actions runs on every push and pull request.
 
 The macOS job proves that every pinned wheel installs on Apple Silicon.
 
-`gpu-image.yml` builds `climbing-coach-gpu` and pushes it to private GHCR.
+`gpu-image.yml` builds `climbing-coach-gpu`.
 It runs when `docker/gpu/` or `requirements*.txt` change.
-Tags are the git sha and, on `main`, `latest`.
+Pull requests only build the image.
+Pushes to `main` push the git sha tag and `latest` to private GHCR.
 The image is private.
+Section 2.2 setup is complete.
 The Runpod registry credential is already in place.
 
 ## 11. Licence

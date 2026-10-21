@@ -14,25 +14,14 @@ else
   exit 1
 fi
 
-cc_require_ttl
-[[ -n "${CC_JOB:-}" ]] || cc_fail "CC_JOB is required inside run_job.sh."
-[[ -n "${CC_GIT_REF:-}" ]] || cc_fail "CC_GIT_REF is required. Pods run only pushed commits."
-[[ -n "${CC_JOB_ID:-}" ]] || cc_fail "CC_JOB_ID is required."
-
-if [[ "${CC_REPO_TOKEN:-}" == *"{{"* ]]; then
-  cc_fail "CC_REPO_TOKEN was not resolved. The Runpod secret cc_repo_token is missing."
-fi
-
 VOLUME="${CC_VOLUME_DIR:-/workspace}"
-RUN_DIR="${VOLUME}/runs/${CC_JOB_ID}"
+RUN_DIR="${VOLUME}/runs/${CC_JOB_ID:-unknown}"
 SRC="${CC_SRC_DIR:-/tmp/climbing-coach}"
 SCRATCH="${CC_LIBRARY_DIR:-/tmp/cc-library}"
 
-mkdir -p "$RUN_DIR/artifacts" "$VOLUME/models" "$VOLUME/videos" "$VOLUME/cache/pip" "$SCRATCH"
-echo running >"$RUN_DIR/status"
-
 FINISHED=0
 STATUS="failed"
+CLEANING=0
 
 write_status() {
   printf '%s\n' "$1" >"$RUN_DIR/status"
@@ -61,19 +50,43 @@ ping_webhook() {
 
 cleanup() {
   local ec=$?
+  if [[ "$CLEANING" == "1" ]]; then
+    return 0
+  fi
+  CLEANING=1
+  set +e
   if [[ "$FINISHED" != "1" ]]; then
     STATUS="failed"
+    mkdir -p "$RUN_DIR/artifacts" 2>/dev/null
     write_status failed
     if [[ ! -f "$RUN_DIR/metrics.json" ]]; then
-      jq -n --arg job "${CC_JOB}" --arg err "run_job.sh exited before the job finished" \
+      jq -n --arg job "${CC_JOB:-unknown}" --arg err "run_job.sh exited before the job finished" \
         '{job: $job, status: "failed", error: $err}' >"$RUN_DIR/metrics.json"
     fi
     ping_webhook failed
   fi
   cc_terminate_self
-  exit "$ec"
+  return 0
 }
+
 trap cleanup EXIT
+trap cleanup INT
+trap cleanup TERM
+trap cleanup HUP
+
+cc_require_ttl
+[[ -n "${CC_JOB:-}" ]] || cc_fail "CC_JOB is required inside run_job.sh."
+[[ -n "${CC_GIT_REF:-}" ]] || cc_fail "CC_GIT_REF is required. Pods run only pushed commits."
+[[ -n "${CC_JOB_ID:-}" ]] || cc_fail "CC_JOB_ID is required."
+RUN_DIR="${VOLUME}/runs/${CC_JOB_ID}"
+
+if [[ "${CC_REPO_TOKEN:-}" == *"{{"* ]]; then
+  cc_fail "CC_REPO_TOKEN was not resolved. The Runpod secret cc_repo_token is missing."
+fi
+
+mkdir -p "$RUN_DIR/artifacts" "$VOLUME/models" "$VOLUME/cache/pip" "$SCRATCH"
+echo running >"$RUN_DIR/status"
+export CC_RUN_LOG="${RUN_DIR}/log.txt"
 
 {
   echo "job=${CC_JOB}"
@@ -88,15 +101,14 @@ if [[ "${CC_RUN_JOB_READY:-}" != "1" ]]; then
   mkdir -p "$SRC"
   git init "$SRC" >/dev/null
   git -C "$SRC" remote add origin "https://github.com/LittleSadFox/project-9c.git"
-  extra=()
-  if [[ -n "${CC_REPO_TOKEN:-}" ]]; then
-    extra=(-c "http.extraHeader=AUTHORIZATION: bearer ${CC_REPO_TOKEN}")
-  fi
-  git -C "$SRC" "${extra[@]}" fetch --depth 1 origin "$CC_GIT_REF"
+  cc_git_auth_setup
+  git -C "$SRC" fetch --depth 1 origin "$CC_GIT_REF"
   git -C "$SRC" checkout --detach FETCH_HEAD
+  cc_git_auth_clear
   export CC_RUN_JOB_READY=1
   export CC_SRC_DIR="$SRC"
   if [[ -x "$SRC/scripts/gpu/run_job.sh" ]]; then
+    trap - EXIT INT TERM HUP
     exec "$SRC/scripts/gpu/run_job.sh"
   fi
 fi
@@ -106,7 +118,6 @@ export CC_MODELS_DIR="${CC_MODELS_DIR:-$VOLUME/models}"
 export CC_GOLDEN_DIR="${CC_GOLDEN_DIR:-$VOLUME/videos}"
 export CC_VOLUME_DIR="$VOLUME"
 export PYTHONPATH="${SRC}/backend:${SRC}${PYTHONPATH:+:$PYTHONPATH}"
-export PATH="${PATH}"
 
 if [[ -x /opt/cc/venv/bin/python ]]; then
   PY=/opt/cc/venv/bin/python

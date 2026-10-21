@@ -34,6 +34,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$POD_ID" ]] || cc_fail "Pass a pod id."
+cc_valid_pod_id "$POD_ID" || cc_fail "Invalid pod id ${POD_ID}."
 
 if [[ "$DRY_RUN" == "1" ]]; then
   echo "DELETE /pods/${POD_ID}"

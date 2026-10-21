@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pod entrypoint: sshd, TTL watchdog, then run_job.sh or an interactive wait.
+# Pod entrypoint: host keys, sshd, TTL watchdog, then the job or an interactive wait.
 set -euo pipefail
 
 LIB="/opt/cc/scripts/gpu/lib.sh"
@@ -12,8 +12,24 @@ else
 fi
 
 cc_require_ttl
+cc_require_job_or_interactive
 cc_setup_ssh
-cc_watchdog_start
+
+# New host keys on every pod. Do not bake keys into the image.
+if ! compgen -G '/etc/ssh/ssh_host_*' >/dev/null; then
+  ssh-keygen -A
+fi
+if [[ -x /usr/sbin/sshd ]]; then
+  /usr/sbin/sshd
+fi
+
+if [[ -n "${CC_JOB_ID:-}" ]]; then
+  cc_watchdog_start "${CC_VOLUME_DIR:-/workspace}/runs/${CC_JOB_ID}"
+else
+  cc_watchdog_start
+fi
+
+cc_require_cuda_driver
 
 if [[ -n "${CC_JOB:-}" ]]; then
   echo "Start job ${CC_JOB} (ttl=${CC_TTL_S}s)"
@@ -21,10 +37,6 @@ if [[ -n "${CC_JOB:-}" ]]; then
 fi
 
 echo "Interactive pod. SSH is up. TTL is ${CC_TTL_S}s."
-if command -v /usr/sbin/sshd >/dev/null 2>&1; then
-  /usr/sbin/sshd
-fi
-# Wait until the watchdog terminates the pod.
 while true; do
   sleep 3600
 done

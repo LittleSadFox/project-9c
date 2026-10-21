@@ -33,5 +33,4 @@ Example: `errors/ERROR_2026-10-21.md`
 
 ## Current files
 
-No daily error file exists yet.
-Add `ERROR_YYYY-MM-DD.md` on the first error of that day.
+- `errors/ERROR_2026-10-21.md`

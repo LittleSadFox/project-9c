@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[3]
 POD_UP = ROOT / "scripts" / "gpu" / "pod_up.sh"
@@ -13,6 +16,19 @@ POD_DOWN = ROOT / "scripts" / "gpu" / "pod_down.sh"
 POD_LS = ROOT / "scripts" / "gpu" / "pod_ls.sh"
 WAIT_JOB = ROOT / "scripts" / "gpu" / "wait_job.sh"
 SYNC = ROOT / "scripts" / "sync_volume.sh"
+LIB = ROOT / "scripts" / "gpu" / "lib.sh"
+RUN_JOB = ROOT / "scripts" / "gpu" / "run_job.sh"
+ENTRYPOINT = ROOT / "docker" / "gpu" / "entrypoint.sh"
+
+EXPECTED_GPUS = [
+    "NVIDIA L4",
+    "NVIDIA RTX 2000 Ada Generation",
+    "NVIDIA GeForce RTX 4090",
+    "NVIDIA A100 80GB PCIe",
+    "NVIDIA RTX PRO 4500 Blackwell",
+    "NVIDIA RTX PRO 4000 Blackwell",
+    "NVIDIA GeForce RTX 5090",
+]
 
 
 def _payload(stdout: str) -> dict[str, object]:
@@ -27,6 +43,9 @@ def _payload(stdout: str) -> dict[str, object]:
 def _run(args: list[str], env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     merged = os.environ.copy()
     merged.pop("RUNPOD_API_KEY", None)
+    for key in list(merged):
+        if key.startswith("CC_"):
+            merged.pop(key, None)
     if env:
         merged.update(env)
     return subprocess.run(
@@ -68,7 +87,17 @@ def test_pod_up_dry_run_sets_ttl_and_secret_refs() -> None:
     assert "RUNPOD_API_KEY" not in env
     assert "test-key-do-not-inject" not in result.stdout
     assert payload["cloudType"] == "SECURE"
-    assert "NVIDIA GeForce RTX 4090" in payload["gpuTypeIds"]
+    assert payload["volumeInGb"] == 0
+    assert payload["networkVolumeId"] == "wguvx2347m"
+    assert payload["dataCenterIds"] == ["EU-RO-1"]
+    assert payload["containerRegistryAuthId"] == "cmvhzigy8002b13z5y84jqc73"
+    assert payload["imageName"] == "ghcr.io/littlesadfox/climbing-coach-gpu"
+    gpus = payload["gpuTypeIds"]
+    assert isinstance(gpus, list)
+    for name in EXPECTED_GPUS:
+        assert name in gpus
+    assert "NVIDIA A40" not in gpus
+    assert "NVIDIA RTX A5000" not in gpus
 
 
 def test_pod_up_ttl_flag_overrides_default() -> None:
@@ -80,7 +109,8 @@ def test_pod_up_ttl_flag_overrides_default() -> None:
     env = payload["env"]
     assert isinstance(env, dict)
     assert env["CC_TTL_S"] == "600"
-    assert "CC_JOB" not in payload["env"]
+    assert env["CC_INTERACTIVE"] == "1"
+    assert "CC_JOB" not in env
 
 
 def test_pod_up_refuses_zero_ttl() -> None:
@@ -89,6 +119,23 @@ def test_pod_up_refuses_zero_ttl() -> None:
     )
     assert result.returncode != 0
     assert "CC_TTL_S" in result.stderr or "TTL" in result.stderr
+
+
+def test_pod_up_refuses_spot_for_on_demand_jobs() -> None:
+    result = _run(
+        [str(POD_UP), "--job", "eval", "--ref", "deadbeef", "--spot", "--dry-run"],
+    )
+    assert result.returncode != 0
+    assert "spot" in result.stderr
+
+
+def test_pod_up_allows_spot_for_gpu_tests() -> None:
+    result = _run(
+        [str(POD_UP), "--job", "gpu_tests", "--ref", "deadbeef", "--spot", "--dry-run"],
+    )
+    assert result.returncode == 0, result.stderr
+    payload = _payload(result.stdout)
+    assert payload["interruptible"] is True
 
 
 def test_live_pod_up_refuses_without_api_key() -> None:
@@ -112,6 +159,12 @@ def test_pod_down_and_ls_dry_run() -> None:
     assert "GET /pods" in listed.stdout
 
 
+def test_pod_down_rejects_invalid_id() -> None:
+    result = _run([str(POD_DOWN), "bad id", "--dry-run"])
+    assert result.returncode != 0
+    assert "Invalid pod id" in result.stderr
+
+
 def test_wait_job_dry_run_uses_volume_env() -> None:
     result = _run(
         [str(WAIT_JOB), "job-1", "--dry-run"],
@@ -120,6 +173,16 @@ def test_wait_job_dry_run_uses_volume_env() -> None:
     assert result.returncode == 0, result.stderr
     assert "s3://vol-1/runs/job-1/status" in result.stdout
     assert "s3api-eu-ro-1.runpod.io" in result.stdout
+
+
+def test_wait_job_dry_run_pod_id() -> None:
+    result = _run(
+        [str(WAIT_JOB), "job-1", "--pod-id", "pod-abc", "--dry-run"],
+        env={"CC_VOLUME_ID": "vol-1", "CC_VOLUME_DC": "EU-RO-1"},
+    )
+    assert result.returncode == 0, result.stderr
+    assert "pod_id=pod-abc" in result.stdout
+    assert "GET /pods/pod-abc" in result.stdout
 
 
 def test_sync_volume_dry_run(tmp_path: Path) -> None:
@@ -137,5 +200,56 @@ def test_sync_volume_dry_run(tmp_path: Path) -> None:
         },
     )
     assert result.returncode == 0, result.stderr
-    assert (golden / "labels" / "labels.json").is_file()
+    assert not (golden / "labels" / "labels.json").exists()
     assert "s3api-eu-ro-1.runpod.io" in result.stdout
+
+
+def test_run_job_uses_basic_git_auth() -> None:
+    text = RUN_JOB.read_text(encoding="utf-8")
+    assert "cc_git_auth_setup" in text
+    assert "cc_git_auth_clear" in text
+    assert "AUTHORIZATION: bearer" not in text
+    assert "trap cleanup INT" in text
+    assert "trap cleanup TERM" in text
+    assert "set +e" in text
+
+
+def test_lib_keeps_account_key_off_curl_argv() -> None:
+    text = LIB.read_text(encoding="utf-8")
+    assert '-H "@${hdr}"' in text
+    assert "Authorization: Bearer" in text
+    assert "curl" in text
+    curl_lines = [line for line in text.splitlines() if "curl " in line]
+    assert curl_lines
+    for line in curl_lines:
+        assert "RUNPOD_API_KEY" not in line
+
+
+def test_lib_git_auth_is_basic_x_access_token() -> None:
+    text = LIB.read_text(encoding="utf-8")
+    assert "x-access-token:" in text
+    assert "AUTHORIZATION: basic" in text
+
+
+def test_gpu_scripts_pass_shellcheck() -> None:
+    shellcheck = shutil.which("shellcheck")
+    if shellcheck is None:
+        pytest.skip("shellcheck is not installed")
+    scripts = [
+        LIB,
+        POD_UP,
+        RUN_JOB,
+        WAIT_JOB,
+        POD_DOWN,
+        POD_LS,
+        SYNC,
+        ENTRYPOINT,
+    ]
+    result = subprocess.run(
+        [shellcheck, "-x", *[str(path) for path in scripts]],
+        cwd=str(ROOT),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

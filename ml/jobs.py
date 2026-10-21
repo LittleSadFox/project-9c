@@ -113,16 +113,6 @@ def gpu_tests(run_dir: Path, *, pytest_args: list[str] | None = None, require_cu
     artifacts.mkdir(parents=True, exist_ok=True)
     junit = artifacts / "junit.xml"
 
-    require = os.environ.get("CC_REQUIRE", "").strip()
-    if not require:
-        bits = ["media", "model"]
-        if require_cuda:
-            bits.append("gpu")
-        golden = Path(os.environ.get("CC_GOLDEN_DIR", "/workspace/videos"))
-        if golden.is_dir() and any(golden.iterdir()):
-            bits.append("golden")
-        os.environ["CC_REQUIRE"] = ",".join(bits)
-
     args = pytest_args or [
         str(ROOT / "backend" / "tests"),
         "-m",
@@ -131,6 +121,18 @@ def gpu_tests(run_dir: Path, *, pytest_args: list[str] | None = None, require_cu
     ]
     cmd = [sys.executable, "-m", "pytest", *args, f"--junitxml={junit}"]
     env = os.environ.copy()
+    require = env.get("CC_REQUIRE", "").strip()
+    if not require:
+        bits = ["media"]
+        if require_cuda:
+            bits.append("gpu")
+        models = Path(env.get("CC_MODELS_DIR", "/workspace/models"))
+        if models.is_dir() and any(models.rglob("*.onnx")):
+            bits.append("model")
+        golden = Path(env.get("CC_GOLDEN_DIR", "/workspace/videos"))
+        if golden.is_dir() and any(golden.iterdir()):
+            bits.append("golden")
+        env["CC_REQUIRE"] = ",".join(bits)
     env["PYTHONPATH"] = f"{ROOT / 'backend'}{os.pathsep}{ROOT}{os.pathsep}{env.get('PYTHONPATH', '')}"
     proc = subprocess.run(cmd, cwd=str(ROOT), env=env, check=False)
     pytest_metrics = parse_junit(junit)
