@@ -121,6 +121,8 @@ def gpu_tests(run_dir: Path, *, pytest_args: list[str] | None = None, require_cu
     ]
     cmd = [sys.executable, "-m", "pytest", *args, f"--junitxml={junit}"]
     env = os.environ.copy()
+    env.pop("CC_WEBHOOK_URL", None)
+    env.pop("RUNPOD_API_KEY", None)
     require = env.get("CC_REQUIRE", "").strip()
     if not require:
         bits = ["media"]

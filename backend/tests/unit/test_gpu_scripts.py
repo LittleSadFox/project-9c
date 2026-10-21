@@ -20,6 +20,8 @@ LIB = ROOT / "scripts" / "gpu" / "lib.sh"
 RUN_JOB = ROOT / "scripts" / "gpu" / "run_job.sh"
 ENTRYPOINT = ROOT / "docker" / "gpu" / "entrypoint.sh"
 
+SHA40 = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+
 EXPECTED_GPUS = [
     "NVIDIA L4",
     "NVIDIA RTX 2000 Ada Generation",
@@ -46,6 +48,7 @@ def _run(args: list[str], env: dict[str, str] | None = None) -> subprocess.Compl
     for key in list(merged):
         if key.startswith("CC_"):
             merged.pop(key, None)
+    merged["CC_TERMINATE_NO_SLEEP"] = "1"
     if env:
         merged.update(env)
     return subprocess.run(
@@ -72,7 +75,7 @@ def test_pod_up_refuses_job_without_ref() -> None:
 
 def test_pod_up_dry_run_sets_ttl_and_secret_refs() -> None:
     result = _run(
-        [str(POD_UP), "--job", "gpu_tests", "--ref", "deadbeef", "--dry-run"],
+        [str(POD_UP), "--job", "gpu_tests", "--ref", SHA40, "--dry-run"],
         env={"RUNPOD_API_KEY": "test-key-do-not-inject"},
     )
     assert result.returncode == 0, result.stderr
@@ -81,17 +84,23 @@ def test_pod_up_dry_run_sets_ttl_and_secret_refs() -> None:
     assert isinstance(env, dict)
     assert env["CC_TTL_S"] == "3600"
     assert env["CC_JOB"] == "gpu_tests"
-    assert env["CC_GIT_REF"] == "deadbeef"
+    assert env["CC_GIT_REF"] == SHA40
     assert env["CC_REPO_TOKEN"] == "{{ RUNPOD_SECRET_cc_repo_token }}"
     assert env["CC_WEBHOOK_URL"] == "{{ RUNPOD_SECRET_cc_webhook_url }}"
     assert "RUNPOD_API_KEY" not in env
     assert "test-key-do-not-inject" not in result.stdout
+    assert "GET /containerregistryauth/cmvhzigy8002b13z5y84jqc73" in result.stdout
+    assert payload["name"] == result.stdout.split("job_id=")[-1].splitlines()[0]
     assert payload["cloudType"] == "SECURE"
     assert payload["volumeInGb"] == 0
     assert payload["networkVolumeId"] == "wguvx2347m"
     assert payload["dataCenterIds"] == ["EU-RO-1"]
     assert payload["containerRegistryAuthId"] == "cmvhzigy8002b13z5y84jqc73"
-    assert payload["imageName"] == "ghcr.io/littlesadfox/climbing-coach-gpu"
+    assert payload["imageName"] == "ghcr.io/littlesadfox/climbing-coach-gpu:latest"
+    cuda = payload["allowedCudaVersions"]
+    assert isinstance(cuda, list)
+    assert "12.8" in cuda
+    assert "13.2" in cuda
     gpus = payload["gpuTypeIds"]
     assert isinstance(gpus, list)
     for name in EXPECTED_GPUS:
@@ -102,7 +111,7 @@ def test_pod_up_dry_run_sets_ttl_and_secret_refs() -> None:
 
 def test_pod_up_ttl_flag_overrides_default() -> None:
     result = _run(
-        [str(POD_UP), "--interactive", "--ref", "deadbeef", "--ttl", "10m", "--dry-run"],
+        [str(POD_UP), "--interactive", "--ref", SHA40, "--ttl", "10m", "--dry-run"],
     )
     assert result.returncode == 0, result.stderr
     payload = _payload(result.stdout)
@@ -115,7 +124,7 @@ def test_pod_up_ttl_flag_overrides_default() -> None:
 
 def test_pod_up_refuses_zero_ttl() -> None:
     result = _run(
-        [str(POD_UP), "--job", "gpu_tests", "--ref", "deadbeef", "--ttl", "0", "--dry-run"],
+        [str(POD_UP), "--job", "gpu_tests", "--ref", SHA40, "--ttl", "0", "--dry-run"],
     )
     assert result.returncode != 0
     assert "CC_TTL_S" in result.stderr or "TTL" in result.stderr
@@ -123,7 +132,7 @@ def test_pod_up_refuses_zero_ttl() -> None:
 
 def test_pod_up_refuses_spot_for_on_demand_jobs() -> None:
     result = _run(
-        [str(POD_UP), "--job", "eval", "--ref", "deadbeef", "--spot", "--dry-run"],
+        [str(POD_UP), "--job", "eval", "--ref", SHA40, "--spot", "--dry-run"],
     )
     assert result.returncode != 0
     assert "spot" in result.stderr
@@ -131,7 +140,7 @@ def test_pod_up_refuses_spot_for_on_demand_jobs() -> None:
 
 def test_pod_up_allows_spot_for_gpu_tests() -> None:
     result = _run(
-        [str(POD_UP), "--job", "gpu_tests", "--ref", "deadbeef", "--spot", "--dry-run"],
+        [str(POD_UP), "--job", "gpu_tests", "--ref", SHA40, "--spot", "--dry-run"],
     )
     assert result.returncode == 0, result.stderr
     payload = _payload(result.stdout)
@@ -140,7 +149,7 @@ def test_pod_up_allows_spot_for_gpu_tests() -> None:
 
 def test_live_pod_up_refuses_without_api_key() -> None:
     result = _run(
-        [str(POD_UP), "--job", "gpu_tests", "--ref", "deadbeef"],
+        [str(POD_UP), "--job", "gpu_tests", "--ref", SHA40],
         env={
             "CC_RUNPOD_TEMPLATE_ID": "template-unset",
             "CC_RUNPOD_VOLUME_ID": "volume-unset",
@@ -173,6 +182,7 @@ def test_wait_job_dry_run_uses_volume_env() -> None:
     assert result.returncode == 0, result.stderr
     assert "s3://vol-1/runs/job-1/status" in result.stdout
     assert "s3api-eu-ro-1.runpod.io" in result.stdout
+    assert "timeout_s=3900" in result.stdout
 
 
 def test_wait_job_dry_run_pod_id() -> None:
@@ -183,6 +193,7 @@ def test_wait_job_dry_run_pod_id() -> None:
     assert result.returncode == 0, result.stderr
     assert "pod_id=pod-abc" in result.stdout
     assert "GET /pods/pod-abc" in result.stdout
+    assert "pod_down=pod-abc" in result.stdout
 
 
 def test_sync_volume_dry_run(tmp_path: Path) -> None:
@@ -367,6 +378,107 @@ def test_pods_from_response_rejects_error_object() -> None:
     )
     assert result.returncode != 0
     assert "did not return an array" in result.stderr
+
+
+def test_pod_up_refuses_short_sha() -> None:
+    result = _run(
+        [str(POD_UP), "--job", "gpu_tests", "--ref", "deadbeef", "--dry-run"],
+    )
+    assert result.returncode != 0
+    assert "40-character" in result.stderr
+
+
+def test_pod_up_refuses_untagged_image() -> None:
+    result = _run(
+        [str(POD_UP), "--job", "gpu_tests", "--ref", SHA40, "--dry-run"],
+        env={"CC_GPU_IMAGE": "ghcr.io/littlesadfox/climbing-coach-gpu"},
+    )
+    assert result.returncode != 0
+    assert "tag" in result.stderr
+
+
+def test_pod_up_keeps_caller_volume_id() -> None:
+    result = _run(
+        [str(POD_UP), "--job", "gpu_tests", "--ref", SHA40, "--dry-run"],
+        env={"CC_RUNPOD_VOLUME_ID": "from-caller"},
+    )
+    assert result.returncode == 0, result.stderr
+    payload = _payload(result.stdout)
+    assert payload["networkVolumeId"] == "from-caller"
+
+
+def test_pod_up_registry_get_refuses_on_401(tmp_path: Path) -> None:
+    _fake_curl(tmp_path, "401", '{"error":"unauthorized"}')
+    result = _run(
+        [str(POD_UP), "--job", "gpu_tests", "--ref", SHA40],
+        env={
+            "PATH": f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}",
+            "RUNPOD_API_KEY": "broken-key",
+        },
+    )
+    assert result.returncode != 0
+    assert "containerregistryauth" in result.stderr
+    assert "pod_id=" not in result.stdout
+
+
+def test_wait_job_timeout_uses_ttl_plus_margin() -> None:
+    result = _run(
+        [str(WAIT_JOB), "job-1", "--dry-run"],
+        env={"CC_VOLUME_ID": "vol-1", "CC_VOLUME_DC": "EU-RO-1", "CC_TTL_S": "100"},
+    )
+    assert result.returncode == 0, result.stderr
+    assert "timeout_s=400" in result.stdout
+
+
+def test_pod_ls_exits_3_when_pods_exist(tmp_path: Path) -> None:
+    _fake_curl(tmp_path, "200", '[{"id":"pod-1","name":"n","desiredStatus":"RUNNING"}]')
+    result = _run(
+        [str(POD_LS)],
+        env={
+            "PATH": f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}",
+            "RUNPOD_API_KEY": "ok-key",
+        },
+    )
+    assert result.returncode == 3
+    assert "pod-1" in result.stdout
+    assert "no running pods" not in result.stdout
+    assert "no pods" not in result.stdout
+
+
+def test_run_job_skips_finished_status(tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs" / "job-done"
+    run_dir.mkdir(parents=True)
+    (run_dir / "status").write_text("passed\n", encoding="utf-8")
+    result = _run(
+        [str(RUN_JOB)],
+        env={
+            "CC_VOLUME_DIR": str(tmp_path),
+            "CC_JOB": "gpu_tests",
+            "CC_GIT_REF": SHA40,
+            "CC_JOB_ID": "job-done",
+            "CC_TTL_S": "60",
+        },
+    )
+    assert "already passed" in result.stdout
+    assert "Clone" not in result.stdout
+    assert "RUNPOD_POD_ID is missing" in result.stderr
+
+
+def test_entrypoint_early_failure_writes_status(tmp_path: Path) -> None:
+    script = tmp_path / "entrypoint.sh"
+    text = ENTRYPOINT.read_text(encoding="utf-8")
+    patched = text.replace('LIB="/opt/cc/scripts/gpu/lib.sh"', f'LIB="{LIB}"')
+    script.write_text(patched, encoding="utf-8")
+    script.chmod(0o755)
+    result = _run(
+        [str(script)],
+        env={"CC_VOLUME_DIR": str(tmp_path), "CC_JOB_ID": "job-early", "CC_JOB": "gpu_tests"},
+    )
+    assert result.returncode != 0
+    status = tmp_path / "runs" / "job-early" / "status"
+    assert status.is_file()
+    assert status.read_text(encoding="utf-8").strip() == "failed"
+    assert "RUNPOD_POD_ID is missing" in result.stderr
 
 
 def test_gpu_scripts_pass_shellcheck() -> None:

@@ -236,7 +236,7 @@ Do not invent the values.
 | `CC_RUNPOD_REGISTRY_AUTH_ID` | Registry credential for the private GHCR image |
 | `CC_GPU_IMAGE` | GHCR image name when the template does not set it |
 | `CC_INTERACTIVE` | Set to `1` on interactive pods |
-| `CC_WAIT_TIMEOUT_S` | `wait_job.sh` timeout in seconds. Default `7200` |
+| `CC_WAIT_TIMEOUT_S` | `wait_job.sh` timeout in seconds. Default is `CC_TTL_S` plus 300 |
 | `CC_WAIT_POLL_S` | `wait_job.sh` poll interval in seconds. Default `15` |
 | `CC_AWS_PROFILE` | Optional AWS CLI profile for the volume S3 API |
 

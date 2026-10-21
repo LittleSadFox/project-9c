@@ -41,6 +41,8 @@ RUN apt-get update \
         xz-utils \
         zlib1g \
     && rm -rf /var/lib/apt/lists/* \
+    && rm -f /etc/ssh/ssh_host_* \
+    && test -z "$(find /etc/ssh -maxdepth 1 -name 'ssh_host_*' -print)" \
     && python3 --version | grep -E 'Python 3\.12\.' \
     && curl -fsSL -o /tmp/ffmpeg.tar.xz "$FFMPEG_URL" \
     && echo "${FFMPEG_SHA256}  /tmp/ffmpeg.tar.xz" | sha256sum -c - \

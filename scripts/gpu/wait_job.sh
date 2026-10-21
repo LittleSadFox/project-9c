@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Poll runs/<job_id>/status through the volume S3 API.
-# Optional --pod-id fails early if the pod exits before status is passed.
+# Optional --pod-id fails early if the pod exits before status is passed,
+# and calls pod_down.sh when the wait ends.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -48,28 +49,43 @@ VOLUME="$(cc_volume_id)"
 ENDPOINT="$(cc_s3_endpoint)"
 REGION="${CC_VOLUME_DC:-${CC_RUNPOD_DATACENTER:-}}"
 KEY="runs/${JOB_ID}/status"
-TIMEOUT="${CC_WAIT_TIMEOUT_S:-7200}"
+TIMEOUT="$(cc_wait_timeout_s)"
 SLEEP_S="${CC_WAIT_POLL_S:-15}"
 
 if [[ "$DRY_RUN" == "1" ]]; then
   echo "s3://${VOLUME}/${KEY}"
   echo "endpoint=${ENDPOINT}"
   echo "region=${REGION}"
+  echo "timeout_s=${TIMEOUT}"
+  if [[ -n "${CC_AWS_PROFILE:-}" ]]; then
+    echo "aws_profile=${CC_AWS_PROFILE}"
+  fi
   if [[ -n "$POD_ID" ]]; then
     echo "pod_id=${POD_ID}"
     echo "GET /pods/${POD_ID}"
+    echo "pod_down=${POD_ID}"
   fi
   exit 0
 fi
 
 command -v aws >/dev/null 2>&1 || cc_fail "Install AWS CLI v2. wait_job.sh reads the volume through the S3 API."
 
-read_status() {
-  local status=""
-  if status="$(aws s3 cp "s3://${VOLUME}/${KEY}" - --region "$REGION" --endpoint-url "$ENDPOINT" 2>/dev/null)"; then
+aws_cp_status() {
+  local err
+  err="$(mktemp)"
+  # shellcheck disable=SC2046
+  if status="$(aws s3 cp "s3://${VOLUME}/${KEY}" - --region "$REGION" --endpoint-url "$ENDPOINT" $(cc_aws_args) 2>"$err")"; then
+    rm -f "$err"
     printf '%s' "$status" | tr -d '[:space:]'
     return 0
   fi
+  if grep -qiE 'NoSuchKey|Not Found|404' "$err"; then
+    rm -f "$err"
+    return 1
+  fi
+  echo "ERROR: aws s3 cp failed for s3://${VOLUME}/${KEY}." >&2
+  cat "$err" >&2 || true
+  rm -f "$err"
   return 1
 }
 
@@ -78,7 +94,7 @@ pod_gone() {
   if [[ -z "$POD_ID" ]]; then
     return 1
   fi
-  if body="$(cc_rest GET "/pods/${POD_ID}" 2>/dev/null)"; then
+  if body="$(cc_rest GET "/pods/${POD_ID}")"; then
     local desired
     desired="$(jq -r '.desiredStatus // .status // empty' <<<"$body")"
     case "$desired" in
@@ -91,32 +107,46 @@ pod_gone() {
         ;;
     esac
   fi
-  echo "missing"
-  return 0
+  if [[ "${CC_LAST_HTTP_CODE:-}" == "404" ]]; then
+    echo "missing"
+    return 0
+  fi
+  echo "ERROR: pod lookup HTTP ${CC_LAST_HTTP_CODE:-unknown}." >&2
+  return 1
+}
+
+finish_wait() {
+  local ec="$1"
+  if [[ -n "$POD_ID" ]]; then
+    "$ROOT/scripts/gpu/pod_down.sh" "$POD_ID" || true
+  fi
+  exit "$ec"
 }
 
 deadline=$((SECONDS + TIMEOUT))
 while (( SECONDS < deadline )); do
-  if status="$(read_status)"; then
+  if status="$(aws_cp_status)"; then
     echo "status=${status}"
     case "$status" in
-      passed) exit 0 ;;
-      failed) exit 1 ;;
+      passed) finish_wait 0 ;;
+      failed) finish_wait 1 ;;
       running|"") ;;
       *) echo "Unknown status ${status}" ;;
     esac
   fi
   if gone="$(pod_gone)"; then
-    if status="$(read_status)"; then
+    if status="$(aws_cp_status)"; then
       echo "status=${status}"
       case "$status" in
-        passed) exit 0 ;;
-        failed) exit 1 ;;
+        passed) finish_wait 0 ;;
+        failed) finish_wait 1 ;;
       esac
     fi
-    cc_fail "Pod ${POD_ID} is ${gone} and runs/${JOB_ID}/status is not passed."
+    echo "ERROR: Pod ${POD_ID} is ${gone} and runs/${JOB_ID}/status is not passed." >&2
+    finish_wait 1
   fi
   sleep "$SLEEP_S"
 done
 
-cc_fail "Timed out after ${TIMEOUT}s waiting for ${JOB_ID}."
+echo "ERROR: Timed out after ${TIMEOUT}s waiting for ${JOB_ID}." >&2
+finish_wait 2

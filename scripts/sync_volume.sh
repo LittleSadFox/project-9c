@@ -58,12 +58,16 @@ echo "Export labels"
 python3 "$ROOT/scripts/export_labels.py" --golden-dir "$GOLDEN"
 
 command -v aws >/dev/null 2>&1 || fail "Install AWS CLI v2 from the official installer."
+if [ -n "${CC_AWS_PROFILE:-}" ]; then
+  export AWS_PROFILE="$CC_AWS_PROFILE"
+fi
 
 MANIFEST_LOCAL="$(mktemp)"
 NEW_MANIFEST="$(mktemp)"
 trap 'rm -f "$MANIFEST_LOCAL" "$NEW_MANIFEST"' EXIT
+# shellcheck disable=SC2046
 if aws s3 cp "s3://${VOLUME}/${PREFIX}/manifest.json" "$MANIFEST_LOCAL" \
-  --region "$REGION" --endpoint-url "$ENDPOINT" >/dev/null 2>&1; then
+  --region "$REGION" --endpoint-url "$ENDPOINT" $(cc_aws_args) >/dev/null 2>&1; then
   :
 else
   echo '{"files":{}}' >"$MANIFEST_LOCAL"
@@ -136,6 +140,7 @@ for key, path in candidates:
 Path(new_path).write_text(json.dumps({"files": files}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
 
+# shellcheck disable=SC2046
 aws s3 cp "$NEW_MANIFEST" "s3://${VOLUME}/${PREFIX}/manifest.json" \
-  --region "$REGION" --endpoint-url "$ENDPOINT"
+  --region "$REGION" --endpoint-url "$ENDPOINT" $(cc_aws_args)
 echo "sync_volume.sh finished."

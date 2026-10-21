@@ -106,6 +106,27 @@ def test_gpu_tests_sets_require_only_in_subprocess(
     assert "CC_REQUIRE" not in os.environ
 
 
+def test_gpu_tests_drops_webhook_and_pod_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CC_WEBHOOK_URL", "https://example.invalid/hook")
+    monkeypatch.setenv("RUNPOD_API_KEY", "pod-scoped-key")
+    sample = tmp_path / "sample_test.py"
+    sample.write_text(
+        "import os\n"
+        "def test_child_has_no_secrets() -> None:\n"
+        "    assert 'CC_WEBHOOK_URL' not in os.environ\n"
+        "    assert 'RUNPOD_API_KEY' not in os.environ\n",
+        encoding="utf-8",
+    )
+    metrics = gpu_tests(
+        tmp_path / "run",
+        pytest_args=[str(sample), "-q"],
+        require_cuda=False,
+    )
+    assert metrics["status"] == "passed"
+
+
 def test_later_jobs_are_not_ready() -> None:
     with pytest.raises(JobError, match="not implemented"):
         JOBS["finetune_pose"](Path("/tmp"))

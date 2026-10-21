@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Terminate one pod by id.
+# Terminate one pod by id and wait until it is gone.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -42,5 +42,29 @@ if [[ "$DRY_RUN" == "1" ]]; then
 fi
 
 cc_require_bot_api_key
-cc_rest DELETE "/pods/${POD_ID}" >/dev/null
-echo "terminated=${POD_ID}"
+
+deleted=0
+if command -v runpodctl >/dev/null 2>&1; then
+  if runpodctl remove pod "$POD_ID" >/dev/null 2>&1 \
+    || runpodctl pod delete "$POD_ID" >/dev/null 2>&1; then
+    deleted=1
+  fi
+fi
+if [[ "$deleted" != "1" ]]; then
+  cc_rest DELETE "/pods/${POD_ID}" >/dev/null || true
+fi
+
+attempt=0
+while [[ "$attempt" -lt 8 ]]; do
+  attempt=$((attempt + 1))
+  if cc_rest GET "/pods/${POD_ID}" >/dev/null; then
+    sleep 2
+    continue
+  fi
+  if [[ "${CC_LAST_HTTP_CODE:-}" == "404" ]]; then
+    echo "terminated=${POD_ID}"
+    exit 0
+  fi
+  sleep 2
+done
+cc_fail "Pod ${POD_ID} is still present after delete."

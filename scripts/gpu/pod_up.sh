@@ -117,7 +117,8 @@ if [[ -z "$JOB_ID" ]]; then
   JOB_ID="cc-${kind}-${short:-noref}-${stamp}"
 fi
 
-NAME="cc-${JOB:-interactive}-${JOB_ID}"
+NAME="$JOB_ID"
+cc_require_image_tag
 ENV_JSON="$(cc_build_pod_env_json "$JOB" "$REF" "$JOB_ID" "$CC_TTL_S" "$INTERACTIVE")"
 PAYLOAD="$(cc_build_pod_payload "$NAME" "$ENV_JSON" "$SPOT" "$GPU_CSV")"
 
@@ -125,6 +126,9 @@ if [[ "$DRY_RUN" == "1" ]]; then
   printf '%s\n' "$PAYLOAD"
   echo "pod_id=DRY_RUN"
   echo "job_id=${JOB_ID}"
+  if [[ -n "${CC_RUNPOD_REGISTRY_AUTH_ID:-}" ]]; then
+    echo "GET /containerregistryauth/${CC_RUNPOD_REGISTRY_AUTH_ID}"
+  fi
   exit 0
 fi
 
@@ -137,6 +141,7 @@ fi
 cc_require_registry_auth
 
 cc_require_bot_api_key
+cc_verify_registry_auth
 RESPONSE="$(cc_rest POST /pods "$PAYLOAD")"
 POD_ID="$(jq -r '.id // .podId // empty' <<<"$RESPONSE")"
 if [[ -z "$POD_ID" || "$POD_ID" == "null" ]]; then

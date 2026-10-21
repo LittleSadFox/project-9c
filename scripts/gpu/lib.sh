@@ -107,15 +107,25 @@ cc_default_gpu_csv() {
   printf '%s' "NVIDIA L4,NVIDIA RTX 2000 Ada Generation,NVIDIA GeForce RTX 4090,NVIDIA A100 80GB PCIe,NVIDIA RTX PRO 4500 Blackwell,NVIDIA RTX PRO 4000 Blackwell,NVIDIA GeForce RTX 5090"
 }
 
+cc_allowed_cuda_versions() {
+  printf '%s' '["12.8","12.9","13.0","13.1","13.2"]'
+}
+
 cc_load_defaults() {
-  local here
+  local here file line key val
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  local file="${here}/defaults.env"
+  file="${here}/defaults.env"
   if [[ -f "$file" ]]; then
-    set -a
-    # shellcheck disable=SC1090
-    source "$file"
-    set +a
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      case "$line" in
+        ''|\#*) continue ;;
+      esac
+      key="${line%%=*}"
+      val="${line#*=}"
+      if [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] && [[ -z "${!key:-}" ]]; then
+        export "${key}=${val}"
+      fi
+    done <"$file"
   fi
   if [[ -n "${CC_VOLUME_ID:-}" ]]; then
     CC_RUNPOD_VOLUME_ID="$CC_VOLUME_ID"
@@ -123,10 +133,11 @@ cc_load_defaults() {
   if [[ -n "${CC_VOLUME_DC:-}" ]]; then
     CC_RUNPOD_DATACENTER="$CC_VOLUME_DC"
   fi
-  export CC_RUNPOD_VOLUME_ID="${CC_RUNPOD_VOLUME_ID:-}"
-  export CC_RUNPOD_DATACENTER="${CC_RUNPOD_DATACENTER:-}"
-  export CC_RUNPOD_REGISTRY_AUTH_ID="${CC_RUNPOD_REGISTRY_AUTH_ID:-}"
-  export CC_GPU_IMAGE="${CC_GPU_IMAGE:-}"
+  : "${CC_RUNPOD_VOLUME_ID:=}"
+  : "${CC_RUNPOD_DATACENTER:=}"
+  : "${CC_RUNPOD_REGISTRY_AUTH_ID:=}"
+  : "${CC_GPU_IMAGE:=}"
+  export CC_RUNPOD_VOLUME_ID CC_RUNPOD_DATACENTER CC_RUNPOD_REGISTRY_AUTH_ID CC_GPU_IMAGE
 }
 
 cc_assert_no_account_key() {
@@ -199,6 +210,7 @@ cc_build_pod_payload() {
       --arg image "${CC_GPU_IMAGE:-}" \
       --arg dc "$dc" \
       --arg registry "${CC_RUNPOD_REGISTRY_AUTH_ID:-}" \
+      --argjson cuda "$(cc_allowed_cuda_versions)" \
       --argjson disk 20 \
       '{
         name: $name,
@@ -207,6 +219,7 @@ cc_build_pod_payload() {
         gpuCount: 1,
         gpuTypePriority: "custom",
         gpuTypeIds: ($gpus | split(",") | map(gsub("^ +| +$";""))),
+        allowedCudaVersions: $cuda,
         containerDiskInGb: $disk,
         volumeInGb: 0,
         volumeMountPath: "/workspace",
@@ -235,6 +248,55 @@ cc_require_registry_auth() {
   if [[ -n "${CC_GPU_IMAGE:-}" && -z "${CC_RUNPOD_REGISTRY_AUTH_ID:-}" ]]; then
     cc_fail "CC_GPU_IMAGE needs CC_RUNPOD_REGISTRY_AUTH_ID. The image is private."
   fi
+}
+
+cc_require_image_tag() {
+  local image="${CC_GPU_IMAGE:-}"
+  if [[ -n "$image" && "$image" != *:* ]]; then
+    cc_fail "CC_GPU_IMAGE must include a tag. Use a sha tag after the GHCR push."
+  fi
+}
+
+cc_verify_registry_auth() {
+  local id="${CC_RUNPOD_REGISTRY_AUTH_ID:-}"
+  [[ -n "$id" ]] || cc_fail "CC_RUNPOD_REGISTRY_AUTH_ID is missing."
+  if ! cc_rest GET "/containerregistryauth/${id}" >/dev/null; then
+    cc_fail "Section 9.4: GET /containerregistryauth/${id} failed. Do not start a pod."
+  fi
+}
+
+cc_wait_timeout_s() {
+  if [[ -n "${CC_WAIT_TIMEOUT_S:-}" ]]; then
+    printf '%s' "$CC_WAIT_TIMEOUT_S"
+    return 0
+  fi
+  local ttl="${CC_TTL_S:-3600}"
+  printf '%s' "$((ttl + 300))"
+}
+
+cc_early_cleanup() {
+  local ec=$?
+  if [[ "${CC_EARLY_CLEANING:-}" == "1" ]]; then
+    return 0
+  fi
+  CC_EARLY_CLEANING=1
+  export CC_EARLY_CLEANING
+  set +e
+  local volume="${CC_VOLUME_DIR:-/workspace}"
+  local run_dir="${volume}/runs/${CC_JOB_ID:-unknown}"
+  mkdir -p "${run_dir}/artifacts"
+  printf 'failed\n' >"${run_dir}/status"
+  if [[ ! -f "${run_dir}/metrics.json" ]]; then
+    jq -n --arg job "${CC_JOB:-unknown}" --arg err "entrypoint failed before the job started" \
+      '{job: $job, status: "failed", error: $err}' >"${run_dir}/metrics.json"
+  fi
+  if [[ -n "${CC_WEBHOOK_URL:-}" && "${CC_WEBHOOK_URL}" != *"{{"* ]]; then
+    curl -sS -X POST -H "Content-Type: application/json" \
+      -d "{\"job_id\":\"${CC_JOB_ID:-unknown}\",\"status\":\"failed\"}" \
+      "$CC_WEBHOOK_URL" >/dev/null || true
+  fi
+  cc_terminate_self
+  return 0
 }
 
 cc_valid_pod_id() {
@@ -269,6 +331,8 @@ cc_rest() {
     )"
   fi
   rm -f "$hdr"
+  CC_LAST_HTTP_CODE="$code"
+  export CC_LAST_HTTP_CODE
   if [[ ! "$code" =~ ^2[0-9][0-9]$ ]]; then
     echo "ERROR: Runpod ${method} ${path} returned HTTP ${code}." >&2
     cat "$tmp" >&2 || true
@@ -380,7 +444,9 @@ cc_terminate_self() {
     fi
     delay=$((attempt * 2))
     cc_log "terminate attempt ${attempt} failed; sleep ${delay}s"
-    sleep "$delay"
+    if [[ "${CC_TERMINATE_NO_SLEEP:-}" != "1" ]]; then
+      sleep "$delay"
+    fi
   done
   cc_log "terminate failed after retries"
   return 1
@@ -435,7 +501,7 @@ cc_git_auth_clear() {
 
 cc_resolve_ref() {
   local ref="$1"
-  if [[ "$ref" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+  if [[ "$ref" =~ ^[0-9a-fA-F]{40}$ ]]; then
     printf '%s' "$ref"
     return 0
   fi
@@ -443,8 +509,11 @@ cc_resolve_ref() {
   if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     resolved="$(git rev-parse --verify "${ref}^{commit}" 2>/dev/null || true)"
   fi
-  [[ -n "$resolved" ]] || cc_fail "--ref must be a commit sha. Got ${ref}."
-  printf '%s' "$resolved"
+  if [[ "$resolved" =~ ^[0-9a-fA-F]{40}$ ]]; then
+    printf '%s' "$resolved"
+    return 0
+  fi
+  cc_fail "--ref must be a 40-character commit sha. Got ${ref}."
 }
 
 cc_load_defaults

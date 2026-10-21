@@ -136,3 +136,15 @@ AGENTS.md section 9.4 still applies.
 Before every first `pod_up`, the Runpod bot must verify the GHCR registry credential.
 A complete setup does not skip that check.
 The first live `gpu_tests` pod waits on this pull request merging and on green CI plus a green GPU image build.
+
+Live `pod_up` now GETs `/containerregistryauth/<id>` and refuses on a non-200.
+The Dockerfile deletes `/etc/ssh/ssh_host_*` after apt install.
+`entrypoint.sh` always generates new host keys.
+
+I did not confirm that `onnxruntime-gpu==1.23.2` (CUDA 12) supports Blackwell `sm_120`.
+The default GPU list keeps RTX PRO 4500/4000 Blackwell and RTX 5090 at the end.
+
+The create payload sends `allowedCudaVersions` `12.8` through `13.2`.
+An early entrypoint failure writes `status=failed`, pings, and terminates the pod.
+`run_job.sh` skips a finished job on restart and only retries terminate.
+`--ref` must be a 40-character sha, or the bot box resolves it to one.

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # List pods and their age. EXITED pods can still bill disk.
+# Exit 3 when any pod exists so leftover pods fail the Phase 0 gate.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -29,23 +30,33 @@ if [[ "$DRY_RUN" == "1" ]]; then
 fi
 
 cc_require_bot_api_key
-RESPONSE="$(cc_rest GET '/pods')"
+RESPONSE=""
+if ! RESPONSE="$(cc_rest GET '/pods')"; then
+  if command -v runpodctl >/dev/null 2>&1; then
+    runpodctl get pod || runpodctl pod list
+  fi
+  cc_fail "Runpod GET /pods failed."
+fi
 ITEMS="$(cc_pods_from_response "$RESPONSE")"
+COUNT="$(jq 'length' <<<"$ITEMS")"
 NOW="$(date -u +%s)"
+if [[ "$COUNT" -eq 0 ]]; then
+  echo "no pods"
+  exit 0
+fi
 printf '%s\n' "$ITEMS" | jq -r --argjson now "$NOW" '
-  if length==0 then "no running pods" else
-    .[] | [
-      (.id // .podId // "-"),
-      (.name // "-"),
-      (.desiredStatus // .status // "-"),
-      (
-        (.lastStartedAt // .createdAt // empty) as $raw
-        | if $raw == "" then "-"
-          else
-            (($raw | sub("\\.[0-9]+Z$"; "Z") | strptime("%Y-%m-%dT%H:%M:%SZ") | mktime) as $c
-             | (($now - $c) | tostring) + "s")
-          end
-      )
-    ] | @tsv
-  end
+  .[] | [
+    (.id // .podId // "-"),
+    (.name // "-"),
+    (.desiredStatus // .status // "-"),
+    (
+      (.lastStartedAt // .createdAt // empty) as $raw
+      | if $raw == "" then "-"
+        else
+          (($raw | sub("\\.[0-9]+Z$"; "Z") | strptime("%Y-%m-%dT%H:%M:%SZ") | mktime) as $c
+           | (($now - $c) | tostring) + "s")
+        end
+    )
+  ] | @tsv
 '
+exit 3

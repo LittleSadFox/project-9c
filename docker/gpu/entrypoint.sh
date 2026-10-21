@@ -11,14 +11,18 @@ else
   exit 1
 fi
 
+trap cc_early_cleanup EXIT
+trap cc_early_cleanup INT
+trap cc_early_cleanup TERM
+trap cc_early_cleanup HUP
+
 cc_require_ttl
 cc_require_job_or_interactive
 cc_setup_ssh
 
-# New host keys on every pod. Do not bake keys into the image.
-if ! compgen -G '/etc/ssh/ssh_host_*' >/dev/null; then
-  ssh-keygen -A
-fi
+# Fresh host keys on every boot. The image must not ship any.
+rm -f /etc/ssh/ssh_host_*
+ssh-keygen -A
 if [[ -x /usr/sbin/sshd ]]; then
   /usr/sbin/sshd
 fi
@@ -33,6 +37,7 @@ cc_require_cuda_driver
 
 if [[ -n "${CC_JOB:-}" ]]; then
   echo "Start job ${CC_JOB} (ttl=${CC_TTL_S}s)"
+  trap - EXIT INT TERM HUP
   exec /opt/cc/scripts/gpu/run_job.sh
 fi
 

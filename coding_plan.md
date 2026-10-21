@@ -13,7 +13,7 @@ todos:
     status: completed
   - id: p0-runpod-runner
     content: "Runpod runner (section 2): docker/gpu image (CUDA 12 + cuDNN 9, Python 3.12, onnxruntime-gpu 1.23.2, static ffmpeg 7, sshd, TTL watchdog) pushed to GHCR by gpu-image.yml; scripts/gpu (pod_up, run_job, wait_job, pod_down, pod_ls); ml/jobs.py with gpu_tests; sync_volume.sh; the first gpu_tests pod run reports and terminates itself"
-    status: completed
+    status: pending
   - id: p1-ingest
     content: "Library CRUD, streaming upload, MediaTool protocol (FfmpegTool, FakeMediaTool), ingest job (ffprobe, CFR H.264 proxy, thumbnails), media endpoints with byte ranges, exact-frame JPEG, trash; media fixture generator and tests"
     status: pending

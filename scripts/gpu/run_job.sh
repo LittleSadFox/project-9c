@@ -68,6 +68,10 @@ cleanup() {
     ping_webhook failed
   fi
   cc_terminate_self
+  if [[ "$FINISHED" != "1" ]]; then
+    trap - EXIT INT TERM HUP
+    exit 1
+  fi
   return 0
 }
 
@@ -87,6 +91,22 @@ if [[ "${CC_REPO_TOKEN:-}" == *"{{"* ]]; then
 fi
 
 mkdir -p "$RUN_DIR/artifacts" "$VOLUME/models" "$VOLUME/cache/pip" "$SCRATCH"
+if [[ -f "$RUN_DIR/status" ]]; then
+  existing="$(tr -d '[:space:]' <"$RUN_DIR/status")"
+  case "$existing" in
+    passed|failed)
+      echo "Job already ${existing}. Retry terminate only."
+      FINISHED=1
+      STATUS="$existing"
+      cc_terminate_self
+      trap - EXIT INT TERM HUP
+      if [[ "$existing" == "passed" ]]; then
+        exit 0
+      fi
+      exit 1
+      ;;
+  esac
+fi
 echo running >"$RUN_DIR/status"
 export CC_RUN_LOG="${RUN_DIR}/log.txt"
 
