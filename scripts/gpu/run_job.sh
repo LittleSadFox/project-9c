@@ -91,6 +91,7 @@ trap cleanup HUP
 
 cc_require_ttl
 [[ -n "${CC_JOB:-}" ]] || cc_fail "CC_JOB is required inside run_job.sh."
+cc_refuse_nested_gpu_tests
 [[ -n "${CC_GIT_REF:-}" ]] || cc_fail "CC_GIT_REF is required. Pods run only pushed commits."
 [[ -n "${CC_JOB_ID:-}" ]] || cc_fail "CC_JOB_ID is required."
 RUN_DIR="${VOLUME}/runs/${CC_JOB_ID}"
@@ -172,11 +173,7 @@ export CC_GOLDEN_DIR="${CC_GOLDEN_DIR:-$VOLUME/videos}"
 export CC_VOLUME_DIR="$VOLUME"
 export PYTHONPATH="${SRC}/backend:${SRC}${PYTHONPATH:+:$PYTHONPATH}"
 
-if [[ -x /opt/cc/venv/bin/python ]]; then
-  PY=/opt/cc/venv/bin/python
-else
-  PY=python3
-fi
+PY="$(cc_resolve_python)"
 
 echo "Install pins from cache" | tee -a "$RUN_DIR/log.txt"
 cc_run_logged --wait "$PY" -m pip install --cache-dir "$VOLUME/cache/pip" -r "$SRC/backend/requirements-gpu.txt"

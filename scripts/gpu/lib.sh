@@ -102,6 +102,29 @@ cc_require_job_or_interactive() {
   cc_fail "Set CC_JOB or CC_INTERACTIVE=1."
 }
 
+cc_refuse_nested_gpu_tests() {
+  if [[ "${CC_JOB:-}" == "gpu_tests" && "${CC_IN_GPU_TESTS:-}" == "1" ]]; then
+    cc_fail "Refuse to start nested gpu_tests. CC_IN_GPU_TESTS is already set."
+  fi
+}
+
+cc_resolve_python() {
+  local raw="${CC_PYTHON:-}"
+  if [[ -n "$raw" ]]; then
+    raw="$(cc_trim "$raw")"
+    [[ -n "$raw" ]] || cc_fail "CC_PYTHON is empty."
+    [[ "$raw" == /* ]] || cc_fail "CC_PYTHON must be an absolute path."
+    [[ -x "$raw" && -f "$raw" ]] || cc_fail "CC_PYTHON is not an executable file: ${raw}."
+    printf '%s\n' "$raw"
+    return 0
+  fi
+  if [[ -x /opt/cc/venv/bin/python ]]; then
+    printf '%s\n' /opt/cc/venv/bin/python
+    return 0
+  fi
+  printf '%s\n' python3
+}
+
 cc_secret_ref_repo_token() {
   printf '%s' '{{ RUNPOD_SECRET_cc_repo_token }}'
 }
@@ -111,7 +134,9 @@ cc_secret_ref_webhook() {
 }
 
 cc_default_gpu_csv() {
-  printf '%s' "NVIDIA L4,NVIDIA RTX 2000 Ada Generation,NVIDIA GeForce RTX 4090,NVIDIA A100 80GB PCIe,NVIDIA RTX PRO 4500 Blackwell,NVIDIA RTX PRO 4000 Blackwell,NVIDIA GeForce RTX 5090"
+  # ONNX Runtime has never been verified on sm_120 (Blackwell) on a pod.
+  # Leave RTX PRO 4500/4000 Blackwell and RTX 5090 out of the default list.
+  printf '%s' "NVIDIA L4,NVIDIA RTX 2000 Ada Generation,NVIDIA GeForce RTX 4090,NVIDIA A100 80GB PCIe"
 }
 
 cc_allowed_cuda_versions() {
@@ -636,8 +661,9 @@ cc_assert_safe_wipe_dir() {
   tmpdir_root=""
   if [[ -n "${TMPDIR:-}" ]]; then
     tmpdir_root="$(cc_realpath "$TMPDIR")"
-    local protected
-    for protected in "$volume" "$scratch" "$repo_root" "$home"; do
+    local protected clone_root
+    clone_root="${tmp_root}/cc-src"
+    for protected in "$volume" "$scratch" "$repo_root" "$home" "$clone_root"; do
       if [[ -n "$protected" && -n "$tmpdir_root" ]]; then
         if [[ "$tmpdir_root" == "$protected" || "$tmpdir_root" == "$protected"/* ]]; then
           tmpdir_root=""
@@ -963,7 +989,17 @@ cc_log() {
   fi
 }
 
+cc_terminate_mark() {
+  local stamp="${CC_VOLUME_DIR:-/workspace}/runs/${CC_JOB_ID:-unknown}/.cc_terminated"
+  mkdir -p "$(dirname "$stamp")"
+  printf 'ok\n' >"$stamp"
+}
+
 cc_terminate_self() {
+  local stamp="${CC_VOLUME_DIR:-/workspace}/runs/${CC_JOB_ID:-unknown}/.cc_terminated"
+  if [[ -f "$stamp" ]]; then
+    return 0
+  fi
   if [[ -z "${RUNPOD_POD_ID:-}" ]]; then
     echo "ERROR: RUNPOD_POD_ID is missing. Cannot terminate this pod." >&2
     return 1
@@ -979,12 +1015,14 @@ cc_terminate_self() {
       if ctl="$(cc_run_timeout 20 runpodctl remove pod "$RUNPOD_POD_ID" 2>&1)" \
         || ctl="$(cc_run_timeout 20 runpodctl pod delete "$RUNPOD_POD_ID" 2>&1)"; then
         cc_log "terminate ok via runpodctl attempt=${attempt}"
+        cc_terminate_mark
         return 0
       fi
       cc_log "runpodctl failed attempt=${attempt}: $(cc_redact_oneline "$ctl")"
     fi
     if cc_rest DELETE "/pods/${RUNPOD_POD_ID}" >/dev/null; then
       cc_log "terminate ok via curl attempt=${attempt}"
+      cc_terminate_mark
       return 0
     fi
     delay=$((attempt * 2))

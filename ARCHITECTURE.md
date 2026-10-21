@@ -349,6 +349,8 @@ The second live `gpu_tests` pod at `73be826` used CUDA and then failed after a t
 The clone dir is `/tmp/cc-src`. The wipe guard allowlists that basename under `/tmp` or a trusted `$TMPDIR`, then refuses the checkout, HOME, volume, scratch, and working directory. `$TMPDIR` inside those paths is untrusted. The remaining check-to-rm race needs `/tmp` write access on the pod.
 CI copies the repo to `/tmp/cc-src` and runs the `gpu_tests` pytest selection from there.
 `allowedCudaVersions` is opt-in via `CC_ALLOWED_CUDA` (unset by default). The image CUDA ≥12.8 guard is the real floor.
+The default GPU list is L4, RTX 2000 Ada, RTX 4090, and A100. It omits Blackwell. ONNX Runtime has never been verified on sm_120 on a pod.
+`$TMPDIR` under `/tmp/cc-src` is untrusted. `gpu_tests` sets `CC_IN_GPU_TESTS=1` on the pytest child. `run_job.sh` and `ml.jobs` refuse a nested `gpu_tests`. Tests set `CC_PYTHON` so they do not use `/opt/cc/venv/bin/python`. CI installs a fake interpreter at that path.
 Do not put the account API key in the pod template or in pod env.
 
 The Docker files for `climbing-coach-train` land in the Phase 6 todo.

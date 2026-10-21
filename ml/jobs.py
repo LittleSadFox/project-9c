@@ -123,6 +123,7 @@ def gpu_tests(run_dir: Path, *, pytest_args: list[str] | None = None, require_cu
     env = os.environ.copy()
     env.pop("CC_WEBHOOK_URL", None)
     env.pop("RUNPOD_API_KEY", None)
+    env["CC_IN_GPU_TESTS"] = "1"
     require = env.get("CC_REQUIRE", "").strip()
     if not require:
         bits = ["media"]
@@ -191,6 +192,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("job", choices=sorted(JOBS))
     parser.add_argument("--run-dir", type=Path, required=True)
     args = parser.parse_args(argv)
+    if args.job == "gpu_tests" and os.environ.get("CC_IN_GPU_TESTS") == "1":
+        print(
+            "ERROR: Refuse to start nested gpu_tests. CC_IN_GPU_TESTS is already set.",
+            file=sys.stderr,
+        )
+        return 1
     try:
         JOBS[args.job](args.run_dir)
     except JobError as exc:

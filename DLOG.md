@@ -142,7 +142,7 @@ The Dockerfile deletes `/etc/ssh/ssh_host_*` after apt install.
 `entrypoint.sh` always generates new host keys.
 
 I did not confirm that `onnxruntime-gpu==1.23.2` (CUDA 12) supports Blackwell `sm_120`.
-The default GPU list keeps RTX PRO 4500/4000 Blackwell and RTX 5090 at the end.
+The default GPU list omits RTX PRO 4500/4000 Blackwell and RTX 5090. ONNX Runtime has never been verified on sm_120 on a pod.
 
 The create payload originally sent `allowedCudaVersions` `12.8`, `12.9`, `13.0`.
 An early entrypoint failure writes `status=failed`, pings, and terminates the pod.
@@ -196,5 +196,19 @@ It prints one summary line per poll with the error code and key.
 
 The GPU image now includes `shellcheck`.
 `AGENTS.md` and `coding_plan.md` do not name the clone dir, so they stay unchanged.
+
+See `TROUBLESHOOTING_LOG.md`.
+
+## 2026-10-21 — third live gpu_tests nested pytest
+
+The third live `gpu_tests` pod at `1af17806` used an L4, driver 595.91.07, and CUDA 13.2. The run folder is `s3://wguvx2347m/runs/cc-gpu_tests-1af17806-20261021T152111Z/`. CUDA and the first script tests passed. Then `test_run_job_rerun_after_clone_reaches_ml_jobs` hung.
+
+`run_job.sh` prefers `/opt/cc/venv/bin/python` when that file exists. The tests only stubbed `python3` on `PATH`, so the real `ml.jobs gpu_tests` ran pytest on `/tmp/cc-src` again. Processes nested about once every 7s.
+
+Tests now set `CC_PYTHON` to the stub. `_run()` times out after 30s. `gpu_tests` sets `CC_IN_GPU_TESTS=1` in the pytest child only. `run_job.sh` and `python -m ml.jobs gpu_tests` refuse a nested `gpu_tests` when that flag is set. The CI pod-layout job installs a fake `/opt/cc/venv/bin/python`.
+
+A second terminate after a successful first attempt is skipped. That avoids a later 401/403 on an expired pod token.
+
+The default GPU list omits Blackwell. ONNX Runtime has never been verified on sm_120 on a pod.
 
 See `TROUBLESHOOTING_LOG.md`.

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from ml.jobs import JOBS, JobError, check_cuda_session, gpu_tests, parse_junit
+from ml.jobs import JOBS, JobError, check_cuda_session, gpu_tests, main, parse_junit
 from ml.tiny_onnx import tiny_identity_bytes
 
 
@@ -125,6 +125,33 @@ def test_gpu_tests_drops_webhook_and_pod_key(
         require_cuda=False,
     )
     assert metrics["status"] == "passed"
+
+
+def test_ml_jobs_main_refuses_nested_gpu_tests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CC_IN_GPU_TESTS", "1")
+    assert main(["gpu_tests", "--run-dir", str(tmp_path)]) == 1
+
+
+def test_gpu_tests_sets_in_gpu_tests_only_in_subprocess(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("CC_IN_GPU_TESTS", raising=False)
+    sample = tmp_path / "sample_test.py"
+    sample.write_text(
+        "import os\n"
+        "def test_child_sees_guard() -> None:\n"
+        "    assert os.environ.get('CC_IN_GPU_TESTS') == '1'\n",
+        encoding="utf-8",
+    )
+    metrics = gpu_tests(
+        tmp_path / "run",
+        pytest_args=[str(sample), "-q"],
+        require_cuda=False,
+    )
+    assert metrics["status"] == "passed"
+    assert "CC_IN_GPU_TESTS" not in os.environ
 
 
 def test_later_jobs_are_not_ready(tmp_path: Path) -> None:
