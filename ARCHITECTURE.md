@@ -338,3 +338,12 @@ Phase 6 image `climbing-coach-train`:
 - Do not put those packages in the Phase 0 image
 
 The Docker files and `gpu-image.yml` land in the `p0-runpod-runner` and Phase 6 todos.
+
+## 14. Phase 0 skeleton
+
+The Phase 0 skeleton is in the tree.
+
+- `backend/app` has config, errors, security, storage, db, `0001_init.sql`, the job queue, `/health`, `/auth/launch`, and the SPA fallback.
+- `create_app(settings, media=..., estimator=...)` injects fakes in tests.
+- The frontend Vite app serves the Liquid Glass shell and empty pages.
+- Scripts: `setup_mac.sh`, `check.sh`, `dev.sh`, `build.sh`, `run_mac.sh`, and `download_models.py`.
