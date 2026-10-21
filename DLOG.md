@@ -162,3 +162,13 @@ Interactive SIGTERM writes `stopped`, not `failed`.
 `pod_down` treats `desiredStatus: TERMINATED` as gone.
 A failed-status rewrite does not ping the webhook a second time.
 `cc_terminate_self` times out `runpodctl`.
+
+## 2026-10-21 — first live gpu_tests follow-up
+
+The first live `gpu_tests` pod at `bd99ed3` printed `Clone LittleSadFox/project-9c at bd99ed3` and then failed. The pod console was deleted with the pod. The git error was not on the volume. The suspected cause was a bad hand-pasted `cc_repo_token`. On 2026-10-21 the Runpod bot re-set that secret from a verified token. That token passed `ls-remote` and a shallow fetch.
+
+`run_job.sh` now fails fast when `CC_REPO_TOKEN` is empty and writes that error to `status` and `log.txt`. Git runs with `GIT_TERMINAL_PROMPT=0` and `GIT_TRACE_REDACT=1`. Clone stdout and stderr are redacted together. The raw token, the `x-access-token` base64, and basic/bearer header values do not go to the log.
+
+`pod_down` treats only HTTP 404 or `desiredStatus: TERMINATED` as gone. `EXITED` still bills disk. `wait_job` may still treat `EXITED` as an early job exit, then `pod_down` must see 404 or `TERMINATED`.
+
+See `TROUBLESHOOTING_LOG.md` for the allowedCudaVersions 500 and the clone failure.

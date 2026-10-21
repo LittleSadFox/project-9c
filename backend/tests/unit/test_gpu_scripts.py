@@ -93,6 +93,26 @@ exit 1
         encoding="utf-8",
     )
     runpodctl.chmod(0o755)
+    git = _SHIM_DIR / "git"
+    git.write_text(
+        f"""#!/usr/bin/env bash
+printf '%s %s\\n' git "$*" >> "{log}"
+echo "ERROR: shim git blocked network" >&2
+exit 1
+""",
+        encoding="utf-8",
+    )
+    git.chmod(0o755)
+    aws = _SHIM_DIR / "aws"
+    aws.write_text(
+        f"""#!/usr/bin/env bash
+printf '%s %s\\n' aws "$*" >> "{log}"
+echo "ERROR: shim aws blocked network" >&2
+exit 1
+""",
+        encoding="utf-8",
+    )
+    aws.chmod(0o755)
     return _SHIM_DIR
 
 
@@ -336,6 +356,39 @@ def test_lib_git_auth_is_basic_x_access_token() -> None:
     text = LIB.read_text(encoding="utf-8")
     assert "x-access-token:" in text
     assert "AUTHORIZATION: basic" in text
+
+
+def _fake_curl_routes(tmp_path: Path, routes: dict[str, tuple[str, str]]) -> Path:
+    cases = []
+    for method, (status, body) in routes.items():
+        cases.append(f"    {method})\n      status='{status}'\n      body='{body}'\n      ;;")
+    script = tmp_path / "curl"
+    script.write_text(
+        f"""#!/usr/bin/env bash
+method=GET
+out=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -X) method="$2"; shift 2 ;;
+    -o) out="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+status="500"
+body='{{"error":"unmapped"}}'
+case "$method" in
+{chr(10).join(cases)}
+esac
+if [[ -n "$out" ]]; then
+  printf '%s\\n' "$body" >"$out"
+fi
+printf '%s' "$status"
+exit 0
+""",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    return script
 
 
 def _fake_curl(tmp_path: Path, status: str, body: str) -> Path:
@@ -614,7 +667,7 @@ def test_lib_curl_calls_set_max_time() -> None:
     text = LIB.read_text(encoding="utf-8")
     assert text.count("--max-time") >= 3
     assert "cc_run_timeout 20 runpodctl" in text
-    assert "drop the field" in text
+    assert "cc_print_api_error" in text
 
 
 def test_pod_up_omits_allowed_cuda_by_default() -> None:
@@ -740,6 +793,8 @@ exit 1
     assert log.is_file()
     text = log.read_text(encoding="utf-8")
     assert token not in text
+    assert token not in result.stdout
+    assert token not in result.stderr
     assert "REDACTED" in text
     assert "fatal:" in text
 
@@ -844,6 +899,203 @@ def test_entrypoint_early_failure_writes_status(tmp_path: Path) -> None:
     assert status.is_file()
     assert status.read_text(encoding="utf-8").strip() == "failed"
     assert "RUNPOD_POD_ID is missing" in result.stderr
+
+
+def test_wait_job_pod_id_requires_value() -> None:
+    result = _run(
+        [str(WAIT_JOB), "job-1", "--pod-id", "--dry-run"],
+        env={"CC_VOLUME_ID": "vol-1", "CC_VOLUME_DC": "EU-RO-1", "CC_TTL_S": "60"},
+    )
+    assert result.returncode != 0
+    assert "--pod-id requires a value" in result.stderr
+
+
+def test_wait_job_timeout_must_be_positive() -> None:
+    ok = _run(
+        [str(WAIT_JOB), "job-1", "--dry-run"],
+        env={
+            "CC_VOLUME_ID": "vol-1",
+            "CC_VOLUME_DC": "EU-RO-1",
+            "CC_WAIT_TIMEOUT_S": "45",
+        },
+    )
+    assert ok.returncode == 0, ok.stderr
+    assert "timeout_s=45" in ok.stdout
+    for value in ("0", "-1", "10s", "1.5", "abc"):
+        result = _run(
+            [str(WAIT_JOB), "job-1", "--dry-run"],
+            env={
+                "CC_VOLUME_ID": "vol-1",
+                "CC_VOLUME_DC": "EU-RO-1",
+                "CC_WAIT_TIMEOUT_S": value,
+            },
+        )
+        assert result.returncode != 0, value
+        assert "CC_WAIT_TIMEOUT_S must be a positive integer" in result.stderr
+
+
+def test_pod_down_exited_after_failed_delete_is_not_gone(tmp_path: Path) -> None:
+    _fake_curl_routes(
+        tmp_path,
+        {
+            "DELETE": ("500", '{"error":"busy"}'),
+            "GET": ("200", '{"id":"pod-abc","desiredStatus":"EXITED"}'),
+        },
+    )
+    result = _run(
+        [str(POD_DOWN), "pod-abc"],
+        env={"RUNPOD_API_KEY": "broken-key"},
+        bin_dir=tmp_path,
+    )
+    assert result.returncode != 0
+    assert "terminated=" not in result.stdout
+    assert "still present" in result.stderr
+
+
+def test_pod_gone_treats_exited_as_early_exit(tmp_path: Path) -> None:
+    _fake_curl(tmp_path, "200", '{"id":"pod-abc","desiredStatus":"EXITED"}')
+    result = _run(
+        ["bash", "-c", f"source {LIB} && cc_pod_gone pod-abc"],
+        env={"RUNPOD_API_KEY": "ok-key"},
+        bin_dir=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "EXITED" in result.stdout
+
+
+def test_pod_deleted_rejects_exited(tmp_path: Path) -> None:
+    _fake_curl(tmp_path, "200", '{"id":"pod-abc","desiredStatus":"EXITED"}')
+    result = _run(
+        ["bash", "-c", f"source {LIB} && cc_pod_deleted pod-abc"],
+        env={"RUNPOD_API_KEY": "ok-key"},
+        bin_dir=tmp_path,
+    )
+    assert result.returncode != 0
+
+
+def test_pod_deleted_accepts_404_or_terminated(tmp_path: Path) -> None:
+    _fake_curl(tmp_path, "404", '{"error":"not found"}')
+    missing = _run(
+        ["bash", "-c", f"source {LIB} && cc_pod_deleted pod-abc"],
+        env={"RUNPOD_API_KEY": "ok-key"},
+        bin_dir=tmp_path,
+    )
+    assert missing.returncode == 0, missing.stderr
+    assert "missing" in missing.stdout
+    _fake_curl(tmp_path, "200", '{"id":"pod-abc","desiredStatus":"TERMINATED"}')
+    gone = _run(
+        ["bash", "-c", f"source {LIB} && cc_pod_deleted pod-abc"],
+        env={"RUNPOD_API_KEY": "ok-key"},
+        bin_dir=tmp_path,
+    )
+    assert gone.returncode == 0, gone.stderr
+    assert "TERMINATED" in gone.stdout
+
+
+def test_run_job_fails_fast_without_repo_token(tmp_path: Path) -> None:
+    result = _run(
+        [str(RUN_JOB)],
+        env={
+            "CC_VOLUME_DIR": str(tmp_path),
+            "CC_JOB": "gpu_tests",
+            "CC_GIT_REF": SHA40,
+            "CC_JOB_ID": "job-notoken",
+            "CC_TTL_S": "60",
+        },
+    )
+    assert result.returncode != 0
+    assert "CC_REPO_TOKEN is empty" in result.stderr
+    log = tmp_path / "runs" / "job-notoken" / "log.txt"
+    status = tmp_path / "runs" / "job-notoken" / "status"
+    assert log.is_file()
+    assert "CC_REPO_TOKEN is empty" in log.read_text(encoding="utf-8")
+    assert status.read_text(encoding="utf-8").strip() == "failed"
+    assert "Clone" not in log.read_text(encoding="utf-8")
+
+
+def test_redact_covers_token_b64_and_header_case(tmp_path: Path) -> None:
+    import base64
+
+    token = "FakeRepoTokenValue"
+    b64 = base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
+    log = tmp_path / "log.txt"
+    result = _run(
+        [
+            "bash",
+            "-c",
+            f"""
+source {LIB}
+export CC_REPO_TOKEN='{token}'
+export CC_RUN_LOG='{log}'
+cc_git_auth_setup
+cc_run_logged bash -c 'printf "stdout {token}\\n"; printf "authorization: basic {b64}\\n" >&2; printf "AUTHORIZATION: BASIC {b64}\\n"'
+""",
+        ]
+    )
+    assert result.returncode == 0, result.stderr
+    combined = result.stdout + result.stderr + log.read_text(encoding="utf-8")
+    assert token not in combined
+    assert b64 not in combined
+    assert "authorization: basic REDACTED" in combined.lower()
+
+
+def test_git_sanitize_unsets_trace_and_sets_prompt(tmp_path: Path) -> None:
+    git = tmp_path / "git"
+    seen = tmp_path / "env.txt"
+    git.write_text(
+        f"""#!/usr/bin/env bash
+env | grep -E 'GIT_TRACE|GIT_CURL_VERBOSE|GIT_TERMINAL_PROMPT' > "{seen}" || true
+exit 0
+""",
+        encoding="utf-8",
+    )
+    git.chmod(0o755)
+    result = _run(
+        [
+            "bash",
+            "-c",
+            f"source {LIB} && cc_run_logged git status",
+        ],
+        env={
+            "GIT_TRACE": "1",
+            "GIT_TRACE_CURL": "1",
+            "GIT_CURL_VERBOSE": "1",
+            "GIT_TRACE_PACKET": "1",
+            "GIT_TRACE_REDACT": "0",
+        },
+        bin_dir=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    env_text = seen.read_text(encoding="utf-8")
+    assert "GIT_TERMINAL_PROMPT=0" in env_text
+    assert "GIT_TRACE_REDACT=1" in env_text
+    assert "GIT_TRACE=" not in env_text.replace("GIT_TRACE_REDACT=1", "")
+    assert "GIT_CURL_VERBOSE" not in env_text
+
+
+def test_allowed_cuda_rejects_invalid_json() -> None:
+    result = _run(
+        [str(POD_UP), "--job", "gpu_tests", "--ref", SHA40, "--dry-run"],
+        env={"CC_ALLOWED_CUDA": "[13.1"},
+    )
+    assert result.returncode != 0
+    assert "CC_ALLOWED_CUDA" in result.stderr
+    assert "CC_TTL_S" not in result.stderr or "missing CC_TTL_S" not in result.stderr
+
+
+def test_allowed_cuda_rejects_out_of_enum() -> None:
+    result = _run(
+        [str(POD_UP), "--job", "gpu_tests", "--ref", SHA40, "--dry-run"],
+        env={"CC_ALLOWED_CUDA": "13.1,13.2"},
+    )
+    assert result.returncode != 0
+    assert "CC_ALLOWED_CUDA" in result.stderr
+
+
+def test_entrypoint_sleeps_in_background() -> None:
+    text = ENTRYPOINT.read_text(encoding="utf-8")
+    assert "sleep 3600 &" in text
+    assert "wait $!" in text
 
 
 def test_gpu_scripts_pass_shellcheck() -> None:

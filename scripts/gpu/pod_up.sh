@@ -149,7 +149,10 @@ cc_verify_registry_auth
 RESPONSE="$(cc_rest POST /pods "$PAYLOAD")"
 POD_ID="$(jq -r '.id // .podId // empty' <<<"$RESPONSE")"
 if [[ -z "$POD_ID" || "$POD_ID" == "null" ]]; then
-  echo "$RESPONSE" >&2
+  tmp_err="$(mktemp)"
+  printf '%s\n' "$RESPONSE" >"$tmp_err"
+  cc_print_api_error "$tmp_err"
+  rm -f "$tmp_err"
   cc_fail "Runpod did not return a pod id."
 fi
 echo "pod_id=${POD_ID}"

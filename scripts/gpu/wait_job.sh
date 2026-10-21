@@ -117,7 +117,12 @@ aws_cp_status() {
 }
 
 aws_cp_metrics() {
-  cc_s3_cp_stdout "s3://${VOLUME}/runs/${JOB_ID}/metrics.json" "$REGION" "$ENDPOINT" || true
+  local raw
+  if raw="$(cc_s3_cp_stdout "s3://${VOLUME}/runs/${JOB_ID}/metrics.json" "$REGION" "$ENDPOINT")"; then
+    printf 'metrics=%s\n' "$raw"
+    return 0
+  fi
+  return 1
 }
 
 pod_gone() {
@@ -146,11 +151,11 @@ while (( SECONDS < deadline )); do
     echo "status=${status}"
     case "$status" in
       passed)
-        aws_cp_metrics >/dev/null
+        aws_cp_metrics || true
         finish_wait 0
         ;;
       failed)
-        aws_cp_metrics >/dev/null
+        aws_cp_metrics || true
         finish_wait 1
         ;;
       running|"") ;;

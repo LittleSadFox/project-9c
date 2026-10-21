@@ -41,6 +41,22 @@ Copy this block for a new entry.
 - Fix: Set `CC_REQUIRE` only in the subprocess `env`. Add a test that proves the parent process is unchanged.
 - Prevention: Do not assign required markers on `os.environ` in job helpers.
 
+### 2026-10-21 — allowedCudaVersions returned HTTP 500
+
+- Symptom: Live `pod_up` failed with HTTP 500 `no instances available` on every listed GPU type. Stock still showed those types.
+- Where it failed: pod create / Runpod REST
+- Cause: The create payload sent `allowedCudaVersions`. The live API treated that filter as empty stock.
+- Fix: Omit `allowedCudaVersions` by default. Set `CC_ALLOWED_CUDA` only when you opt in. The image CUDA driver guard (>=12.8, fail closed) is the real floor.
+- Prevention: Do not send `allowedCudaVersions` unless the live API accepts the list and stock still matches.
+
+### 2026-10-21 — first live gpu_tests clone failed
+
+- Symptom: The first live `gpu_tests` pod at `bd99ed3` reached `Clone LittleSadFox/project-9c at bd99ed3`, wrote `status=failed`, and self-terminated in about 40s. The pod console was deleted with the pod, so the git error was not captured.
+- Where it failed: pod
+- Cause: The suspected cause was a bad `cc_repo_token` secret value. That value was hand-pasted. On 2026-10-21 the Runpod bot re-set the secret in place from a verified token. That token passed `ls-remote` and a shallow fetch.
+- Fix: `run_job.sh` now fails fast when `CC_REPO_TOKEN` is empty, sets `GIT_TERMINAL_PROMPT=0`, and writes redacted git stderr to `runs/<id>/log.txt`.
+- Prevention: Do not hand-paste the repo token. Confirm the secret with `ls-remote` before the next live pod.
+
 ### 2026-10-21 — Shared SSH host keys in the GPU image
 
 - Symptom: Every pod would have used the same SSH host private keys.

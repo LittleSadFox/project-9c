@@ -96,11 +96,10 @@ cc_require_ttl
 [[ -n "${CC_JOB_ID:-}" ]] || cc_fail "CC_JOB_ID is required."
 RUN_DIR="${VOLUME}/runs/${CC_JOB_ID}"
 
-if [[ "${CC_REPO_TOKEN:-}" == *"{{"* ]]; then
-  cc_fail "CC_REPO_TOKEN was not resolved. The Runpod secret cc_repo_token is missing."
-fi
-
 mkdir -p "$RUN_DIR/artifacts" "$VOLUME/models" "$VOLUME/cache/pip" "$SCRATCH"
+export GIT_TERMINAL_PROMPT=0
+export GIT_TRACE_REDACT=1
+cc_git_sanitize_env
 if [[ -f "$RUN_DIR/status" ]]; then
   existing="$(tr -d '[:space:]' <"$RUN_DIR/status")"
   case "$existing" in
@@ -126,6 +125,16 @@ export CC_RUN_LOG="${RUN_DIR}/log.txt"
   echo "git_ref=${CC_GIT_REF}"
   echo "ttl_s=${CC_TTL_S}"
 } | tee -a "$RUN_DIR/log.txt"
+
+if [[ -z "${CC_REPO_TOKEN:-}" || "${CC_REPO_TOKEN}" == *"{{"* ]]; then
+  echo "ERROR: CC_REPO_TOKEN is empty. The Runpod secret cc_repo_token is missing or blank." | tee -a "$RUN_DIR/log.txt" >&2
+  write_status failed
+  if [[ ! -f "$RUN_DIR/metrics.json" ]]; then
+    jq -n --arg job "${CC_JOB:-unknown}" --arg err "CC_REPO_TOKEN is empty" \
+      '{job: $job, status: "failed", error: $err}' >"$RUN_DIR/metrics.json"
+  fi
+  cc_fail "CC_REPO_TOKEN is empty. The Runpod secret cc_repo_token is missing or blank."
+fi
 
 if [[ "${CC_RUN_JOB_READY:-}" != "1" ]]; then
   echo "Clone LittleSadFox/project-9c at ${CC_GIT_REF}" | tee -a "$RUN_DIR/log.txt"
@@ -158,15 +167,13 @@ else
 fi
 
 echo "Install pins from cache" | tee -a "$RUN_DIR/log.txt"
-cc_run_logged "$PY" -m pip install --cache-dir "$VOLUME/cache/pip" -r "$SRC/backend/requirements-gpu.txt"
-cc_run_logged "$PY" -m pip install --cache-dir "$VOLUME/cache/pip" -r "$SRC/backend/requirements-dev.txt"
-cc_run_logged "$PY" -m pip install --cache-dir "$VOLUME/cache/pip" --no-deps -r "$SRC/backend/requirements-nodeps.txt"
+cc_run_logged --wait "$PY" -m pip install --cache-dir "$VOLUME/cache/pip" -r "$SRC/backend/requirements-gpu.txt"
+cc_run_logged --wait "$PY" -m pip install --cache-dir "$VOLUME/cache/pip" -r "$SRC/backend/requirements-dev.txt"
+cc_run_logged --wait "$PY" -m pip install --cache-dir "$VOLUME/cache/pip" --no-deps -r "$SRC/backend/requirements-nodeps.txt"
 
 echo "Run ml.jobs ${CC_JOB}" | tee -a "$RUN_DIR/log.txt"
-set +e
-"$PY" -m ml.jobs "$CC_JOB" --run-dir "$RUN_DIR" 2>&1 | tee -a "$RUN_DIR/log.txt"
-ec=${PIPESTATUS[0]}
-set -e
+cc_run_logged --wait "$PY" -m ml.jobs "$CC_JOB" --run-dir "$RUN_DIR"
+ec=$?
 
 if [[ "$ec" -eq 0 ]]; then
   STATUS="passed"
