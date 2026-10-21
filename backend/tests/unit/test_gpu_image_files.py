@@ -89,7 +89,8 @@ def test_dockerfile_uses_ci_shellcheck_pin() -> None:
     assert sha in docker
     assert url in ci
     assert sha in ci
-    assert "apt-get install" not in docker or "shellcheck" not in docker.split("apt-get install")[1].split("&&")[0]
+    apt_pkgs = docker.split("apt-get install", 1)[-1].split("&&", 1)[0]
+    assert "shellcheck" not in apt_pkgs
     assert "sudo apt-get install -y -qq shellcheck" not in ci
     assert "shellcheck-v0.11.0/shellcheck" in docker
     assert "0.11.0" in docker
