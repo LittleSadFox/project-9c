@@ -1783,7 +1783,7 @@ def test_ghcr_manifest_head_auth_accept_and_status_messages(tmp_path: Path) -> N
         assert github_token not in combined
         assert gh_token not in combined
         cfg = cfg_copy.read_text(encoding="utf-8")
-        assert 'header = "Authorization: Bearer %s"' % encoded in cfg
+        assert f'header = "Authorization: Bearer {encoded}"' in cfg
         assert "application/vnd.oci.image.index.v1+json" in cfg
         assert "application/vnd.docker.distribution.manifest.list.v2+json" in cfg
         assert "application/vnd.oci.image.manifest.v1+json" in cfg
@@ -1801,12 +1801,19 @@ def test_ghcr_manifest_head_auth_accept_and_status_messages(tmp_path: Path) -> N
     assert token_at < head_fn.index("GITHUB_TOKEN")
     assert head_fn.index("GITHUB_TOKEN") < head_fn.index("GH_TOKEN")
     _ghcr_head_stub(tmp_path, status="404", hits=hits, cfg_copy=cfg_copy)
+    docker = tmp_path / "docker"
+    docker.write_text("#!/usr/bin/env bash\nexit 127\n", encoding="utf-8")
+    docker.chmod(0o755)
     verify = _run(
         [
             "bash",
             "-c",
             f"source {LIB}; "
             f'export PATH="{tmp_path}:/usr/bin:/bin"; '
+            "command() { "
+            'if [ "$1" = "-v" ] && [ "$2" = "docker" ]; then return 1; fi; '
+            'builtin command "$@"; '
+            "}; "
             f'export CC_GPU_IMAGE="{image}"; '
             "cc_verify_gpu_image_exists",
         ],
