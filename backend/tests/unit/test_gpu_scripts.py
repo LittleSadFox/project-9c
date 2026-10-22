@@ -299,6 +299,36 @@ def _run_job_webhook(tmp_path: Path, job_id: str) -> subprocess.CompletedProcess
     )
 
 
+def _watchdog_errexit(
+    tmp_path: Path,
+    run_dir: Path,
+    *,
+    pod: str,
+    unset_log: bool = True,
+    extra: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    unset_cmd = "unset CC_RUN_LOG; " if unset_log else ""
+    env = {
+        "RUNPOD_POD_ID": pod,
+        "RUNPOD_API_KEY": "ok-key",
+        "CC_VOLUME_DIR": str(tmp_path / "vol"),
+        "CC_TTL_S": "1",
+    }
+    if extra:
+        env.update(extra)
+    return _run(
+        [
+            "bash",
+            "-c",
+            f"set -euo pipefail; source {LIB}; unset CC_JOB_ID; "
+            f"{unset_cmd}cc_watchdog_start {run_dir}; sleep 2",
+        ],
+        env=env,
+        bin_dir=tmp_path,
+        timeout=5,
+    )
+
+
 def _run_dir_text(run_dir: Path) -> str:
     chunks: list[str] = []
     if not run_dir.exists():
@@ -2209,7 +2239,7 @@ def test_unwritable_run_log_still_terminates(tmp_path: Path) -> None:
         [
             "bash",
             "-c",
-            f"set -euo pipefail; source {LIB} && cc_terminate_self",
+            f"set -euo pipefail; source {LIB}; cc_terminate_self",
         ],
         env={
             "RUNPOD_POD_ID": "pod-ro-log",
@@ -2229,25 +2259,76 @@ def test_unwritable_watchdog_run_dir_still_terminates(tmp_path: Path) -> None:
     _fake_curl(tmp_path, "200", '{"id":"pod-ro-wd"}')
     blocked = tmp_path / "not-a-dir"
     blocked.write_text("file\n", encoding="utf-8")
-    result = _run(
-        [
-            "bash",
-            "-c",
-            f"set -euo pipefail; source {LIB} && unset CC_JOB_ID && "
-            f"unset CC_RUN_LOG && cc_watchdog_start {blocked} && sleep 2",
-        ],
-        env={
-            "RUNPOD_POD_ID": "pod-ro-wd",
-            "RUNPOD_API_KEY": "ok-key",
-            "CC_VOLUME_DIR": str(tmp_path / "vol"),
-            "CC_TTL_S": "1",
-        },
-        bin_dir=tmp_path,
-        timeout=5,
-    )
+    result = _watchdog_errexit(tmp_path, blocked, pod="pod-ro-wd")
     assert result.returncode == 0, result.stderr
     assert _stamp_path("pod-ro-wd").is_file()
     assert not Path("/tmp/.cc_terminated.pod-ro-wd").exists()
+    assert "TTL 1s expired" in result.stdout
+    assert "terminate ok" in result.stdout
+
+
+def test_unwritable_watchdog_run_log_still_terminates(tmp_path: Path) -> None:
+    _fake_curl(tmp_path, "200", '{"id":"pod-ro-wd-log"}')
+    run_dir = tmp_path / "vol" / "runs" / "job-ro-wd-log"
+    run_dir.mkdir(parents=True)
+    started = str(int(time.time()) - 120)
+    (run_dir / "started_at").write_text(f"{started}\n", encoding="utf-8")
+    log = tmp_path / "log-as-dir"
+    log.mkdir()
+    result = _watchdog_errexit(
+        tmp_path,
+        run_dir,
+        pod="pod-ro-wd-log",
+        unset_log=False,
+        extra={"CC_RUN_LOG": str(log)},
+    )
+    assert result.returncode == 0, result.stderr
+    assert _stamp_path("pod-ro-wd-log").is_file()
+    assert not Path("/tmp/.cc_terminated.pod-ro-wd-log").exists()
+    assert "TTL 1s expired" in result.stdout
+    assert "terminate ok" in result.stdout
+
+
+def test_unreadable_started_at_still_terminates(tmp_path: Path) -> None:
+    _fake_curl(tmp_path, "200", '{"id":"pod-wd-unread"}')
+    run_dir = tmp_path / "vol" / "runs" / "job-wd-unread"
+    run_dir.mkdir(parents=True)
+    (run_dir / "started_at").mkdir()
+    result = _watchdog_errexit(tmp_path, run_dir, pod="pod-wd-unread")
+    assert result.returncode == 0, result.stderr
+    assert _stamp_path("pod-wd-unread").is_file()
+    assert not Path("/tmp/.cc_terminated.pod-wd-unread").exists()
+    assert "TTL 1s expired" in result.stdout
+    assert "terminate ok" in result.stdout
+
+
+def test_non_numeric_started_at_still_terminates(tmp_path: Path) -> None:
+    _fake_curl(tmp_path, "200", '{"id":"pod-wd-abc"}')
+    run_dir = tmp_path / "vol" / "runs" / "job-wd-abc"
+    run_dir.mkdir(parents=True)
+    marker = tmp_path / "pwned"
+    (run_dir / "started_at").write_text(
+        f"a[$(touch {marker})]\n",
+        encoding="utf-8",
+    )
+    result = _watchdog_errexit(tmp_path, run_dir, pod="pod-wd-abc")
+    assert result.returncode == 0, result.stderr
+    assert not marker.exists()
+    assert _stamp_path("pod-wd-abc").is_file()
+    assert not Path("/tmp/.cc_terminated.pod-wd-abc").exists()
+    assert "TTL 1s expired" in result.stdout
+    assert "terminate ok" in result.stdout
+
+
+def test_future_started_at_still_terminates(tmp_path: Path) -> None:
+    _fake_curl(tmp_path, "200", '{"id":"pod-wd-future"}')
+    run_dir = tmp_path / "vol" / "runs" / "job-wd-future"
+    run_dir.mkdir(parents=True)
+    (run_dir / "started_at").write_text("9999999999\n", encoding="utf-8")
+    result = _watchdog_errexit(tmp_path, run_dir, pod="pod-wd-future")
+    assert result.returncode == 0, result.stderr
+    assert _stamp_path("pod-wd-future").is_file()
+    assert not Path("/tmp/.cc_terminated.pod-wd-future").exists()
     assert "TTL 1s expired" in result.stdout
     assert "terminate ok" in result.stdout
 

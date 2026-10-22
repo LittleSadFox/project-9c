@@ -245,4 +245,6 @@ See `TROUBLESHOOTING_LOG.md`.
 An unwritable job log or run dir must not skip `cc_terminate_self`.
 `cc_log` now ignores a failed `tee -a` under `pipefail`.
 The watchdog treats `mkdir`, `started_at`, and the TTL `printf` as best effort.
+A bad `started_at` read must not kill the watchdog.
+Only a short digit timestamp enters arithmetic.
 A 401 webhook ping still reaches terminate.
