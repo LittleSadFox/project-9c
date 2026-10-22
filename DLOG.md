@@ -539,6 +539,8 @@ It does not swap `ort.InferenceSession`.
 It writes those values under `cuda_provider_options`.
 `tf32_off_confirmed` is true only when both sessions report `"0"`.
 A mismatch writes a WARNING line. It does not change the parity gate.
+`pose_bench` fails a mode when det or pose `get_providers()[0]` is not
+`CUDAExecutionProvider`. That stops a silent CPU fallback from passing parity.
 
 The plain command is unchanged:
 

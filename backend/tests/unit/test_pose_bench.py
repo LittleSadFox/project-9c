@@ -127,6 +127,45 @@ def test_pose_bench_flags_tf32_mismatch(
     )
 
 
+def test_pose_bench_fails_when_cuda_session_falls_back_to_cpu(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class LiveSession:
+        def __init__(self, provider: str) -> None:
+            self.provider = provider
+
+        def get_providers(self) -> list[str]:
+            return [self.provider]
+
+        def get_provider_options(self) -> dict[str, dict[str, str]]:
+            if self.provider == "CUDAExecutionProvider":
+                return {"CUDAExecutionProvider": {"use_tf32": "0"}}
+            return {}
+
+    class FallbackFixture(FixtureEstimator):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+            self._det = _SessionHolder(LiveSession("CUDAExecutionProvider"))
+            self._pose = _SessionHolder(LiveSession("CPUExecutionProvider"))
+
+    monkeypatch.setattr("app.pose.estimator.FixtureEstimator", FallbackFixture)
+    monkeypatch.setenv("CC_POSE_BACKEND", "fixture")
+    monkeypatch.delenv("CC_REQUIRE", raising=False)
+    monkeypatch.setenv("CC_DEVICE", "cpu")
+    run_dir = tmp_path / "run"
+    with pytest.raises(JobError):
+        pose_bench(run_dir, n_frames=2, require_cuda=False, modes=["balanced"])
+    saved = json.loads((run_dir / "metrics.json").read_text(encoding="utf-8"))
+    cuda = saved["modes"]["balanced"]["cuda"]
+    assert saved["status"] == "failed"
+    assert cuda["cuda_ep_ok"] is False
+    assert cuda["session_providers"]["det"] == "CUDAExecutionProvider"
+    assert cuda["session_providers"]["pose"] == "CPUExecutionProvider"
+    assert cuda["tf32_off_confirmed"] is False
+    log = (run_dir / "log.txt").read_text(encoding="utf-8")
+    assert "cuda_ep_ok=false det=CUDAExecutionProvider pose=CPUExecutionProvider" in log
+
+
 def test_read_estimator_tf32_mismatch() -> None:
     from app.pose.estimator import read_estimator_tf32
 

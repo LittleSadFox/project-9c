@@ -801,11 +801,9 @@ def pose_bench(
         MODE_FILES,
         FixtureEstimator,
         RtmlibEstimator,
+        read_estimator_session_providers,
         read_estimator_tf32,
         resolve_device,
-    )
-    from app.pose.estimator import (
-        cuda_providers as shared_cuda_providers,
     )
 
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -855,11 +853,8 @@ def pose_bench(
                 raise JobError(str(exc)) from exc
             cuda_est = None
             if have_cuda:
-                providers = shared_cuda_providers()
                 cuda_est = RtmlibEstimator(models_dir=models_dir, device="cuda", mode=mode)
                 cuda_est._ensure()
-                if cuda_est.session_providers() != providers:
-                    raise JobError("pose_bench CUDA providers do not match cuda_providers().")
 
         cpu_kpts, cpu_boxes, cpu_scores, cpu_fps = _run_estimator(cpu_est, frames)
         mode_metrics: dict[str, Any] = {
@@ -889,6 +884,7 @@ def pose_bench(
             mean_abs = parity["mean_abs_px"]
             conf_mean = parity.get("mean_abs_px_confident")
             tf32 = read_estimator_tf32(cuda_est)
+            live = read_estimator_session_providers(cuda_est)
             mode_metrics["cuda"] = {
                 "fps": round(cuda_fps, 3),
                 "provider": getattr(cuda_est, "provider", "CUDAExecutionProvider"),
@@ -909,6 +905,8 @@ def pose_bench(
                     "pose": tf32["pose"],
                 },
                 "tf32_off_confirmed": tf32["tf32_off_confirmed"],
+                "session_providers": {"det": live["det"], "pose": live["pose"]},
+                "cuda_ep_ok": live["cuda_ep_ok"],
             }
         elif have_cuda:
             mode_metrics["cuda"] = {"error": "CUDA estimator failed to start", "parity_ok": False}
@@ -921,11 +919,15 @@ def pose_bench(
         and item["cuda"].get("parity_ok") is False
         for item in modes_out.values()
     )
+    cuda_ep_fail = any(
+        isinstance(item.get("cuda"), dict) and item["cuda"].get("cuda_ep_ok") is False
+        for item in modes_out.values()
+    )
     cuda_ran = any(isinstance(item.get("cuda"), dict) and "fps" in item["cuda"] for item in modes_out.values())
     status = "passed"
     if require_cuda and (not have_cuda or not cuda_ran):
         status = "failed"
-    if parity_fail:
+    if parity_fail or cuda_ep_fail:
         status = "failed"
 
     first_cuda: dict[str, Any] = next(
@@ -978,6 +980,12 @@ def pose_bench(
                 log.write(
                     f"WARNING: pose_bench mode={name} tf32_off_confirmed=false "
                     f"det_use_tf32={det_tf32} pose_use_tf32={pose_tf32}\n"
+                )
+            if cuda_block.get("cuda_ep_ok") is False:
+                live_prov = cuda_block.get("session_providers") or {}
+                log.write(
+                    f"pose_bench mode={name} cuda_ep_ok=false "
+                    f"det={live_prov.get('det')} pose={live_prov.get('pose')}\n"
                 )
     if status != "passed":
         raise JobError("pose_bench failed CUDA/CPU parity or CUDA was required and missing.")

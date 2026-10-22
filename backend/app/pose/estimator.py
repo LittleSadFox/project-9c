@@ -276,6 +276,40 @@ def read_estimator_tf32(estimator: Any) -> dict[str, Any]:
     }
 
 
+def session_first_provider(session: Any) -> str | None:
+    """Return session.get_providers()[0], or None when it is missing."""
+    if session is None:
+        return None
+    getter = getattr(session, "get_providers", None)
+    if not callable(getter):
+        return None
+    try:
+        used = list(getter())
+    except (AttributeError, TypeError, RuntimeError):
+        return None
+    if not used:
+        return None
+    return str(used[0])
+
+
+def read_estimator_session_providers(estimator: Any) -> dict[str, Any]:
+    """Read the first live provider on the det and pose sessions."""
+    det = getattr(estimator, "_det", None)
+    pose = getattr(estimator, "_pose", None)
+    det_prov = session_first_provider(getattr(det, "session", None))
+    pose_prov = session_first_provider(getattr(pose, "session", None))
+    checked = det_prov is not None or pose_prov is not None
+    ok = (
+        det_prov == "CUDAExecutionProvider" and pose_prov == "CUDAExecutionProvider"
+    )
+    return {
+        "det": det_prov,
+        "pose": pose_prov,
+        "checked": checked,
+        "cuda_ep_ok": ok if checked else None,
+    }
+
+
 def replace_cuda_session(tool: Any, onnx_path: Path, *, device_id: int = 0) -> Any:
     """Replace a rtmlib tool session with one built from cuda_providers()."""
     import onnxruntime as ort
