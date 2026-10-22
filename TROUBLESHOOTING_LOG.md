@@ -161,6 +161,14 @@ Copy this block for a new entry.
 - Fix: Run `cc_curl_post_json` as a subshell with its own EXIT `rm`. Derive a git-sha tag from `CC_GIT_REF`. Refuse `:latest` unless `CC_GPU_IMAGE_ALLOW_LATEST=1`. Check the GHCR manifest before `POST /pods`. Fail closed when the check cannot run.
 - Prevention: Do not put secrets on curl argv. Do not start a pod from `:latest` without an explicit override. Do not create a pod for a missing image tag.
 
+### 2026-10-22 — timeout fallback group-kill
+
+- Symptom: `kill -- -$pid` in the `cc_run_timeout` fallback could fail on macOS, or it could kill `run_job` or the watchdog.
+- Where it failed: review
+- Cause: Non-interactive bash does not put `cmd &` in a new process group. macOS has no `setsid`.
+- Fix: Start the child with `perl setpgrp` or `set -m`. Read both pgids. Group-kill only when they differ. Kill only the child pid when they match.
+- Prevention: Test that a grandchild `sleep` dies and the parent still logs after the timeout.
+
 ### 2026-10-21 — Shared SSH host keys in the GPU image
 
 - Symptom: Every pod would have used the same SSH host private keys.

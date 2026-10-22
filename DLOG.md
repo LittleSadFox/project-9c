@@ -337,4 +337,10 @@ The Starlette TestClient warning is filtered by message in `pytest.ini`.
 A move to `httpx2` would need a new pin, so it is skipped.
 The Playwright smoke test stubs `/health` and `/api/jobs`.
 
+The `cc_run_timeout` fallback starts the child in a new process group.
+It uses `perl setpgrp` or `set -m`.
+It group-kills only when the child pgid differs from this shell.
+It never kills the caller group.
+A test times out a grandchild `sleep` and checks the parent still logs.
+
 See `TROUBLESHOOTING_LOG.md`.

@@ -4157,6 +4157,74 @@ def test_run_job_nvidia_smi_timeout_logs_unknown(tmp_path: Path) -> None:
     assert "CC_NVIDIA_SMI_TIMEOUT_S" in header
 
 
+def test_run_timeout_fallback_guards_caller_process_group() -> None:
+    text = LIB.read_text(encoding="utf-8")
+    fn = text.split("cc_run_timeout()")[1].split("cc_s3_uri_parts()")[0]
+    assert "setpgrp" in fn
+    assert "set -m" in fn
+    assert "child_pgid" in fn
+    assert "caller_pgid" in fn
+    assert 'child_pgid" != "$caller_pgid"' in fn
+    assert 'child_pgid" != "$caller_pid"' in fn
+    assert "Never kill the caller group" in fn
+    assert "CC_TIMEOUT_FALLBACK" in fn
+    assert 'kill -KILL -- "-$child_pgid"' in fn
+    assert 'kill -- "-$pid"' not in fn
+    assert "kill -- -$" not in fn
+
+
+def test_run_timeout_fallback_kills_sleep_and_keeps_parent(tmp_path: Path) -> None:
+    unique = f"cc-timeout-sleep-{os.getpid()}-{time.time_ns()}"
+    after = tmp_path / "after.log"
+    pidfile = tmp_path / "sleep.pid"
+    sleeper = tmp_path / unique
+    sleeper.write_text(
+        f"""#!/usr/bin/env bash
+printf '%s\\n' "$$" > "{pidfile}"
+exec sleep 30
+""",
+        encoding="utf-8",
+    )
+    sleeper.chmod(0o755)
+    result = _run(
+        [
+            "bash",
+            "-c",
+            f"""
+set -euo pipefail
+source {LIB}
+export CC_TIMEOUT_FALLBACK=1
+ec=0
+cc_run_timeout 1 bash -c {sleeper.as_posix()!r} || ec=$?
+printf 'parent_still_alive after_timeout ec=%s\\n' "$ec" >> {str(after)!r}
+printf 'parent_still_alive after_timeout ec=%s\\n' "$ec"
+""",
+        ],
+        timeout=8,
+    )
+    assert result.returncode == 0, result.stderr
+    logged = after.read_text(encoding="utf-8")
+    assert "parent_still_alive after_timeout" in logged
+    assert "ec=124" in logged
+    assert "parent_still_alive after_timeout" in result.stdout
+    assert pidfile.is_file(), result.stdout + result.stderr
+    sleep_pid = int(pidfile.read_text(encoding="utf-8").strip())
+    assert sleep_pid > 1
+    assert _pid_is_dead(sleep_pid)
+    leftover = subprocess.run(
+        ["pgrep", "-af", unique],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    leftovers = [
+        line
+        for line in leftover.stdout.splitlines()
+        if unique in line and "pgrep" not in line
+    ]
+    assert leftovers == [], leftovers
+
+
 def test_curl_config_removed_on_failure_and_stays_0600(tmp_path: Path) -> None:
     hits = tmp_path / "webhook.log"
     tmpdir = tmp_path / "curl-tmp"

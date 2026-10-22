@@ -1024,6 +1024,11 @@ cc_run_logged() {
   return "$ec"
 }
 
+cc_proc_pgid() {
+  local pid="$1"
+  ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]' || true
+}
+
 cc_run_timeout() {
   local secs="$1"
   shift
@@ -1031,20 +1036,42 @@ cc_run_timeout() {
     echo "ERROR: timeout seconds must be a positive integer." >&2
     return 2
   fi
-  if command -v timeout >/dev/null 2>&1; then
+  if [[ "${CC_TIMEOUT_FALLBACK:-0}" != "1" ]] && command -v timeout >/dev/null 2>&1; then
     timeout --signal=KILL "$secs" "$@"
     return $?
   fi
-  if command -v gtimeout >/dev/null 2>&1; then
+  if [[ "${CC_TIMEOUT_FALLBACK:-0}" != "1" ]] && command -v gtimeout >/dev/null 2>&1; then
     gtimeout --signal=KILL "$secs" "$@"
     return $?
   fi
-  "$@" &
-  local pid=$!
-  local waited=0
+  # Non-interactive bash does not give `cmd &` its own process group.
+  # macOS has no setsid. Start the child in a new group first.
+  # Group-kill only when that group is not this shell's group.
+  local pid waited=0 child_pgid caller_pgid caller_pid=$$
+  caller_pgid="$(cc_proc_pgid "$caller_pid")"
+  if command -v perl >/dev/null 2>&1; then
+    perl -e 'setpgrp; exec @ARGV' -- "$@" &
+    pid=$!
+  elif set -m; then
+    "$@" &
+    pid=$!
+    set +m
+  else
+    "$@" &
+    pid=$!
+  fi
   while kill -0 "$pid" 2>/dev/null; do
     if (( waited >= secs )); then
-      kill -KILL "$pid" 2>/dev/null || true
+      child_pgid="$(cc_proc_pgid "$pid")"
+      if [[ "$child_pgid" =~ ^[1-9][0-9]*$ ]] \
+        && [[ "$caller_pgid" =~ ^[1-9][0-9]*$ ]] \
+        && [[ "$child_pgid" != "$caller_pgid" ]] \
+        && [[ "$child_pgid" != "$caller_pid" ]]; then
+        kill -KILL -- "-$child_pgid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+      else
+        # Child shares this shell's group. Never kill the caller group.
+        kill -KILL "$pid" 2>/dev/null || true
+      fi
       wait "$pid" 2>/dev/null || true
       return 124
     fi
