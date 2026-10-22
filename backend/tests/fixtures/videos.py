@@ -81,29 +81,57 @@ def write_frame_code_video(
     return dest
 
 
-def write_rotated_video(dest: Path, width: int = 640, height: int = 360, frames: int = 30) -> Path:
+def write_corner_rotated_video(
+    dest: Path,
+    *,
+    rotation: int,
+    width: int = 320,
+    height: int = 180,
+    frames: int = 8,
+) -> Path:
+    """Write a landscape clip with a red block in the stored top-left corner.
+
+    Remux with -display_rotation so ffprobe sees the display matrix.
+    """
     dest.parent.mkdir(parents=True, exist_ok=True)
+    image = np.full((height, width, 3), 16, dtype=np.uint8)
+    image[0:40, 0:40] = (255, 0, 0)
     base = dest.with_name(dest.stem + ".base.mp4")
-    subprocess.run(
-        [
-            ffmpeg_bin(),
-            "-y",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            f"testsrc=size={width}x{height}:rate=30:duration={frames / 30}",
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            str(base),
-        ],
-        check=True,
-        timeout=60,
-    )
+    cmd = [
+        ffmpeg_bin(),
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgb24",
+        "-s",
+        f"{width}x{height}",
+        "-r",
+        "15",
+        "-i",
+        "-",
+        "-frames:v",
+        str(frames),
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        str(base),
+    ]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+    assert proc.stdin is not None
+    try:
+        blob = image.tobytes()
+        for _ in range(frames):
+            proc.stdin.write(blob)
+    finally:
+        proc.stdin.close()
+        code = proc.wait(timeout=60)
+    if code != 0:
+        raise RuntimeError("corner ffmpeg failed")
     # -display_rotation is an input option. A remux writes the display matrix.
     subprocess.run(
         [
@@ -113,7 +141,7 @@ def write_rotated_video(dest: Path, width: int = 640, height: int = 360, frames:
             "-loglevel",
             "error",
             "-display_rotation",
-            "90",
+            str(rotation),
             "-i",
             str(base),
             "-c",

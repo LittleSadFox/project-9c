@@ -120,8 +120,16 @@ def restore(conn: sqlite3.Connection, attempt_id: str) -> dict[str, Any] | None:
     return get(conn, attempt_id)
 
 
-def restore_for_video(conn: sqlite3.Connection, video_id: str) -> None:
-    conn.execute("UPDATE attempts SET deleted_at = NULL WHERE video_id = ?", (video_id,))
+def restore_for_video(
+    conn: sqlite3.Connection, video_id: str, attempt_ids: list[str]
+) -> None:
+    if not attempt_ids:
+        return
+    marks = ",".join("?" for _ in attempt_ids)
+    conn.execute(
+        f"UPDATE attempts SET deleted_at = NULL WHERE video_id = ? AND id IN ({marks})",
+        [video_id, *attempt_ids],
+    )
     conn.commit()
 
 

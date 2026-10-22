@@ -239,7 +239,7 @@ def restore_trash(conn: sqlite3.Connection, paths: LibraryPaths, trash_id: str) 
     if item is None:
         raise AppError("not_found", 404, "The trash item is not here.")
     payload = json.loads(item["payload"] or "{}")
-    trash_dir = _resolve_trash_dir(paths, item.get("path"), trash_id)
+    trash_dir = _resolve_trash_dir(paths, item.get("path"))
     if item["kind"] == "video":
         row = payload.get("row") or {}
         video_id = str(item["entity_id"])
@@ -252,7 +252,12 @@ def restore_trash(conn: sqlite3.Connection, paths: LibraryPaths, trash_id: str) 
             for clip in clips_dir.iterdir():
                 move_into(clip, paths.clips / clip.name)
         videos_repo.restore(conn, video_id)
-        attempts_repo.restore_for_video(conn, video_id)
+        attempt_ids = [
+            str(entry["id"])
+            for entry in (payload.get("attempts") or [])
+            if isinstance(entry, dict) and entry.get("id")
+        ]
+        attempts_repo.restore_for_video(conn, video_id, attempt_ids)
     elif item["kind"] == "attempt":
         attempt_id = str(item["entity_id"])
         version = int((payload.get("row") or {}).get("clip_version") or 1)
@@ -273,13 +278,12 @@ def restore_trash(conn: sqlite3.Connection, paths: LibraryPaths, trash_id: str) 
 
 def empty_trash(conn: sqlite3.Connection, paths: LibraryPaths) -> None:
     items = trash_repo.list_items(conn)
-    targets: list[tuple[dict[str, Any], Path | None]] = []
+    targets: list[tuple[dict[str, Any], Path]] = []
     for item in items:
-        rel = item.get("path")
-        target = _resolve_trash_dir(paths, rel, str(item["id"])) if rel else None
+        target = _resolve_trash_dir(paths, item.get("path"))
         targets.append((item, target))
     for item, target in targets:
-        if target is not None and target.exists():
+        if target.exists():
             if target.is_dir():
                 shutil.rmtree(target, ignore_errors=True)
             else:
@@ -291,21 +295,28 @@ def empty_trash(conn: sqlite3.Connection, paths: LibraryPaths) -> None:
     trash_repo.delete_all(conn)
 
 
-def _resolve_trash_dir(
-    paths: LibraryPaths, stored: str | None, trash_id: str
-) -> Path:
-    """Resolve a stored trash path and keep it inside trash/."""
-    if not stored:
-        return paths.trash_item_dir(trash_id)
+def _resolve_trash_dir(paths: LibraryPaths, stored: object) -> Path:
+    """Resolve a stored trash path. The result must sit strictly inside trash/."""
+    if stored is None or not str(stored).strip():
+        raise AppError("bad_path", 400, "The path is not allowed.")
     raw = str(stored).strip().replace("\\", "/")
-    if not raw or Path(raw).is_absolute():
+    if Path(raw).is_absolute():
         raise AppError("bad_path", 400, "The path is not allowed.")
     parts = [part for part in Path(raw).parts if part not in {"", "."}]
     if parts and parts[0] == "trash":
         parts = parts[1:]
     if not parts:
         raise AppError("bad_path", 400, "The path is not allowed.")
-    return safe_join(paths.trash, *parts)
+    candidate = safe_join(paths.trash, *parts)
+    trash_root = paths.trash.resolve()
+    resolved = candidate.resolve()
+    if resolved == trash_root:
+        raise AppError("bad_path", 400, "The path is not allowed.")
+    try:
+        resolved.relative_to(trash_root)
+    except ValueError as exc:
+        raise AppError("bad_path", 400, "The path is not allowed.") from exc
+    return candidate
 
 
 def resolve_video_file(

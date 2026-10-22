@@ -12,9 +12,10 @@ from app.media.ffmpeg import FfmpegTool
 from tests.api.helpers import wait_job
 from tests.conftest import api_headers
 from tests.fixtures.videos import (
+    extract_png_frame,
     probe_json,
+    write_corner_rotated_video,
     write_hevc_video,
-    write_rotated_video,
     write_vfr_video,
 )
 
@@ -60,21 +61,65 @@ def test_proxy_is_cfr_and_frame_count(
     assert info["is_vfr"] is False
 
 
-def test_rotation_90_comes_out_upright(
-    media_client: TestClient, tmp_settings: Settings, tmp_path: Path
+@pytest.mark.parametrize(
+    ("rotation", "expected_corner"),
+    [(-90, "TR"), (90, "BL")],
+)
+def test_rotated_proxy_is_upright_and_has_no_rotation_flag(
+    tmp_settings: Settings, tmp_path: Path, rotation: int, expected_corner: str
 ) -> None:
-    src = write_rotated_video(tmp_path / "rot90.mp4")
-    uploaded = _upload(media_client, src, "rot90.mp4")
-    video_id = str(uploaded["video"]["id"])
-    detail = media_client.get(f"/api/videos/{video_id}", headers=api_headers()).json()
-    assert detail["proxy_width"] is not None
-    assert detail["proxy_height"] is not None
-    assert int(detail["proxy_height"]) > int(detail["proxy_width"])
-    proxy = tmp_settings.library_dir / "proxies" / f"{video_id}.mp4"
-    stream = _video_stream(proxy)
-    width = int(stream["width"])
-    height = int(stream["height"])
-    assert height > width
+    src = write_corner_rotated_video(tmp_path / f"rot{rotation}.mp4", rotation=rotation)
+    tool = FfmpegTool(tmp_settings.ffmpeg_bin, tmp_settings.ffprobe_bin)
+    dest = tmp_path / f"proxy{rotation}.mp4"
+    tool.make_proxy(src, dest)
+    info = tool.probe(dest)
+    assert int(info["rotation"] or 0) == 0
+    assert int(info["height"] or 0) > int(info["width"] or 0)
+    stream = _video_stream(dest)
+    assert _stream_rotation(stream) == 0
+    assert int(stream["height"]) > int(stream["width"])
+    png = extract_png_frame(dest, 0, tmp_path / f"proxy{rotation}.png")
+    assert _hot_corner(_read_png(png)) == expected_corner
+
+
+def _stream_rotation(stream: dict[str, object]) -> int:
+    side = stream.get("side_data_list")
+    if isinstance(side, list):
+        for item in side:
+            if isinstance(item, dict) and item.get("rotation") not in (None, "", 0, 0.0):
+                return int(float(item["rotation"]))
+    tags = stream.get("tags")
+    if isinstance(tags, dict) and tags.get("rotate") not in (None, "", "0", 0):
+        return int(float(str(tags["rotate"])))
+    return 0
+
+
+def _hot_corner(image: object) -> str:
+    import numpy as np
+
+    arr = np.asarray(image)
+    height, width = arr.shape[:2]
+    box = max(8, min(height, width) // 16)
+    patches = {
+        "TL": arr[0:box, 0:box],
+        "TR": arr[0:box, width - box : width],
+        "BL": arr[height - box : height, 0:box],
+        "BR": arr[height - box : height, width - box : width],
+    }
+    scores = {
+        name: float(patch.astype("float32").max(axis=2).mean())
+        for name, patch in patches.items()
+    }
+    return max(scores, key=scores.get)
+
+
+def _read_png(path: Path) -> object:
+    import cv2
+    import numpy as np
+
+    image = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    assert image is not None
+    return np.asarray(image)
 
 
 def test_vfr_and_hevc_import(media_client: TestClient, tmp_path: Path) -> None:

@@ -383,3 +383,10 @@ Add Phase 1 slice A: library CRUD, streaming upload, ingest, media endpoints, tr
 `empty_trash` and `restore_trash` resolve the stored path with `safe_join(paths.trash, ...)`.
 A row whose path leaves `trash/` raises `bad_path` and deletes nothing.
 The `media` marker skips when `ffmpeg` or `ffprobe` is missing from PATH.
+
+## 2026-10-22 — p1-A rotation, restore, and trash root
+
+`make_proxy` maps display-matrix -90/270 to `transpose=1` and +90 to `transpose=2`.
+It writes `-display_rotation 0` as an input option so the proxy keeps no rotation metadata.
+A video restore brings back only the attempts stored in that trash payload.
+A stored trash path that resolves to `trash/` itself, or above it, raises `bad_path`.

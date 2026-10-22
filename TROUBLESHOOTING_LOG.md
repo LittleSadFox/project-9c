@@ -41,6 +41,14 @@ Copy this block for a new entry.
 - Fix: Encode a base file. Remux with `-display_rotation 90 -i base -c copy dest`. Probe then sees `rotation=90`. `make_proxy` transposes, then scales.
 - Prevention: Do not put `-display_rotation` after `-i` when you write a file.
 
+### 2026-10-22 — iPhone -90 proxy rotation
+
+- Symptom: A portrait iPhone clip (`rotation=-90`) came out 180° off in the proxy pixels. Players then rotated it again.
+- Where it failed: Coder review of PR #19
+- Cause: `-90` normalized to 270 and used `transpose=2`. `-noautorotate` also copied the display matrix onto the proxy.
+- Fix: Use `transpose=1` for -90/270 and `transpose=2` for +90. Pass `-display_rotation 0` before `-i`. ffmpeg 7.1 ignores `-metadata:s:v rotate=0` for the display matrix.
+- Prevention: Assert a corner marker on -90 and +90 fixtures. Assert ffprobe reports no rotation on the proxy.
+
 
 ### 2026-10-21 — GPU image build ran out of disk
 

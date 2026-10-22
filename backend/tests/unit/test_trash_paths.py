@@ -1,4 +1,4 @@
-"""Trash restore and empty stay inside trash/."""
+"""Trash restore and empty stay strictly inside trash/."""
 
 from __future__ import annotations
 
@@ -14,8 +14,9 @@ from app.services import library
 from app.storage import LibraryPaths
 
 
+@pytest.mark.parametrize("bad_path", ["../x", "a/..", ".", ""])
 def test_escape_trash_path_is_refused_and_nothing_is_deleted(
-    db_conn: sqlite3.Connection, tmp_settings: Settings
+    db_conn: sqlite3.Connection, tmp_settings: Settings, bad_path: str
 ) -> None:
     paths = LibraryPaths(tmp_settings.library_dir)
     paths.ensure()
@@ -42,7 +43,7 @@ def test_escape_trash_path_is_refused_and_nothing_is_deleted(
         kind="video",
         entity_id="vid-escape",
         payload="{}",
-        path="../x",
+        path=bad_path,
     )
 
     with pytest.raises(AppError) as emptied:

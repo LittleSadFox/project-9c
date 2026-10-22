@@ -71,12 +71,9 @@ class FfmpegTool:
         rot_raw = info.get("rotation")
         rotate = int(rot_raw) if isinstance(rot_raw, (int, float)) else 0
         parts: list[str] = []
-        if rotate == 90:
-            parts.append("transpose=1")
-        elif rotate == 270:
-            parts.append("transpose=2")
-        elif rotate == 180:
-            parts.append("hflip,vflip")
+        rot_filter = _rotation_filter(rotate)
+        if rot_filter:
+            parts.append(rot_filter)
         parts.append(
             f"scale='if(gte(iw,ih),{long_side},-2)':'if(gte(iw,ih),-2,{long_side})'"
         )
@@ -88,6 +85,8 @@ class FfmpegTool:
             "-hide_banner",
             "-nostdin",
             "-noautorotate",
+            "-display_rotation",
+            "0",
             "-i",
             str(src),
             "-vf",
@@ -341,6 +340,24 @@ def _norm_rotation(value: float) -> int:
         return deg
     closest = min((0, 90, 180, 270), key=lambda item: min(abs(item - deg), 360 - abs(item - deg)))
     return closest
+
+
+def _rotation_filter(degrees: int) -> str | None:
+    """Stand pixels up from a display-matrix rotation.
+
+    ffprobe reports iPhone portrait as -90, which normalizes to 270.
+    That needs a clockwise 90° transpose. +90 needs counter-clockwise.
+    """
+    deg = degrees % 360
+    if deg < 0:
+        deg += 360
+    if deg == 270:
+        return "transpose=1"
+    if deg == 90:
+        return "transpose=2"
+    if deg == 180:
+        return "hflip,vflip"
+    return None
 
 
 def _recorded_at(fmt: dict[str, object], stream: dict[str, object]) -> str | None:
