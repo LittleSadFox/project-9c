@@ -131,11 +131,13 @@ Do not write example credentials.
 7. Add a container registry credential in Runpod.
    Use a GitHub token with only `read:packages`.
    Pods need this token to pull the private GHCR image.
-8. Create two Runpod secrets.
+8. Create three Runpod secrets.
    The pod template will reference them as `{{ RUNPOD_SECRET_<name> }}`.
    - `cc_repo_token`: a fine-grained GitHub token with read-only access to this repo's contents.
    - `cc_webhook_url`: the Runpod bot's routine webhook.
      Anyone who has the URL can wake the Runpod bot.
+   - `cc_webhook_key`: the bearer token for that webhook.
+     Do not put this value in the repo.
 9. Create one network volume.
    Start at 100 GB.
    A volume can grow.
@@ -149,7 +151,7 @@ Do not write example credentials.
    ONNX Runtime has never been verified on sm_120 on a pod.
 
 The account API key never goes in a pod.
-A pod uses only the pod-scoped key that Runpod injects, plus the two secrets.
+A pod uses only the pod-scoped key that Runpod injects, plus the three secrets.
 
 The runner files are in the tree: `docker/gpu/`, `scripts/gpu/`, `ml/jobs.py`, and `.github/workflows/gpu-image.yml`.
 
@@ -162,7 +164,7 @@ A complete setup does not skip that check.
 The first live `gpu_tests` pod at `bd99ed3` failed at clone, wrote `status=failed`, and self-terminated.
 The second live `gpu_tests` pod at `73be826` used CUDA and then failed after a test deleted `/tmp/climbing-coach`.
 The clone dir is `/tmp/cc-src`. The wipe guard allowlists that basename under `/tmp` or a trusted `$TMPDIR`. `$TMPDIR` under `/tmp/cc-src` is untrusted. The remaining check-to-rm race needs `/tmp` write access on the pod. CI copies the repo to `/tmp/cc-src` and runs the `gpu_tests` pytest selection from there. Tests set `CC_PYTHON` so they do not use `/opt/cc/venv/bin/python`. `CC_PYTHON` is a test hook. A pod uses `/opt/cc/venv/bin/python` unless that file is missing. `run_job.sh` writes `python=<path>` to the job log. `gpu_tests` refuses a nested run when `CC_IN_GPU_TESTS` is set. The nested refuse exits before the cleanup trap and before mkdir. The terminate stamp is `$CC_TERMINATE_STAMP_DIR/.cc_terminated.$RUNPOD_POD_ID`. Tests set that dir under pytest tmp. `pod_up` refuses a job id whose `runs/<id>` folder already exists.
-The fourth live `gpu_tests` pod at `2078682a` used CUDA. Pytest reported 152 passed and 1 failed (`test_gpu_scripts_pass_shellcheck`). CI and the GPU image pin shellcheck 0.11.0. `gpu_tests` writes `ort_providers=... used_cuda=...` to `log.txt` before a CUDA `JobError`. The webhook ping writes `webhook ping ok status=<code> curl_rc=<n>` only for HTTP 2xx. Other results write `webhook ping failed status=<code> curl_rc=<n>`. The log does not store the webhook URL, the token, or curl stderr. `run_job.sh` writes `gpu_name=` from `nvidia-smi`. S3 missing-object checks match only the AWS CLI GetObject or HeadObject phrase.
+The fourth live `gpu_tests` pod at `2078682a` used CUDA. Pytest reported 152 passed and 1 failed (`test_gpu_scripts_pass_shellcheck`). CI and the GPU image pin shellcheck 0.11.0. `gpu_tests` writes `ort_providers=... used_cuda=...` to `log.txt` before a CUDA `JobError`. The webhook ping writes `webhook ping ok status=<code> curl_rc=<n>` only for HTTP 2xx. Other results write `webhook ping failed status=<code> curl_rc=<n>`. The log does not store the webhook URL, the bearer key, or curl stderr. The ping sends `Authorization: Bearer` from `CC_WEBHOOK_KEY` (`{{ RUNPOD_SECRET_cc_webhook_key }}`) through a 0600 curl `--config` file. `run_job.sh` writes `gpu_name=` from `nvidia-smi`. S3 missing-object checks match only the AWS CLI GetObject or HeadObject phrase.
 `allowedCudaVersions` is opt-in via `CC_ALLOWED_CUDA` (unset by default). The image CUDA ≥12.8 guard is the real floor.
 
 Phase 0 needs only a small sample upload.
@@ -234,6 +236,7 @@ Do not invent the values.
 | `CC_JOB_ID` | Run folder name under `/workspace/runs/` |
 | `CC_REPO_TOKEN` | Runpod secret `cc_repo_token`. Do not set this by hand |
 | `CC_WEBHOOK_URL` | Runpod secret `cc_webhook_url`. Do not set this by hand |
+| `CC_WEBHOOK_KEY` | Runpod secret `cc_webhook_key`. Do not set this by hand |
 | `RUNPOD_API_KEY` | Account key on the bot computer only. Never copy it into a pod |
 | `CC_RUNPOD_TEMPLATE_ID` | Pod template id |
 | `CC_RUNPOD_VOLUME_ID` / `CC_VOLUME_ID` | Network volume id |

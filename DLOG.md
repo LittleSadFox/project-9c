@@ -260,3 +260,14 @@ Any other error fails closed.
 The webhook Authorization header is not in this change.
 
 See `TROUBLESHOOTING_LOG.md`.
+
+## 2026-10-22 — p0-runner-fixes-5 webhook Authorization
+
+The live webhook requires a bearer token.
+`pod_up` now sets `CC_WEBHOOK_KEY={{ RUNPOD_SECRET_cc_webhook_key }}`.
+`cc_curl_post_json` writes `Authorization: Bearer` into the 0600 curl `--config` file.
+The key does not go on curl argv.
+The ping log still writes only `status=` and `curl_rc=`.
+The run folder does not store the key.
+
+See `TROUBLESHOOTING_LOG.md`.

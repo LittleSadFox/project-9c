@@ -162,12 +162,14 @@ def test_gpu_tests_drops_webhook_and_pod_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("CC_WEBHOOK_URL", "https://example.invalid/hook")
+    monkeypatch.setenv("CC_WEBHOOK_KEY", "whk_child_not_a_real_secret")
     monkeypatch.setenv("RUNPOD_API_KEY", "pod-scoped-key")
     sample = tmp_path / "sample_test.py"
     sample.write_text(
         "import os\n"
         "def test_child_has_no_secrets() -> None:\n"
         "    assert 'CC_WEBHOOK_URL' not in os.environ\n"
+        "    assert 'CC_WEBHOOK_KEY' not in os.environ\n"
         "    assert 'RUNPOD_API_KEY' not in os.environ\n",
         encoding="utf-8",
     )

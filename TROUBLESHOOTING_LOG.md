@@ -81,6 +81,14 @@ Copy this block for a new entry.
 - Fix: Read objects with `aws s3api get-object`. Keep the 403 and `SignatureDoesNotMatch` retry. Print one summary line per poll.
 - Prevention: Do not use `aws s3 cp ... -` against the Runpod S3 endpoint.
 
+### 2026-10-22 — webhook ping returned 401 without a bearer
+
+- Symptom: Live `gpu_tests` pods logged `webhook ping failed status=401`.
+- Where it failed: pod / webhook
+- Cause: The ping posted the URL only. The bot webhook requires `Authorization: Bearer`.
+- Fix: Wire `CC_WEBHOOK_KEY={{ RUNPOD_SECRET_cc_webhook_key }}`. Write the header into the 0600 curl `--config` file. Keep the key off curl argv, the run folder, and the log.
+- Prevention: Do not put the key on curl argv. Test a fake key and prove it is absent from the run folder.
+
 ### 2026-10-22 — loose S3 404 looked like a missing object
 
 - Symptom: A 404 substring in any S3 error looked like a missing object.

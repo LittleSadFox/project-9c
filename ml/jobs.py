@@ -135,6 +135,7 @@ def gpu_tests(run_dir: Path, *, pytest_args: list[str] | None = None, require_cu
     cmd = [sys.executable, "-m", "pytest", *args, f"--junitxml={junit}"]
     env = os.environ.copy()
     env.pop("CC_WEBHOOK_URL", None)
+    env.pop("CC_WEBHOOK_KEY", None)
     env.pop("RUNPOD_API_KEY", None)
     env["CC_IN_GPU_TESTS"] = "1"
     require = env.get("CC_REQUIRE", "").strip()
