@@ -809,7 +809,7 @@ def pose_bench(
         MODE_FILES,
         FixtureEstimator,
         RtmlibEstimator,
-        cuda_provider_options,
+        read_estimator_tf32,
         resolve_device,
     )
 
@@ -891,6 +891,7 @@ def pose_bench(
             )
             mean_abs = parity["mean_abs_px"]
             conf_mean = parity.get("mean_abs_px_confident")
+            tf32 = read_estimator_tf32(cuda_est)
             mode_metrics["cuda"] = {
                 "fps": round(cuda_fps, 3),
                 "provider": getattr(cuda_est, "provider", "CUDAExecutionProvider"),
@@ -906,7 +907,11 @@ def pose_bench(
                 "keypoints_dropped": parity.get("keypoints_dropped"),
                 "frame_error": parity.get("frame_error"),
                 "keypoints": parity.get("keypoints"),
-                "cuda_provider_options": cuda_provider_options(),
+                "cuda_provider_options": {
+                    "det": tf32["det"],
+                    "pose": tf32["pose"],
+                },
+                "tf32_off_confirmed": tf32["tf32_off_confirmed"],
             }
         elif have_cuda:
             mode_metrics["cuda"] = {"error": "CUDA estimator failed to start", "parity_ok": False}
@@ -963,6 +968,20 @@ def pose_bench(
                 f"pose_bench mode={name} cpu_fps={cpu_fps} "
                 f"cuda_fps={cuda_block.get('fps')} parity_ok={cuda_block.get('parity_ok')}\n"
             )
+            opts = cuda_block.get("cuda_provider_options")
+            det_tf32 = None
+            pose_tf32 = None
+            if isinstance(opts, dict):
+                det_tf32 = (opts.get("det") or {}).get("use_tf32")
+                pose_tf32 = (opts.get("pose") or {}).get("use_tf32")
+            reported = det_tf32 is not None or pose_tf32 is not None
+            if cuda_block.get("tf32_off_confirmed") is not True and (
+                reported or backend != "fixture"
+            ):
+                log.write(
+                    f"WARNING: pose_bench mode={name} tf32_off_confirmed=false "
+                    f"det_use_tf32={det_tf32} pose_use_tf32={pose_tf32}\n"
+                )
     if status != "passed":
         raise JobError("pose_bench failed CUDA/CPU parity or CUDA was required and missing.")
     return metrics

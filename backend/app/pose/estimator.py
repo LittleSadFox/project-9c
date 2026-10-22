@@ -238,6 +238,38 @@ def cuda_provider_options() -> dict[str, int]:
     return {"use_tf32": 0}
 
 
+def read_session_use_tf32(session: Any) -> str | None:
+    """Read use_tf32 from a live ORT session. Return None when it is missing."""
+    if session is None:
+        return None
+    getter = getattr(session, "get_provider_options", None)
+    if not callable(getter):
+        return None
+    try:
+        options = getter()
+    except (AttributeError, TypeError, RuntimeError, KeyError):
+        return None
+    if not isinstance(options, dict):
+        return None
+    cuda_opts = options.get("CUDAExecutionProvider")
+    if not isinstance(cuda_opts, dict) or "use_tf32" not in cuda_opts:
+        return None
+    return str(cuda_opts["use_tf32"])
+
+
+def read_estimator_tf32(estimator: Any) -> dict[str, Any]:
+    """Read use_tf32 from the live det and pose sessions on an estimator."""
+    det = getattr(estimator, "_det", None)
+    pose = getattr(estimator, "_pose", None)
+    det_val = read_session_use_tf32(getattr(det, "session", None))
+    pose_val = read_session_use_tf32(getattr(pose, "session", None))
+    return {
+        "det": {"use_tf32": det_val},
+        "pose": {"use_tf32": pose_val},
+        "tf32_off_confirmed": det_val == "0" and pose_val == "0",
+    }
+
+
 def apply_cuda_provider_options(providers: Any) -> Any:
     """Force the shared CUDA options on CUDA EP entries. Leave others unchanged."""
     if not providers:

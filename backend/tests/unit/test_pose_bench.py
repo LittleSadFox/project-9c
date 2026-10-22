@@ -55,6 +55,105 @@ def test_app_and_bench_build_identical_cuda_provider_options(tmp_path: Path) -> 
     assert cuda_provider_options() == {"use_tf32": 0}
 
 
+class _FakeOrtSession:
+    def __init__(self, value: object) -> None:
+        self.value = value
+
+    def get_provider_options(self) -> dict[str, dict[str, object]]:
+        return {"CUDAExecutionProvider": {"use_tf32": self.value}}
+
+
+class _SessionHolder:
+    def __init__(self, session: object) -> None:
+        self.session = session
+
+
+def test_read_estimator_tf32_confirmed() -> None:
+    from app.pose.estimator import read_estimator_tf32
+
+    estimator = type(
+        "Est",
+        (),
+        {
+            "_det": _SessionHolder(_FakeOrtSession("0")),
+            "_pose": _SessionHolder(_FakeOrtSession("0")),
+        },
+    )()
+    result = read_estimator_tf32(estimator)
+    assert result["det"]["use_tf32"] == "0"
+    assert result["pose"]["use_tf32"] == "0"
+    assert result["tf32_off_confirmed"] is True
+
+
+def _session_fixture(value: str) -> type[FixtureEstimator]:
+    class SessionFixture(FixtureEstimator):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+            session = _FakeOrtSession(value)
+            self._det = _SessionHolder(session)
+            self._pose = _SessionHolder(session)
+
+    return SessionFixture
+
+
+def test_pose_bench_records_confirmed_tf32(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("app.pose.estimator.FixtureEstimator", _session_fixture("0"))
+    monkeypatch.setenv("CC_POSE_BACKEND", "fixture")
+    monkeypatch.delenv("CC_REQUIRE", raising=False)
+    monkeypatch.setenv("CC_DEVICE", "cpu")
+    run_dir = tmp_path / "run"
+    metrics = pose_bench(run_dir, n_frames=2, require_cuda=False, modes=["balanced"])
+    cuda = metrics["modes"]["balanced"]["cuda"]
+    assert cuda["cuda_provider_options"] == {
+        "det": {"use_tf32": "0"},
+        "pose": {"use_tf32": "0"},
+    }
+    assert cuda["tf32_off_confirmed"] is True
+    assert metrics["status"] == "passed"
+    log = (run_dir / "log.txt").read_text(encoding="utf-8")
+    assert "tf32_off_confirmed=false" not in log
+
+
+def test_pose_bench_flags_tf32_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("app.pose.estimator.FixtureEstimator", _session_fixture("1"))
+    monkeypatch.setenv("CC_POSE_BACKEND", "fixture")
+    monkeypatch.delenv("CC_REQUIRE", raising=False)
+    monkeypatch.setenv("CC_DEVICE", "cpu")
+    run_dir = tmp_path / "run"
+    metrics = pose_bench(run_dir, n_frames=2, require_cuda=False, modes=["balanced"])
+    cuda = metrics["modes"]["balanced"]["cuda"]
+    assert cuda["cuda_provider_options"]["det"]["use_tf32"] == "1"
+    assert cuda["cuda_provider_options"]["pose"]["use_tf32"] == "1"
+    assert cuda["tf32_off_confirmed"] is False
+    assert metrics["status"] == "passed"
+    log = (run_dir / "log.txt").read_text(encoding="utf-8")
+    assert (
+        "WARNING: pose_bench mode=balanced tf32_off_confirmed=false "
+        "det_use_tf32=1 pose_use_tf32=1" in log
+    )
+
+
+def test_read_estimator_tf32_mismatch() -> None:
+    from app.pose.estimator import read_estimator_tf32
+
+    estimator = type(
+        "Est",
+        (),
+        {
+            "_det": _SessionHolder(_FakeOrtSession("0")),
+            "_pose": _SessionHolder(_FakeOrtSession("1")),
+        },
+    )()
+    result = read_estimator_tf32(estimator)
+    assert result["det"]["use_tf32"] == "0"
+    assert result["pose"]["use_tf32"] == "1"
+    assert result["tf32_off_confirmed"] is False
+
+
 def test_cuda_tf32_off_patches_inference_session(monkeypatch: pytest.MonkeyPatch) -> None:
     import onnxruntime as ort
 
@@ -110,7 +209,11 @@ def test_pose_bench_fixture_writes_metrics(tmp_path: Path, monkeypatch: pytest.M
     assert cuda["keypoints"]["nose"]["mean_error_px"] == 0.0
     assert cuda["keypoints"]["nose"]["mean_score_cpu"] == 0.9
     assert cuda["keypoints"]["nose"]["mean_score_cuda"] == 0.9
-    assert cuda["cuda_provider_options"] == {"use_tf32": 0}
+    assert cuda["cuda_provider_options"] == {
+        "det": {"use_tf32": None},
+        "pose": {"use_tf32": None},
+    }
+    assert cuda["tf32_off_confirmed"] is False
 
 
 def test_pose_bench_passes_mode_to_estimator(
