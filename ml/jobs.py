@@ -21,9 +21,6 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
-from app.errors import AppError
-from app.storage import VIDEO_EXTS, safe_ext, safe_join
-
 from ml.tiny_onnx import tiny_identity_bytes
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -263,6 +260,9 @@ def _is_filename_only(name: str) -> bool:
 
 def resolve_bench_clip(name: str, golden_dir: Path) -> Path:
     """Resolve a golden-dir filename. Refuse paths and unknown suffixes."""
+    from app.errors import AppError
+    from app.storage import VIDEO_EXTS, safe_ext, safe_join
+
     raw = (name or "").strip()
     if not _is_filename_only(raw):
         raise JobError("CC_BENCH_CLIP must be a filename, not a path.")
