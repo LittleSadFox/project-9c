@@ -1745,6 +1745,75 @@ def test_webhook_curl_stderr_url_does_not_leak_into_log(tmp_path: Path) -> None:
             assert leak not in path.name
 
 
+def test_webhook_ping_failed_on_401_still_terminates(tmp_path: Path) -> None:
+    curl = tmp_path / "curl"
+    curl.write_text(
+        """#!/usr/bin/env bash
+has_config=0
+method=GET
+out=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --config)
+      has_config=1
+      shift 2
+      ;;
+    -X)
+      method="$2"
+      shift 2
+      ;;
+    -o)
+      out="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+if [[ "$has_config" == "1" ]]; then
+  printf '401'
+  exit 0
+fi
+if [[ "$method" == "DELETE" ]]; then
+  if [[ -n "$out" && "$out" != "/dev/null" ]]; then
+    printf '%s\\n' '{"id":"pod-hook-401"}' >"$out"
+  fi
+  printf '200'
+  exit 0
+fi
+printf '500'
+exit 0
+""",
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+    result = _run(
+        [str(RUN_JOB)],
+        env={
+            "CC_VOLUME_DIR": str(tmp_path / "vol"),
+            "CC_JOB": "gpu_tests",
+            "CC_GIT_REF": SHA40,
+            "CC_JOB_ID": "job-hook-401",
+            "CC_TTL_S": "60",
+            "CC_IN_GPU_TESTS": "",
+            "CC_WEBHOOK_URL": "https://example.invalid/hook",
+            "RUNPOD_POD_ID": "pod-hook-401",
+            "RUNPOD_API_KEY": "ok-key",
+            **_job_dirs(tmp_path),
+        },
+        bin_dir=tmp_path,
+    )
+    assert result.returncode != 0
+    log = tmp_path / "vol" / "runs" / "job-hook-401" / "log.txt"
+    text = log.read_text(encoding="utf-8")
+    assert "webhook ping failed status=401 curl_rc=0" in text
+    assert "webhook ping ok" not in text
+    assert "example.invalid" not in text + result.stdout + result.stderr
+    assert _stamp_path("pod-hook-401").is_file()
+    assert not Path("/tmp/.cc_terminated.pod-hook-401").exists()
+
+
 def test_run_logged_streams_before_exit(tmp_path: Path) -> None:
     log = tmp_path / "log.txt"
     token = "StreamTokenSecret"
@@ -2130,6 +2199,57 @@ def test_terminate_stamp_other_pod_or_unset_job_does_not_suppress(
     assert _stamp_path("pod-wd").is_file()
     assert not Path("/tmp/.cc_terminated.pod-wd").exists()
     assert "TTL 1s expired" in watchdog.stdout
+
+
+def test_unwritable_run_log_still_terminates(tmp_path: Path) -> None:
+    _fake_curl(tmp_path, "200", '{"id":"pod-ro-log"}')
+    log = tmp_path / "log.txt"
+    log.mkdir()
+    result = _run(
+        [
+            "bash",
+            "-c",
+            f"set -euo pipefail; source {LIB} && cc_terminate_self",
+        ],
+        env={
+            "RUNPOD_POD_ID": "pod-ro-log",
+            "RUNPOD_API_KEY": "ok-key",
+            "CC_RUN_LOG": str(log),
+            "CC_VOLUME_DIR": str(tmp_path / "vol"),
+        },
+        bin_dir=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert _stamp_path("pod-ro-log").is_file()
+    assert not Path("/tmp/.cc_terminated.pod-ro-log").exists()
+    assert "terminate ok" in result.stdout
+
+
+def test_unwritable_watchdog_run_dir_still_terminates(tmp_path: Path) -> None:
+    _fake_curl(tmp_path, "200", '{"id":"pod-ro-wd"}')
+    blocked = tmp_path / "not-a-dir"
+    blocked.write_text("file\n", encoding="utf-8")
+    result = _run(
+        [
+            "bash",
+            "-c",
+            f"set -euo pipefail; source {LIB} && unset CC_JOB_ID && "
+            f"unset CC_RUN_LOG && cc_watchdog_start {blocked} && sleep 2",
+        ],
+        env={
+            "RUNPOD_POD_ID": "pod-ro-wd",
+            "RUNPOD_API_KEY": "ok-key",
+            "CC_VOLUME_DIR": str(tmp_path / "vol"),
+            "CC_TTL_S": "1",
+        },
+        bin_dir=tmp_path,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    assert _stamp_path("pod-ro-wd").is_file()
+    assert not Path("/tmp/.cc_terminated.pod-ro-wd").exists()
+    assert "TTL 1s expired" in result.stdout
+    assert "terminate ok" in result.stdout
 
 
 def test_run_times_out(tmp_path: Path) -> None:

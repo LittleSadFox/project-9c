@@ -1101,7 +1101,9 @@ cc_require_cuda_driver() {
 
 cc_log() {
   if [[ -n "${CC_RUN_LOG:-}" ]]; then
-    printf '%s\n' "$*" | tee -a "$CC_RUN_LOG"
+    # tee -a must not abort the caller under pipefail. An unwritable
+    # log must not skip cc_terminate_self's API call.
+    printf '%s\n' "$*" | tee -a "$CC_RUN_LOG" || true
   else
     printf '%s\n' "$*"
   fi
@@ -1181,8 +1183,8 @@ cc_watchdog_start() {
     else
       started="$(date +%s)"
       if [[ -n "$run_dir" ]]; then
-        mkdir -p "$run_dir"
-        printf '%s\n' "$started" >"${run_dir}/started_at"
+        mkdir -p "$run_dir" || true
+        printf '%s\n' "$started" >"${run_dir}/started_at" || true
       fi
     fi
     now="$(date +%s)"
@@ -1193,7 +1195,7 @@ cc_watchdog_start() {
     sleep "$remain"
     echo "TTL ${CC_TTL_S}s expired. Terminate the pod."
     if [[ -n "$run_dir" && -z "${CC_RUN_LOG:-}" ]]; then
-      printf '%s\n' "TTL ${CC_TTL_S}s expired. Terminate the pod." >>"${run_dir}/log.txt"
+      printf '%s\n' "TTL ${CC_TTL_S}s expired. Terminate the pod." >>"${run_dir}/log.txt" || true
     fi
     cc_terminate_self
   ) &
