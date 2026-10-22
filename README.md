@@ -163,8 +163,8 @@ Before every first `pod_up`, the Runpod bot must verify the GHCR registry creden
 A complete setup does not skip that check.
 The first live `gpu_tests` pod at `bd99ed3` failed at clone, wrote `status=failed`, and self-terminated.
 The second live `gpu_tests` pod at `73be826` used CUDA and then failed after a test deleted `/tmp/climbing-coach`.
-The clone dir is `/tmp/cc-src`. The wipe guard allowlists that basename under `/tmp` or a trusted `$TMPDIR`. `$TMPDIR` under `/tmp/cc-src` or a sibling `/tmp/cc-src-*` path is untrusted. The remaining check-to-rm race needs `/tmp` write access on the pod. CI copies the repo to `/tmp/cc-src` and runs the `gpu_tests` pytest selection from there. Tests set `CC_PYTHON` so they do not use `/opt/cc/venv/bin/python`. `CC_PYTHON` is a test hook. A pod uses `/opt/cc/venv/bin/python` unless that file is missing. `run_job.sh` writes `python=<path>` to the job log. `gpu_tests` refuses a nested run when `CC_IN_GPU_TESTS` is set. The nested refuse exits before the cleanup trap and before mkdir. The entrypoint unsets `CC_IN_GPU_TESTS` before it execs `run_job.sh`. The terminate stamp is `$CC_TERMINATE_STAMP_DIR/.cc_terminated.$RUNPOD_POD_ID`. The stamp write refuses a symlink. `CC_TERMINATE_STAMP_DIR` must stay under `/tmp` or a trusted `$TMPDIR`. It must not point at the volume. Tests set that dir under pytest tmp. `pod_up` refuses a job id whose `runs/<id>` folder already exists. Existence checks use `aws s3api head-object`. `scripts/sync_volume.sh` uploads with `s3api put-object` and pins `s3.multipart_threshold` to 128MB.
-The fourth live `gpu_tests` pod at `2078682a` used CUDA. Pytest reported 152 passed and 1 failed (`test_gpu_scripts_pass_shellcheck`). CI and the GPU image pin shellcheck 0.11.0. `gpu_tests` writes `ort_providers=... used_cuda=...` to `log.txt` before a CUDA `JobError`. The webhook ping writes `webhook ping ok status=<code> curl_rc=<n>` only for HTTP 2xx. Other results write `webhook ping failed status=<code> curl_rc=<n>`. The log does not store the webhook URL, the bearer key, or curl stderr. The ping sends `Authorization: Bearer` from `CC_WEBHOOK_KEY` (`{{ RUNPOD_SECRET_cc_webhook_key }}`) through a 0600 curl `--config` file. `run_job.sh` writes `gpu_name=` from `nvidia-smi`. S3 missing-object checks match only the AWS CLI GetObject or HeadObject phrase.
+The clone dir is `/tmp/cc-src`. The wipe guard allowlists that basename under `/tmp` or a trusted `$TMPDIR`. `$TMPDIR` under `/tmp/cc-src` or a sibling `/tmp/cc-src-*` path is untrusted. The remaining check-to-rm race needs `/tmp` write access on the pod. CI copies the repo to `/tmp/cc-src` and runs the `gpu_tests` pytest selection from there. Tests set `CC_PYTHON` so they do not use `/opt/cc/venv/bin/python`. `CC_PYTHON` is a test hook. A pod uses `/opt/cc/venv/bin/python` unless that file is missing. `run_job.sh` writes `python=<path>` to the job log. `gpu_tests` refuses a nested run when `CC_IN_GPU_TESTS` is set. The nested refuse exits before the cleanup trap and before mkdir. The entrypoint unsets `CC_IN_GPU_TESTS` before it execs `run_job.sh`. The terminate stamp is `$CC_TERMINATE_STAMP_DIR/.cc_terminated.$RUNPOD_POD_ID`. The stamp write refuses a symlink. `CC_TERMINATE_STAMP_DIR` must stay under `/tmp` or a trusted `$TMPDIR`. It must not point at the volume. Tests set that dir under pytest tmp. `pod_up` refuses a job id whose `runs/<id>` folder already exists. Existence checks use `aws s3api head-object`. `pod_up` refuses an invalid job id. A job id must match `[A-Za-z0-9._-]`, stay at 1-64 characters, and not start with a dot or a dash. `pod_up` pins the GPU image to a git-sha tag or digest. It refuses `:latest` unless `CC_GPU_IMAGE_ALLOW_LATEST=1`. `scripts/sync_volume.sh` uploads with `s3api put-object` only. It does not change `AWS_CONFIG_FILE`. It does not write `~/.aws/config`. It refuses files over 5GB before any upload. `--prefix` defaults to `videos`. A prefix other than `videos` does not write `videos/manifest.json`.
+The fourth live `gpu_tests` pod at `2078682a` used CUDA. Pytest reported 152 passed and 1 failed (`test_gpu_scripts_pass_shellcheck`). CI and the GPU image pin shellcheck 0.11.0. `gpu_tests` writes `ort_providers=... used_cuda=...` to `log.txt` before a CUDA `JobError`. The webhook ping writes `webhook ping ok status=<code> curl_rc=<n>` only for HTTP 2xx. Other results write `webhook ping failed status=<code> curl_rc=<n>`. The log does not store the webhook URL, the bearer key, or curl stderr. The ping sends `Authorization: Bearer` from `CC_WEBHOOK_KEY` (`{{ RUNPOD_SECRET_cc_webhook_key }}`) through a 0600 curl `--config` file. An EXIT/RETURN trap always removes that file. The log does not store the key. `run_job.sh` writes `gpu_name=` from `nvidia-smi` with a timeout. A hung query logs `gpu_name=unknown`. S3 missing-object checks match only the AWS CLI GetObject or HeadObject phrase.
 `allowedCudaVersions` is opt-in via `CC_ALLOWED_CUDA` (unset by default). The image CUDA ≥12.8 guard is the real floor.
 
 Phase 0 needs only a small sample upload.
@@ -186,7 +186,7 @@ This table is the command map.
 | `scripts/run_mac.sh` | Starts uvicorn with your library and opens the launch URL. |
 | `scripts/download_models.py` | Fetches base ONNX weights. `--from-volume` imports a pod-trained model. |
 | `scripts/export_labels.py` | Writes golden labels from the dev library. |
-| `scripts/sync_volume.sh` | Copies new golden videos and labels to the Runpod volume. |
+| `scripts/sync_volume.sh` | Copies new golden videos and labels to the Runpod volume. Pass `--prefix` to use a scratch folder. |
 | `scripts/export_dataset.sh` | Uploads a Phase 4 or Phase 6 dataset. |
 | `scripts/gpu/pod_up.sh` | Creates a GPU pod for a job or an interactive session. Use `--dry-run` to print the payload. |
 | `scripts/gpu/run_job.sh` | Runs inside the pod. Clone, install, run `ml/jobs.py`, write the run folder, ping, terminate. |
@@ -233,7 +233,7 @@ Do not invent the values.
 | `CC_TTL_S` | Required lifetime backstop in seconds |
 | `CC_JOB` | Job name. Empty for `--interactive` |
 | `CC_GIT_REF` | Pushed commit sha |
-| `CC_JOB_ID` | Run folder name under `/workspace/runs/` |
+| `CC_JOB_ID` | Run folder name under `/workspace/runs/`. `[A-Za-z0-9._-]`, 1-64 characters, no leading dot or dash |
 | `CC_REPO_TOKEN` | Runpod secret `cc_repo_token`. Do not set this by hand |
 | `CC_WEBHOOK_URL` | Runpod secret `cc_webhook_url`. Do not set this by hand |
 | `CC_WEBHOOK_KEY` | Runpod secret `cc_webhook_key`. Do not set this by hand |
@@ -242,7 +242,9 @@ Do not invent the values.
 | `CC_RUNPOD_VOLUME_ID` / `CC_VOLUME_ID` | Network volume id |
 | `CC_RUNPOD_DATACENTER` / `CC_VOLUME_DC` | Volume datacenter |
 | `CC_RUNPOD_REGISTRY_AUTH_ID` | Registry credential for the private GHCR image |
-| `CC_GPU_IMAGE` | GHCR image name when the template does not set it |
+| `CC_GPU_IMAGE` | GHCR image name when the template does not set it. Use a git-sha tag or digest. `pod_up` derives `ghcr.io/littlesadfox/climbing-coach-gpu:<sha>` from `CC_GIT_REF` when this is unset |
+| `CC_GPU_IMAGE_ALLOW_LATEST` | Set to `1` to allow `:latest`. Unset by default |
+| `CC_NVIDIA_SMI_TIMEOUT_S` | `nvidia-smi` name query timeout in seconds. Default `10` |
 | `CC_INTERACTIVE` | Set to `1` on interactive pods |
 | `CC_WAIT_TIMEOUT_S` | `wait_job.sh` timeout in seconds. Default is `CC_TTL_S` plus 300 |
 | `CC_ALLOWED_CUDA` | Optional `allowedCudaVersions` CSV or JSON. Unset by default; the image CUDA ≥12.8 guard is the real floor |

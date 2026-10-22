@@ -15,6 +15,9 @@ else
 fi
 
 VOLUME="${CC_VOLUME_DIR:-/workspace}"
+if [[ -n "${CC_JOB_ID:-}" ]]; then
+  cc_require_job_id "$CC_JOB_ID"
+fi
 RUN_DIR="${VOLUME}/runs/${CC_JOB_ID:-unknown}"
 SRC="${CC_SRC_DIR:-/tmp/cc-src}"
 SCRATCH="${CC_LIBRARY_DIR:-/tmp/cc-library}"
@@ -99,6 +102,7 @@ cc_require_ttl
 [[ -n "${CC_JOB:-}" ]] || cc_fail "CC_JOB is required inside run_job.sh."
 [[ -n "${CC_GIT_REF:-}" ]] || cc_fail "CC_GIT_REF is required. Pods run only pushed commits."
 [[ -n "${CC_JOB_ID:-}" ]] || cc_fail "CC_JOB_ID is required."
+cc_require_job_id "$CC_JOB_ID"
 RUN_DIR="${VOLUME}/runs/${CC_JOB_ID}"
 
 mkdir -p "$RUN_DIR/artifacts" "$VOLUME/models" "$VOLUME/cache/pip" "$SCRATCH"
@@ -127,7 +131,11 @@ echo running >"$RUN_DIR/status"
 
 gpu_name=""
 if command -v nvidia-smi >/dev/null 2>&1; then
-  gpu_name="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n 1 || true)"
+  gpu_timeout="${CC_NVIDIA_SMI_TIMEOUT_S:-10}"
+  if [[ ! "$gpu_timeout" =~ ^[1-9][0-9]*$ ]]; then
+    gpu_timeout=10
+  fi
+  gpu_name="$(cc_run_timeout "$gpu_timeout" nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n 1 || true)"
   gpu_name="$(cc_trim "$gpu_name")"
 fi
 {

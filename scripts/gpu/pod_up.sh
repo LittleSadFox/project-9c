@@ -121,10 +121,11 @@ if [[ -z "$JOB_ID" ]]; then
   fi
   JOB_ID="cc-${kind}-${short:-noref}-${stamp}"
 fi
+cc_require_job_id "$JOB_ID"
 cc_refuse_existing_run "$JOB_ID" "$CALLER_JOB_ID"
 
 NAME="$JOB_ID"
-cc_require_image_tag
+cc_require_image_tag "$REF"
 ENV_JSON="$(cc_build_pod_env_json "$JOB" "$REF" "$JOB_ID" "$CC_TTL_S" "$INTERACTIVE")"
 PAYLOAD="$(cc_build_pod_payload "$NAME" "$ENV_JSON" "$SPOT" "$GPU_CSV")"
 

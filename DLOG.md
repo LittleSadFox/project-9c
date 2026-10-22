@@ -287,3 +287,42 @@ An empty `RUNPOD_POD_ID` fails loudly and still reaches terminate.
 The entrypoint unsets `CC_IN_GPU_TESTS` before it execs `run_job.sh`.
 
 See `TROUBLESHOOTING_LOG.md`.
+
+## 2026-10-22 — p0-followups-3 curl trap, image pin, sync_volume
+
+The webhook curl `--config` file uses EXIT and RETURN traps.
+The file stays mode 0600.
+A failure still removes it.
+The key stays off the log.
+
+`run_job.sh` times out a hung `nvidia-smi` name query.
+It logs `gpu_name=unknown` after the timeout.
+
+`pod_up`, `run_job`, `wait_job`, and the entrypoint refuse an invalid job id.
+A job id must match `[A-Za-z0-9._-]`.
+It must be 1-64 characters.
+It must not start with a dot or a dash.
+
+A hand-made or interactive pod without `CC_JOB_ID` writes `started_at` under `runs/.ttl-<pod>`.
+A restart does not reset the TTL clock.
+An already-expired TTL terminates in the foreground.
+
+`pod_up` pins the GPU image to a git-sha tag or digest.
+It derives the tag from `CC_GIT_REF` when `CC_GPU_IMAGE` is unset.
+It refuses `:latest` unless `CC_GPU_IMAGE_ALLOW_LATEST=1`.
+The Runpod template is unchanged.
+
+`sync_volume.sh` no longer writes a temp AWS config.
+It does not change `AWS_CONFIG_FILE`.
+It does not write `~/.aws/config`.
+It refuses files over 5GB before any upload.
+`--prefix` defaults to `videos`.
+A prefix other than `videos` does not write `videos/manifest.json`.
+
+The Library hint button has space under the card copy.
+`httpx.ASGITransport` in the pinned httpx 0.28.1 is async only.
+The Starlette TestClient warning is filtered in `pytest.ini`.
+A move to `httpx2` would need a new pin, so it is skipped.
+The Playwright smoke test stubs `/health` and `/api/jobs`.
+
+See `TROUBLESHOOTING_LOG.md`.

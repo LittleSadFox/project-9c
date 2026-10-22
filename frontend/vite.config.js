@@ -1,8 +1,40 @@
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
+function previewApiStub() {
+  return {
+    name: "cc-preview-api-stub",
+    configurePreviewServer(server) {
+      server.middlewares.use((req, res, next) => {
+        const path = (req.url || "").split("?")[0];
+        if (path === "/health") {
+          res.setHeader("Content-Type", "application/json");
+          res.end(
+            JSON.stringify({
+              status: "ok",
+              version: "0",
+              db: "ok",
+              ffmpeg: { version: "7", h264_encoder: "stub" },
+              onnx: { providers: ["CPUExecutionProvider"], device: "cpu" },
+              library_free_gb: 1,
+              dev: false,
+            }),
+          );
+          return;
+        }
+        if (path === "/api/jobs") {
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ items: [], total: 0 }));
+          return;
+        }
+        next();
+      });
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), previewApiStub()],
   server: {
     host: "127.0.0.1",
     port: 8811,

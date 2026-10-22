@@ -122,6 +122,10 @@ jobs:
           pytest backend/tests
           -m "not model and not gpu and not macos and not golden and not slow"
 
+      - name: sync_volume script
+        if: hashFiles('scripts/sync_volume.sh') != ''
+        run: pytest backend/tests/unit/test_sync_volume.py --tb=short
+
       - name: Vitest
         if: hashFiles('frontend/src/**/*') != ''
         working-directory: frontend

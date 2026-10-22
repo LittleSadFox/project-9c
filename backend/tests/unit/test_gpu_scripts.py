@@ -748,7 +748,7 @@ def test_pod_up_dry_run_sets_ttl_and_secret_refs() -> None:
     assert payload["networkVolumeId"] == "wguvx2347m"
     assert payload["dataCenterIds"] == ["EU-RO-1"]
     assert payload["containerRegistryAuthId"] == "cmvhzigy8002b13z5y84jqc73"
-    assert payload["imageName"] == "ghcr.io/littlesadfox/climbing-coach-gpu:latest"
+    assert payload["imageName"] == f"ghcr.io/littlesadfox/climbing-coach-gpu:{SHA40}"
     assert "allowedCudaVersions" not in payload
     gpus = payload["gpuTypeIds"]
     assert isinstance(gpus, list)
@@ -1091,20 +1091,24 @@ def test_sync_volume_dry_run(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert not (golden / "labels" / "labels.json").exists()
     assert "s3api-eu-ro-1.runpod.io" in result.stdout
+    assert "prefix=videos" in result.stdout
 
 
-def test_sync_volume_uses_s3api_and_pins_multipart() -> None:
+def test_sync_volume_uses_put_object_without_multipart_config() -> None:
     text = SYNC.read_text(encoding="utf-8")
     assert "s3api" in text
     assert "put-object" in text
-    assert "cc_aws_export_multipart_config" in text
-    assert "aws s3 cp" not in text
-    assert "s3 cp -" not in text
+    code = "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert "cc_aws_export_multipart_config" not in code
+    assert "export AWS_CONFIG_FILE" not in code
+    assert "AWS_CONFIG_FILE=" not in code
+    assert "aws s3 cp" not in code
+    assert "s3 cp -" not in code
     lib = LIB.read_text(encoding="utf-8")
-    assert "multipart_threshold = 128MB" in lib
-    helper = lib.split("cc_aws_export_multipart_config()")[1].split("cc_setup_ssh()")[0]
-    assert "AWS_CONFIG_FILE" in helper
-    assert "~/.aws/config" not in helper or "Do not edit ~/.aws/config" in helper
+    assert "cc_aws_export_multipart_config" not in lib
+    assert "multipart_threshold = 128MB" not in lib
 
 
 def test_run_job_uses_basic_git_auth() -> None:
@@ -1438,6 +1442,12 @@ def test_pod_up_accepts_uppercase_sha() -> None:
     assert env["CC_GIT_REF"] == upper
 
 
+def test_defaults_env_does_not_pin_latest() -> None:
+    text = (ROOT / "scripts" / "gpu" / "defaults.env").read_text(encoding="utf-8")
+    assert "climbing-coach-gpu:latest" not in text
+    assert "CC_GPU_IMAGE=" not in text
+
+
 def test_pod_up_refuses_untagged_image() -> None:
     result = _run(
         [str(POD_UP), "--job", "gpu_tests", "--ref", SHA40, "--dry-run"],
@@ -1445,6 +1455,43 @@ def test_pod_up_refuses_untagged_image() -> None:
     )
     assert result.returncode != 0
     assert "tag" in result.stderr
+
+
+def test_pod_up_refuses_latest_image_without_override() -> None:
+    result = _run(
+        [str(POD_UP), "--job", "gpu_tests", "--ref", SHA40, "--dry-run"],
+        env={"CC_GPU_IMAGE": "ghcr.io/littlesadfox/climbing-coach-gpu:latest"},
+    )
+    assert result.returncode != 0
+    assert ":latest" in result.stderr
+    assert "job_id=" not in result.stdout
+
+
+def test_pod_up_allows_latest_image_with_override() -> None:
+    result = _run(
+        [str(POD_UP), "--job", "gpu_tests", "--ref", SHA40, "--dry-run"],
+        env={
+            "CC_GPU_IMAGE": "ghcr.io/littlesadfox/climbing-coach-gpu:latest",
+            "CC_GPU_IMAGE_ALLOW_LATEST": "1",
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    payload = _payload(result.stdout)
+    assert payload["imageName"] == "ghcr.io/littlesadfox/climbing-coach-gpu:latest"
+
+
+def test_pod_up_accepts_image_digest() -> None:
+    digest = (
+        "ghcr.io/littlesadfox/climbing-coach-gpu@"
+        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    )
+    result = _run(
+        [str(POD_UP), "--job", "gpu_tests", "--ref", SHA40, "--dry-run"],
+        env={"CC_GPU_IMAGE": digest},
+    )
+    assert result.returncode == 0, result.stderr
+    payload = _payload(result.stdout)
+    assert payload["imageName"] == digest
 
 
 def test_pod_up_keeps_caller_volume_id() -> None:
@@ -3600,6 +3647,241 @@ def test_webhook_url_stays_off_curl_argv() -> None:
     curl_fn = text.split("cc_curl_post_json()")[1].split("cc_log_webhook_ping")[0]
     assert "--config" in curl_fn
     assert "chmod 600" in curl_fn
+    assert "trap" in curl_fn
+    assert "RETURN" in curl_fn
+    assert "EXIT" in curl_fn
+    assert "rm -f --" in curl_fn
+
+
+@pytest.mark.parametrize("job_id", [".hidden", "-dash", "has/slash", "has space"])
+def test_pod_up_refuses_invalid_job_id(job_id: str) -> None:
+    result = _run(
+        [str(POD_UP), "--job", "gpu_tests", "--ref", SHA40, "--dry-run"],
+        env={"CC_JOB_ID": job_id},
+    )
+    assert result.returncode != 0
+    assert "Invalid job id" in result.stderr
+    assert "job_id=" not in result.stdout
+
+
+def test_pod_up_refuses_job_id_that_is_too_long() -> None:
+    job_id = "a" * 65
+    result = _run(
+        [str(POD_UP), "--job", "gpu_tests", "--ref", SHA40, "--dry-run"],
+        env={"CC_JOB_ID": job_id},
+    )
+    assert result.returncode != 0
+    assert "Invalid job id" in result.stderr
+
+
+def test_wait_job_refuses_invalid_job_id() -> None:
+    result = _run(
+        [str(WAIT_JOB), ".bad-id", "--dry-run"],
+        env={"CC_VOLUME_ID": "vol-1", "CC_VOLUME_DC": "EU-RO-1", "CC_TTL_S": "3600"},
+    )
+    assert result.returncode != 0
+    assert "Invalid job id" in result.stderr
+
+
+def test_run_job_refuses_invalid_job_id(tmp_path: Path) -> None:
+    result = _run(
+        [str(RUN_JOB)],
+        env={
+            "CC_VOLUME_DIR": str(tmp_path / "vol"),
+            "CC_JOB": "gpu_tests",
+            "CC_GIT_REF": SHA40,
+            "CC_JOB_ID": "../escape",
+            "CC_TTL_S": "60",
+            "CC_IN_GPU_TESTS": "",
+            **_job_dirs(tmp_path),
+        },
+    )
+    assert result.returncode != 0
+    assert "Invalid job id" in result.stderr
+    assert not (tmp_path / "vol" / "runs" / ".." / "escape").exists()
+
+
+def test_run_job_nvidia_smi_timeout_logs_unknown(tmp_path: Path) -> None:
+    nvidia = tmp_path / "nvidia-smi"
+    nvidia.write_text(
+        "#!/usr/bin/env bash\nwhile true; do sleep 30; done\n",
+        encoding="utf-8",
+    )
+    nvidia.chmod(0o755)
+    started = time.monotonic()
+    result = _run(
+        [str(RUN_JOB)],
+        env={
+            "CC_VOLUME_DIR": str(tmp_path / "vol"),
+            "CC_JOB": "gpu_tests",
+            "CC_GIT_REF": SHA40,
+            "CC_JOB_ID": "job-gpu-timeout",
+            "CC_TTL_S": "60",
+            "CC_IN_GPU_TESTS": "",
+            "CC_NVIDIA_SMI_TIMEOUT_S": "1",
+            **_job_dirs(tmp_path),
+        },
+        bin_dir=tmp_path,
+        timeout=15,
+    )
+    assert time.monotonic() - started < 12
+    assert result.returncode != 0
+    text = (tmp_path / "vol" / "runs" / "job-gpu-timeout" / "log.txt").read_text(
+        encoding="utf-8"
+    )
+    assert "gpu_name=unknown" in text
+    header = RUN_JOB.read_text(encoding="utf-8")
+    assert "cc_run_timeout" in header
+    assert "CC_NVIDIA_SMI_TIMEOUT_S" in header
+
+
+def test_curl_config_removed_on_failure_and_stays_0600(tmp_path: Path) -> None:
+    hits = tmp_path / "webhook.log"
+    tmpdir = tmp_path / "curl-tmp"
+    tmpdir.mkdir()
+    curl = tmp_path / "curl"
+    curl.write_text(
+        f"""#!/usr/bin/env bash
+printf 'argv=%s\\n' "$*" >> "{hits}"
+has_config=0
+cfg=""
+method=GET
+out=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --config)
+      has_config=1
+      cfg="$2"
+      printf 'cfg=%s\\n' "$cfg" >> "{hits}"
+      if [[ -f "$cfg" ]]; then
+        stat -c 'mode=%a' "$cfg" >> "{hits}" 2>/dev/null \
+          || stat -f 'mode=%Lp' "$cfg" >> "{hits}"
+        if grep -q 'Authorization: Bearer' "$cfg"; then
+          printf 'auth=1\\n' >> "{hits}"
+        fi
+      fi
+      shift 2
+      ;;
+    -X)
+      method="$2"
+      shift 2
+      ;;
+    -o)
+      out="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+if [[ "$has_config" == "1" ]]; then
+  printf '000'
+  exit 7
+fi
+if [[ "$method" == "DELETE" ]]; then
+  if [[ -n "$out" && "$out" != "/dev/null" ]]; then
+    printf '%s\\n' '{{"id":"pod"}}' >"$out"
+  fi
+  printf '200'
+  exit 0
+fi
+printf '500'
+exit 0
+""",
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+    key = "whk_not_a_real_secret"
+    result = _run(
+        [str(RUN_JOB)],
+        env={
+            "CC_VOLUME_DIR": str(tmp_path / "vol"),
+            "CC_JOB": "gpu_tests",
+            "CC_GIT_REF": SHA40,
+            "CC_JOB_ID": "job-cfg-trap",
+            "CC_TTL_S": "60",
+            "CC_IN_GPU_TESTS": "",
+            "CC_WEBHOOK_URL": "https://example.invalid/hook",
+            "CC_WEBHOOK_KEY": key,
+            "TMPDIR": str(tmpdir),
+            **_job_dirs(tmp_path),
+        },
+        bin_dir=tmp_path,
+    )
+    assert result.returncode != 0
+    logged = hits.read_text(encoding="utf-8")
+    assert "cfg=" in logged
+    assert "mode=600" in logged
+    assert "auth=1" in logged
+    leftover = [path for path in tmpdir.iterdir() if path.is_file()]
+    assert leftover == []
+    dumped = _run_dir_text(tmp_path / "vol" / "runs" / "job-cfg-trap")
+    assert key not in dumped
+    assert key not in logged
+    assert key not in result.stdout
+    assert key not in result.stderr
+    assert "Authorization" not in dumped
+    assert "Bearer" not in dumped
+
+
+def test_watchdog_without_job_id_persists_started_at(tmp_path: Path) -> None:
+    vol = tmp_path / "vol"
+    pod = "podttl1"
+    state = vol / "runs" / f".ttl-{pod}"
+    result = _run(
+        [
+            "bash",
+            "-c",
+            f"source {LIB} && unset CC_JOB_ID && cc_watchdog_start && "
+            f'test -f "{state}/started_at" && echo persisted && sleep 3',
+        ],
+        env={
+            "RUNPOD_POD_ID": pod,
+            "RUNPOD_API_KEY": "ok-key",
+            "CC_VOLUME_DIR": str(vol),
+            "CC_TTL_S": "2",
+        },
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "persisted" in result.stdout
+    assert state.joinpath("started_at").is_file()
+    started = state.joinpath("started_at").read_text(encoding="utf-8").strip()
+    assert started.isdigit()
+
+
+def test_expired_ttl_without_job_id_terminates_immediately(tmp_path: Path) -> None:
+    _fake_curl(tmp_path, "200", '{"id":"pod-ttl-loop"}')
+    vol = tmp_path / "vol"
+    pod = "pod-ttl-loop"
+    state = vol / "runs" / f".ttl-{pod}"
+    state.mkdir(parents=True)
+    (state / "started_at").write_text(f"{int(time.time()) - 120}\n", encoding="utf-8")
+    before = (state / "started_at").read_text(encoding="utf-8")
+    started = time.monotonic()
+    result = _run(
+        [
+            "bash",
+            "-c",
+            f"source {LIB} && unset CC_JOB_ID && cc_watchdog_start && echo done",
+        ],
+        env={
+            "RUNPOD_POD_ID": pod,
+            "RUNPOD_API_KEY": "ok-key",
+            "CC_VOLUME_DIR": str(vol),
+            "CC_TTL_S": "1",
+        },
+        bin_dir=tmp_path,
+        timeout=8,
+    )
+    assert time.monotonic() - started < 6
+    assert result.returncode == 0, result.stderr
+    assert "done" in result.stdout
+    assert "TTL 1s expired" in result.stdout
+    assert "terminate ok" in result.stdout
+    assert (state / "started_at").read_text(encoding="utf-8") == before
+    assert _stamp_path(pod).is_file()
 
 
 def test_gpu_scripts_pass_shellcheck() -> None:

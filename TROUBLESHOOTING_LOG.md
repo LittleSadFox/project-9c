@@ -134,8 +134,8 @@ Copy this block for a new entry.
 - Symptom: Runpod S3 `CreateMultipartUpload` returned `SignatureDoesNotMatch` on a ~40MiB golden video.
 - Where it failed: Mac / volume S3
 - Cause: AWS CLI `s3 cp` uses multipart above 8MB. Runpod S3 rejects that signing path. A single `PutObject` works.
-- Fix: `sync_volume.sh` uses `aws s3api put-object` and `get-object`. It writes a temp AWS config with `s3.multipart_threshold = 128MB`. It does not edit `~/.aws/config`.
-- Prevention: Do not use `aws s3 cp` against the Runpod S3 endpoint. Keep the 128MB pin.
+- Fix: `sync_volume.sh` uses `aws s3api put-object` and `get-object` only. It does not write a temp AWS config. It does not change `AWS_CONFIG_FILE`. It does not write `~/.aws/config`. It refuses files over 5GB before any upload.
+- Prevention: Do not use `aws s3 cp` against the Runpod S3 endpoint. Do not export `AWS_CONFIG_FILE` from `sync_volume.sh`.
 
 ### 2026-10-22 — terminate stamp symlink and volume override
 
@@ -144,6 +144,22 @@ Copy this block for a new entry.
 - Cause: `printf >stamp` follows a symlink. The stamp dir hook had no volume guard.
 - Fix: Write the stamp with `O_NOFOLLOW` and `O_EXCL`. Refuse a symlink stamp. Allow the hook only under `/tmp` or a trusted `$TMPDIR`, never on the volume.
 - Prevention: Keep stamps off the volume. Test a planted symlink and a volume stamp dir.
+
+### 2026-10-22 — hung nvidia-smi and crash-loop TTL
+
+- Symptom: A hung `nvidia-smi` could stall `run_job.sh`. A crash-looping hand-made pod without `CC_JOB_ID` reset `started_at` on every restart.
+- Where it failed: review
+- Cause: The name query had no timeout. The watchdog had no persisted clock without a job id.
+- Fix: Time out the name query and log `gpu_name=unknown`. Persist `started_at` under `runs/.ttl-<pod>`. Terminate in the foreground when the TTL is already expired.
+- Prevention: Keep the TTL backstop. Do not reset `started_at` on a container restart.
+
+### 2026-10-22 — curl --config leftover and :latest image
+
+- Symptom: A failed webhook ping could leave the 0600 curl `--config` file. `pod_up` defaulted to `:latest`.
+- Where it failed: review
+- Cause: The config file used `rm` after curl only. `defaults.env` pinned `:latest`.
+- Fix: Add EXIT and RETURN traps around the config file. Derive a git-sha tag from `CC_GIT_REF`. Refuse `:latest` unless `CC_GPU_IMAGE_ALLOW_LATEST=1`.
+- Prevention: Do not put secrets on curl argv. Do not start a pod from `:latest` without an explicit override.
 
 ### 2026-10-21 — Shared SSH host keys in the GPU image
 

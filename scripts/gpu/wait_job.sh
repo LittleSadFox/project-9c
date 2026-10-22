@@ -42,6 +42,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$JOB_ID" ]] || cc_fail "Pass a job id."
+cc_require_job_id "$JOB_ID"
 if [[ -n "$POD_ID" ]] && ! cc_valid_pod_id "$POD_ID"; then
   cc_fail "Invalid pod id ${POD_ID}."
 fi

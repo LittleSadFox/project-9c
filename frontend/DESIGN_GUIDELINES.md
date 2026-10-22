@@ -98,6 +98,7 @@ Use `font-variant-numeric: tabular-nums` for times, frame numbers, and scores.
 Keep visible text short.
 Put explanations in a `Hint`.
 A `Hint` is a "?" button.
+Keep a space between the page copy and the hint button.
 The hint text shows on hover and on keyboard focus.
 
 ## 6. Motion

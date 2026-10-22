@@ -69,6 +69,7 @@ def test_ci_runs_gpu_tests_from_tmp_cc_src() -> None:
     text = CI.read_text(encoding="utf-8")
     assert "/tmp/cc-src" in text
     assert 'pytest backend/tests -m "not macos"' in text
+    assert "backend/tests/unit/test_sync_volume.py" in text
     assert "pod-layout" in text
     assert "/opt/cc/venv/bin/python" in text
 

@@ -59,6 +59,10 @@ body {
   max-width: 40rem;
 }
 
+.page-copy + .hint {
+  margin-top: var(--lg-space-4);
+}
+
 .tabular {
   font-variant-numeric: tabular-nums;
 }
