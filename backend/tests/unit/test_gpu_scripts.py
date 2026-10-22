@@ -2308,6 +2308,8 @@ def test_unreadable_started_at_still_terminates(tmp_path: Path) -> None:
         ("abc", "pod-wd-abc"),
         ("1.5", "pod-wd-1p5"),
         ("17e9", "pod-wd-17e9"),
+        ("089", "pod-wd-089"),
+        ("0999", "pod-wd-0999"),
     ],
 )
 def test_non_numeric_started_at_still_terminates(
