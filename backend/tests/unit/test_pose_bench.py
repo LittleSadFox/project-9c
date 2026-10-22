@@ -39,6 +39,22 @@ def test_apply_cuda_tf32_off_only_changes_cuda() -> None:
     assert merged == [("CUDAExecutionProvider", {"device_id": 0, "use_tf32": 0})]
 
 
+def test_app_and_bench_build_identical_cuda_provider_options(tmp_path: Path) -> None:
+    from app.pose.estimator import (
+        RtmlibEstimator,
+        apply_cuda_provider_options,
+        cuda_provider_options,
+        provider_for_device,
+    )
+
+    app = RtmlibEstimator(models_dir=tmp_path, device="cuda")
+    bench = apply_cuda_tf32_off([provider_for_device("cuda")])
+    assert app.session_providers() == bench
+    assert app.session_providers() == apply_cuda_provider_options(["CUDAExecutionProvider"])
+    assert bench == [("CUDAExecutionProvider", {"use_tf32": 0})]
+    assert cuda_provider_options() == {"use_tf32": 0}
+
+
 def test_cuda_tf32_off_patches_inference_session(monkeypatch: pytest.MonkeyPatch) -> None:
     import onnxruntime as ort
 

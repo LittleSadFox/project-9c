@@ -16,8 +16,8 @@ import subprocess
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from itertools import islice
 from pathlib import Path
 from typing import Any
@@ -525,42 +525,17 @@ def _mean_or_none(values: list[float]) -> float | None:
 
 
 def apply_cuda_tf32_off(providers: Any) -> Any:
-    """Force use_tf32=0 on CUDA EP entries. Leave other providers unchanged."""
-    if not providers:
-        return providers
-    updated: list[Any] = []
-    for item in providers:
-        if item == "CUDAExecutionProvider":
-            updated.append(("CUDAExecutionProvider", {"use_tf32": 0}))
-            continue
-        if isinstance(item, (tuple, list)) and item and item[0] == "CUDAExecutionProvider":
-            opts = dict(item[1]) if len(item) > 1 and isinstance(item[1], dict) else {}
-            opts["use_tf32"] = 0
-            updated.append(("CUDAExecutionProvider", opts))
-            continue
-        updated.append(item)
-    return updated
+    """Apply the shared CUDA provider options. Same helper as RtmlibEstimator."""
+    from app.pose.estimator import apply_cuda_provider_options
+
+    return apply_cuda_provider_options(providers)
 
 
-@contextmanager
-def cuda_tf32_off() -> Iterator[None]:
-    """Patch ORT session create so pose_bench CUDA sessions turn TF32 off."""
-    import onnxruntime as ort
+def cuda_tf32_off() -> AbstractContextManager[None]:
+    """Patch ORT session create with the shared CUDA provider options."""
+    from app.pose.estimator import cuda_provider_session
 
-    original = ort.InferenceSession
-
-    def wrapped(*args: Any, **kwargs: Any) -> Any:
-        if "providers" in kwargs:
-            kwargs["providers"] = apply_cuda_tf32_off(kwargs["providers"])
-        elif len(args) >= 2:
-            args = (args[0], apply_cuda_tf32_off(args[1]), *args[2:])
-        return original(*args, **kwargs)
-
-    ort.InferenceSession = wrapped  # type: ignore[method-assign]
-    try:
-        yield
-    finally:
-        ort.InferenceSession = original  # type: ignore[method-assign]
+    return cuda_provider_session()
 
 
 def compare_keypoints(
@@ -834,6 +809,7 @@ def pose_bench(
         MODE_FILES,
         FixtureEstimator,
         RtmlibEstimator,
+        cuda_provider_options,
         resolve_device,
     )
 
@@ -930,7 +906,7 @@ def pose_bench(
                 "keypoints_dropped": parity.get("keypoints_dropped"),
                 "frame_error": parity.get("frame_error"),
                 "keypoints": parity.get("keypoints"),
-                "cuda_provider_options": {"use_tf32": 0},
+                "cuda_provider_options": cuda_provider_options(),
             }
         elif have_cuda:
             mode_metrics["cuda"] = {"error": "CUDA estimator failed to start", "parity_ok": False}

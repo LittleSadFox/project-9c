@@ -524,8 +524,13 @@ The CPU and CUDA rtmlib paths match except the ONNX Runtime provider.
 Both use the same pose size, ImageNet BGR mean/std, float32 input, and `simcc_split_ratio=2.0`.
 rtmlib creates `InferenceSession(..., providers=[name])` with no session options.
 Ampere TF32 can move the SIMCC argmax on rtmpose-s by about 1 px.
-That option is for `pose_bench` only.
-The app estimator does not change.
+
+## 2026-10-22 — shared CUDA provider options
+
+`cuda_provider_options()` in `app/pose/estimator.py` returns `{use_tf32: 0}`.
+`RtmlibEstimator` and `pose_bench` both call that helper.
+The app CUDA path and the bench CUDA path now use the same provider options.
+Bench behaviour does not change.
 
 The plain command is unchanged:
 
