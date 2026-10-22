@@ -239,3 +239,12 @@ It logs `webhook ping failed status=<code> curl_rc=<n>` for any other code or cu
 The log does not store the URL, the token, or curl error text.
 
 See `TROUBLESHOOTING_LOG.md`.
+
+## 2026-10-22 — watchdog terminate must survive a bad log
+
+An unwritable job log or run dir must not skip `cc_terminate_self`.
+`cc_log` now ignores a failed `tee -a` under `pipefail`.
+The watchdog treats `mkdir`, `started_at`, and the TTL `printf` as best effort.
+A bad `started_at` read must not kill the watchdog.
+Only a digit timestamp enters arithmetic.
+A 401 webhook ping still reaches terminate.

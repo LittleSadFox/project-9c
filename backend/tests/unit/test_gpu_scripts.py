@@ -299,6 +299,36 @@ def _run_job_webhook(tmp_path: Path, job_id: str) -> subprocess.CompletedProcess
     )
 
 
+def _watchdog_errexit(
+    tmp_path: Path,
+    run_dir: Path,
+    *,
+    pod: str,
+    unset_log: bool = True,
+    extra: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    unset_cmd = "unset CC_RUN_LOG; " if unset_log else ""
+    env = {
+        "RUNPOD_POD_ID": pod,
+        "RUNPOD_API_KEY": "ok-key",
+        "CC_VOLUME_DIR": str(tmp_path / "vol"),
+        "CC_TTL_S": "1",
+    }
+    if extra:
+        env.update(extra)
+    return _run(
+        [
+            "bash",
+            "-c",
+            f"set -euo pipefail; source {LIB}; unset CC_JOB_ID; "
+            f"{unset_cmd}cc_watchdog_start {run_dir}; sleep 2",
+        ],
+        env=env,
+        bin_dir=tmp_path,
+        timeout=5,
+    )
+
+
 def _run_dir_text(run_dir: Path) -> str:
     chunks: list[str] = []
     if not run_dir.exists():
@@ -1745,6 +1775,75 @@ def test_webhook_curl_stderr_url_does_not_leak_into_log(tmp_path: Path) -> None:
             assert leak not in path.name
 
 
+def test_webhook_ping_failed_on_401_still_terminates(tmp_path: Path) -> None:
+    curl = tmp_path / "curl"
+    curl.write_text(
+        """#!/usr/bin/env bash
+has_config=0
+method=GET
+out=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --config)
+      has_config=1
+      shift 2
+      ;;
+    -X)
+      method="$2"
+      shift 2
+      ;;
+    -o)
+      out="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+if [[ "$has_config" == "1" ]]; then
+  printf '401'
+  exit 0
+fi
+if [[ "$method" == "DELETE" ]]; then
+  if [[ -n "$out" && "$out" != "/dev/null" ]]; then
+    printf '%s\\n' '{"id":"pod-hook-401"}' >"$out"
+  fi
+  printf '200'
+  exit 0
+fi
+printf '500'
+exit 0
+""",
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+    result = _run(
+        [str(RUN_JOB)],
+        env={
+            "CC_VOLUME_DIR": str(tmp_path / "vol"),
+            "CC_JOB": "gpu_tests",
+            "CC_GIT_REF": SHA40,
+            "CC_JOB_ID": "job-hook-401",
+            "CC_TTL_S": "60",
+            "CC_IN_GPU_TESTS": "",
+            "CC_WEBHOOK_URL": "https://example.invalid/hook",
+            "RUNPOD_POD_ID": "pod-hook-401",
+            "RUNPOD_API_KEY": "ok-key",
+            **_job_dirs(tmp_path),
+        },
+        bin_dir=tmp_path,
+    )
+    assert result.returncode != 0
+    log = tmp_path / "vol" / "runs" / "job-hook-401" / "log.txt"
+    text = log.read_text(encoding="utf-8")
+    assert "webhook ping failed status=401 curl_rc=0" in text
+    assert "webhook ping ok" not in text
+    assert "example.invalid" not in text + result.stdout + result.stderr
+    assert _stamp_path("pod-hook-401").is_file()
+    assert not Path("/tmp/.cc_terminated.pod-hook-401").exists()
+
+
 def test_run_logged_streams_before_exit(tmp_path: Path) -> None:
     log = tmp_path / "log.txt"
     token = "StreamTokenSecret"
@@ -2130,6 +2229,133 @@ def test_terminate_stamp_other_pod_or_unset_job_does_not_suppress(
     assert _stamp_path("pod-wd").is_file()
     assert not Path("/tmp/.cc_terminated.pod-wd").exists()
     assert "TTL 1s expired" in watchdog.stdout
+
+
+def test_unwritable_run_log_still_terminates(tmp_path: Path) -> None:
+    if not Path("/dev/full").exists():
+        pytest.skip("/dev/full is not available")
+    _fake_curl(tmp_path, "200", '{"id":"pod-ro-log"}')
+    result = _run(
+        [
+            "bash",
+            "-c",
+            f"set -euo pipefail; source {LIB}; cc_terminate_self",
+        ],
+        env={
+            "RUNPOD_POD_ID": "pod-ro-log",
+            "RUNPOD_API_KEY": "ok-key",
+            "CC_RUN_LOG": "/dev/full",
+            "CC_VOLUME_DIR": str(tmp_path / "vol"),
+        },
+        bin_dir=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert _stamp_path("pod-ro-log").is_file()
+    assert not Path("/tmp/.cc_terminated.pod-ro-log").exists()
+    assert "terminate ok" in result.stdout
+
+
+def test_unwritable_watchdog_run_dir_still_terminates(tmp_path: Path) -> None:
+    _fake_curl(tmp_path, "200", '{"id":"pod-ro-wd"}')
+    blocked = tmp_path / "not-a-dir"
+    blocked.write_text("file\n", encoding="utf-8")
+    result = _watchdog_errexit(tmp_path, blocked, pod="pod-ro-wd")
+    assert result.returncode == 0, result.stderr
+    assert _stamp_path("pod-ro-wd").is_file()
+    assert not Path("/tmp/.cc_terminated.pod-ro-wd").exists()
+    assert "TTL 1s expired" in result.stdout
+    assert "terminate ok" in result.stdout
+
+
+def test_unwritable_watchdog_run_log_still_terminates(tmp_path: Path) -> None:
+    if not Path("/dev/full").exists():
+        pytest.skip("/dev/full is not available")
+    _fake_curl(tmp_path, "200", '{"id":"pod-ro-wd-log"}')
+    run_dir = tmp_path / "vol" / "runs" / "job-ro-wd-log"
+    run_dir.mkdir(parents=True)
+    started = str(int(time.time()) - 120)
+    (run_dir / "started_at").write_text(f"{started}\n", encoding="utf-8")
+    result = _watchdog_errexit(
+        tmp_path,
+        run_dir,
+        pod="pod-ro-wd-log",
+        unset_log=False,
+        extra={"CC_RUN_LOG": "/dev/full"},
+    )
+    assert result.returncode == 0, result.stderr
+    assert _stamp_path("pod-ro-wd-log").is_file()
+    assert not Path("/tmp/.cc_terminated.pod-ro-wd-log").exists()
+    assert "TTL 1s expired" in result.stdout
+    assert "terminate ok" in result.stdout
+
+
+def test_unreadable_started_at_still_terminates(tmp_path: Path) -> None:
+    _fake_curl(tmp_path, "200", '{"id":"pod-wd-unread"}')
+    run_dir = tmp_path / "vol" / "runs" / "job-wd-unread"
+    run_dir.mkdir(parents=True)
+    (run_dir / "started_at").mkdir()
+    result = _watchdog_errexit(tmp_path, run_dir, pod="pod-wd-unread")
+    assert result.returncode == 0, result.stderr
+    assert _stamp_path("pod-wd-unread").is_file()
+    assert not Path("/tmp/.cc_terminated.pod-wd-unread").exists()
+    assert "TTL 1s expired" in result.stdout
+    assert "terminate ok" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("value", "pod"),
+    [
+        ("abc", "pod-wd-abc"),
+        ("1.5", "pod-wd-1p5"),
+        ("17e9", "pod-wd-17e9"),
+        ("089", "pod-wd-089"),
+        ("0999", "pod-wd-0999"),
+    ],
+)
+def test_non_numeric_started_at_still_terminates(
+    tmp_path: Path, value: str, pod: str
+) -> None:
+    _fake_curl(tmp_path, "200", f'{{"id":"{pod}"}}')
+    run_dir = tmp_path / "vol" / "runs" / pod
+    run_dir.mkdir(parents=True)
+    (run_dir / "started_at").write_text(f"{value}\n", encoding="utf-8")
+    result = _watchdog_errexit(tmp_path, run_dir, pod=pod)
+    assert result.returncode == 0, result.stderr
+    assert _stamp_path(pod).is_file()
+    assert not Path(f"/tmp/.cc_terminated.{pod}").exists()
+    assert "TTL 1s expired" in result.stdout
+    assert "terminate ok" in result.stdout
+
+
+def test_started_at_injection_does_not_run(tmp_path: Path) -> None:
+    _fake_curl(tmp_path, "200", '{"id":"pod-wd-inj"}')
+    run_dir = tmp_path / "vol" / "runs" / "job-wd-inj"
+    run_dir.mkdir(parents=True)
+    marker = tmp_path / "pwned"
+    (run_dir / "started_at").write_text(
+        f"a[$(touch {marker})]\n",
+        encoding="utf-8",
+    )
+    result = _watchdog_errexit(tmp_path, run_dir, pod="pod-wd-inj")
+    assert result.returncode == 0, result.stderr
+    assert not marker.exists()
+    assert _stamp_path("pod-wd-inj").is_file()
+    assert not Path("/tmp/.cc_terminated.pod-wd-inj").exists()
+    assert "TTL 1s expired" in result.stdout
+    assert "terminate ok" in result.stdout
+
+
+def test_future_started_at_still_terminates(tmp_path: Path) -> None:
+    _fake_curl(tmp_path, "200", '{"id":"pod-wd-future"}')
+    run_dir = tmp_path / "vol" / "runs" / "job-wd-future"
+    run_dir.mkdir(parents=True)
+    (run_dir / "started_at").write_text("9999999999\n", encoding="utf-8")
+    result = _watchdog_errexit(tmp_path, run_dir, pod="pod-wd-future")
+    assert result.returncode == 0, result.stderr
+    assert _stamp_path("pod-wd-future").is_file()
+    assert not Path("/tmp/.cc_terminated.pod-wd-future").exists()
+    assert "TTL 1s expired" in result.stdout
+    assert "terminate ok" in result.stdout
 
 
 def test_run_times_out(tmp_path: Path) -> None:

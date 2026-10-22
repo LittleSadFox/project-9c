@@ -81,6 +81,14 @@ Copy this block for a new entry.
 - Fix: Read objects with `aws s3api get-object`. Keep the 403 and `SignatureDoesNotMatch` retry. Print one summary line per poll.
 - Prevention: Do not use `aws s3 cp ... -` against the Runpod S3 endpoint.
 
+### 2026-10-22 — unwritable log aborted terminate
+
+- Symptom: A failed `tee -a` on `CC_RUN_LOG` could stop `cc_terminate_self` before the API call under `pipefail`. A failed watchdog `mkdir` or `started_at` write could exit the watchdog before `sleep`. A bad `started_at` read or parse could also kill the watchdog after a container restart.
+- Where it failed: review
+- Cause: `set -euo pipefail` treated a log write as fatal. The watchdog fed `started_at` into `$(( ))` without a digit check.
+- Fix: Ignore a failed `tee -a` in `cc_log`. Add `|| true` to the watchdog `mkdir`, `started_at` write, and TTL `printf`. Accept only a short digit `started_at`. Clamp a future value to now.
+- Prevention: Keep terminate after a log write failure. Test an unwritable log, an unwritable run dir, a 401 ping, and a bad `started_at`.
+
 ### 2026-10-21 — image shellcheck flagged SC2031
 
 - Symptom: The fourth live `gpu_tests` pod at `2078682a` failed only `test_gpu_scripts_pass_shellcheck`. CI did not flag the same scripts.

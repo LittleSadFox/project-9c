@@ -1101,7 +1101,9 @@ cc_require_cuda_driver() {
 
 cc_log() {
   if [[ -n "${CC_RUN_LOG:-}" ]]; then
-    printf '%s\n' "$*" | tee -a "$CC_RUN_LOG"
+    # tee -a must not abort the caller under pipefail. An unwritable
+    # log must not skip cc_terminate_self's API call.
+    printf '%s\n' "$*" | tee -a "$CC_RUN_LOG" || true
   else
     printf '%s\n' "$*"
   fi
@@ -1176,24 +1178,29 @@ cc_watchdog_start() {
   cc_require_ttl
   (
     local started now remain
-    if [[ -n "$run_dir" && -f "${run_dir}/started_at" ]]; then
-      started="$(cat "${run_dir}/started_at")"
-    else
+    started=""
+    if [[ -n "$run_dir" && -e "${run_dir}/started_at" ]]; then
+      started="$(tr -d '[:space:]' <"${run_dir}/started_at" 2>/dev/null || true)"
+    fi
+    # Only a non-octal digit timestamp may enter $(( )). Other content is missing.
+    if [[ ! "$started" =~ ^[1-9][0-9]*$ ]]; then
       started="$(date +%s)"
       if [[ -n "$run_dir" ]]; then
-        mkdir -p "$run_dir"
-        printf '%s\n' "$started" >"${run_dir}/started_at"
+        mkdir -p "$run_dir" || true
+        printf '%s\n' "$started" >"${run_dir}/started_at" || true
       fi
     fi
     now="$(date +%s)"
+    (( started <= now )) || started="$now"
     remain=$((CC_TTL_S - (now - started)))
+    (( remain <= CC_TTL_S )) || remain=$CC_TTL_S
     if (( remain < 1 )); then
       remain=1
     fi
     sleep "$remain"
-    echo "TTL ${CC_TTL_S}s expired. Terminate the pod."
+    echo "TTL ${CC_TTL_S}s expired. Terminate the pod." || true
     if [[ -n "$run_dir" && -z "${CC_RUN_LOG:-}" ]]; then
-      printf '%s\n' "TTL ${CC_TTL_S}s expired. Terminate the pod." >>"${run_dir}/log.txt"
+      printf '%s\n' "TTL ${CC_TTL_S}s expired. Terminate the pod." >>"${run_dir}/log.txt" || true
     fi
     cc_terminate_self
   ) &
