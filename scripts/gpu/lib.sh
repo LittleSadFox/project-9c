@@ -62,14 +62,14 @@ cc_parse_ttl() {
   [[ -n "$raw" ]] || cc_fail "TTL is empty. Set CC_TTL_S or pass --ttl."
   local seconds=""
   if [[ "$raw" =~ ^[0-9]+$ ]]; then
-    seconds="$raw"
+    seconds="$((10#$raw))"
   elif [[ "$raw" =~ ^([0-9]+)([smh])$ ]]; then
     local n="${BASH_REMATCH[1]}"
     local unit="${BASH_REMATCH[2]}"
     case "$unit" in
-      s) seconds="$n" ;;
-      m) seconds=$((n * 60)) ;;
-      h) seconds=$((n * 3600)) ;;
+      s) seconds="$((10#$n))" ;;
+      m) seconds="$((10#$n * 60))" ;;
+      h) seconds="$((10#$n * 3600))" ;;
     esac
   else
     cc_fail "TTL ${raw} is not an integer second count or a value like 10m / 2h."
@@ -851,6 +851,11 @@ cc_s3_uri_parts() {
   printf '%s\n%s\n' "$bucket" "$key"
 }
 
+cc_s3_is_not_found() {
+  local errfile="$1"
+  grep -qE '\((NoSuchKey|404)\) when calling the (GetObject|HeadObject) operation' "$errfile"
+}
+
 cc_s3_err_summary() {
   local errfile="$1"
   local key="$2"
@@ -899,7 +904,7 @@ cc_s3_cp_stdout() {
       rm -f "$err" "$dest"
       return 0
     fi
-    if grep -qiE 'NoSuchKey|Not Found|404' "$err"; then
+    if cc_s3_is_not_found "$err"; then
       rm -f "$err" "$dest"
       return 1
     fi
@@ -986,7 +991,7 @@ cc_s3_object_exists() {
     rm -f "$err" "$dest"
     return 0
   fi
-  if grep -qiE 'NoSuchKey|Not Found|404' "$err"; then
+  if cc_s3_is_not_found "$err"; then
     rm -f "$err" "$dest"
     return 1
   fi
@@ -1191,8 +1196,8 @@ cc_watchdog_start() {
       fi
     fi
     now="$(date +%s)"
-    (( started <= now )) || started="$now"
-    remain=$((CC_TTL_S - (now - started)))
+    (( 10#$started <= now )) || started="$now"
+    remain=$((CC_TTL_S - (now - 10#$started)))
     (( remain <= CC_TTL_S )) || remain=$CC_TTL_S
     if (( remain < 1 )); then
       remain=1

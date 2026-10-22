@@ -125,11 +125,17 @@ if [[ -f "$RUN_DIR/status" ]]; then
 fi
 echo running >"$RUN_DIR/status"
 
+gpu_name=""
+if command -v nvidia-smi >/dev/null 2>&1; then
+  gpu_name="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n 1 || true)"
+  gpu_name="$(cc_trim "$gpu_name")"
+fi
 {
   echo "job=${CC_JOB}"
   echo "job_id=${CC_JOB_ID}"
   echo "git_ref=${CC_GIT_REF}"
   echo "ttl_s=${CC_TTL_S}"
+  echo "gpu_name=${gpu_name:-unknown}"
 } | tee -a "$RUN_DIR/log.txt"
 
 fail_repo_token() {

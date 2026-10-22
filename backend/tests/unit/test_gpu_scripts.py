@@ -254,9 +254,13 @@ def _webhook_curl(
 printf 'argv=%s\\n' "$*" >> "{hits}"
 url=""
 body=""
+method=GET
+has_config=0
+out=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --config)
+      has_config=1
       url="$(sed -n 's/^url = \"\\(.*\\)\"$/\\1/p' "$2")"
       shift 2
       ;;
@@ -264,17 +268,36 @@ while [[ $# -gt 0 ]]; do
       body="$2"
       shift 2
       ;;
+    -X)
+      method="$2"
+      shift 2
+      ;;
+    -o)
+      out="$2"
+      shift 2
+      ;;
     *)
       shift
       ;;
   esac
 done
-printf 'url=%s body=%s\\n' "$url" "$body" >> "{hits}"
-if [[ -f "{err_file}" ]]; then
-  cat "{err_file}" >&2
+if [[ "$has_config" == "1" ]]; then
+  printf 'url=%s body=%s\\n' "$url" "$body" >> "{hits}"
+  if [[ -f "{err_file}" ]]; then
+    cat "{err_file}" >&2
+  fi
+  printf '%s' "{http}"
+  exit {exit_code}
 fi
-printf '%s' "{http}"
-exit {exit_code}
+if [[ "$method" == "DELETE" ]]; then
+  if [[ -n "$out" && "$out" != "/dev/null" ]]; then
+    printf '%s\\n' '{{"id":"pod"}}' >"$out"
+  fi
+  printf '200'
+  exit 0
+fi
+printf '500'
+exit 0
 """,
         encoding="utf-8",
     )
@@ -282,21 +305,28 @@ exit {exit_code}
     return hits
 
 
-def _run_job_webhook(tmp_path: Path, job_id: str) -> subprocess.CompletedProcess[str]:
-    return _run(
-        [str(RUN_JOB)],
-        env={
-            "CC_VOLUME_DIR": str(tmp_path / "vol"),
-            "CC_JOB": "gpu_tests",
-            "CC_GIT_REF": SHA40,
-            "CC_JOB_ID": job_id,
-            "CC_TTL_S": "60",
-            "CC_IN_GPU_TESTS": "",
-            "CC_WEBHOOK_URL": "https://example.invalid/hook",
-            **_job_dirs(tmp_path),
-        },
-        bin_dir=tmp_path,
-    )
+def _run_job_webhook(
+    tmp_path: Path,
+    job_id: str,
+    *,
+    pod: str | None = None,
+    api_key: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    env = {
+        "CC_VOLUME_DIR": str(tmp_path / "vol"),
+        "CC_JOB": "gpu_tests",
+        "CC_GIT_REF": SHA40,
+        "CC_JOB_ID": job_id,
+        "CC_TTL_S": "60",
+        "CC_IN_GPU_TESTS": "",
+        "CC_WEBHOOK_URL": "https://example.invalid/hook",
+        **_job_dirs(tmp_path),
+    }
+    if pod:
+        env["RUNPOD_POD_ID"] = pod
+    if api_key:
+        env["RUNPOD_API_KEY"] = api_key
+    return _run([str(RUN_JOB)], env=env, bin_dir=tmp_path)
 
 
 def _watchdog_errexit(
@@ -529,6 +559,54 @@ def tmp_cc_src() -> Iterator[Path]:
         shutil.rmtree(path, ignore_errors=True)
 
 
+S3_NOT_FOUND_GET = (
+    "An error occurred (NoSuchKey) when calling the GetObject operation: "
+    "The specified key does not exist."
+)
+S3_NOT_FOUND_HEAD = (
+    "An error occurred (404) when calling the HeadObject operation: Not Found"
+)
+S3_NOT_FOUND_RE = (
+    r"\((NoSuchKey|404)\) when calling the (GetObject|HeadObject) operation"
+)
+
+
+def _fake_aws_err(tmp_path: Path, msg: str) -> Path:
+    err = tmp_path / "aws-err.txt"
+    err.write_text(msg + "\n", encoding="utf-8")
+    aws = tmp_path / "aws"
+    aws.write_text(
+        f"#!/usr/bin/env bash\ncat '{err}' >&2\nexit 1\n",
+        encoding="utf-8",
+    )
+    aws.chmod(0o755)
+    return aws
+
+
+def _s3_cp(tmp_path: Path) -> subprocess.CompletedProcess[str]:
+    return _run(
+        [
+            "bash",
+            "-c",
+            f"source {LIB} && cc_s3_cp_stdout s3://vol/runs/job-1/status "
+            "EU-RO-1 https://s3api-eu-ro-1.runpod.io",
+        ],
+        bin_dir=tmp_path,
+    )
+
+
+def _s3_exists(tmp_path: Path) -> subprocess.CompletedProcess[str]:
+    return _run(
+        [
+            "bash",
+            "-c",
+            f"source {LIB} && cc_s3_object_exists s3://vol/runs/job-1/status "
+            "EU-RO-1 https://s3api-eu-ro-1.runpod.io",
+        ],
+        bin_dir=tmp_path,
+    )
+
+
 def _fake_aws_get_object(
     tmp_path: Path,
     *,
@@ -715,12 +793,11 @@ def test_pod_up_refuses_existing_job_id_in_s3(tmp_path: Path) -> None:
 
 
 def test_pod_up_allows_unused_job_id(tmp_path: Path) -> None:
-    aws = tmp_path / "aws"
-    aws.write_text(
-        "#!/usr/bin/env bash\necho NoSuchKey >&2\nexit 1\n",
-        encoding="utf-8",
+    _fake_aws_err(
+        tmp_path,
+        "An error occurred (NoSuchKey) when calling the GetObject operation: "
+        "The specified key does not exist.",
     )
-    aws.chmod(0o755)
     result = _run(
         [str(POD_UP), "--job", "gpu_tests", "--ref", SHA40, "--dry-run"],
         env={
@@ -731,6 +808,121 @@ def test_pod_up_allows_unused_job_id(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     assert "job_id=job-fresh" in result.stdout
+
+
+def test_s3_not_found_match_is_strict() -> None:
+    text = LIB.read_text(encoding="utf-8")
+    helper = text.split("cc_s3_is_not_found()")[1].split("cc_s3_err_summary()")[0]
+    assert S3_NOT_FOUND_RE in helper
+    cp_fn = text.split("cc_s3_cp_stdout()")[1].split("cc_rest()")[0]
+    exists_fn = text.split("cc_s3_object_exists()")[1].split("cc_s3_run_exists()")[0]
+    assert "cc_s3_is_not_found" in cp_fn
+    assert "cc_s3_is_not_found" in exists_fn
+    assert "NoSuchKey|Not Found|404" not in cp_fn
+    assert "NoSuchKey|Not Found|404" not in exists_fn
+
+
+@pytest.mark.parametrize(
+    "msg",
+    [
+        S3_NOT_FOUND_GET,
+        S3_NOT_FOUND_HEAD,
+        "An error occurred (NoSuchKey) when calling the HeadObject operation: x",
+        "An error occurred (404) when calling the GetObject operation: x",
+    ],
+)
+def test_s3_is_not_found_accepts_aws_phrase(tmp_path: Path, msg: str) -> None:
+    err = tmp_path / "err.txt"
+    err.write_text(msg + "\n", encoding="utf-8")
+    result = _run(
+        ["bash", "-c", f"source {LIB} && cc_s3_is_not_found {err}"],
+        env=_job_dirs(tmp_path),
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "msg",
+    [
+        "NoSuchKey",
+        "404",
+        "Not Found",
+        "HTTP 404",
+        "An error occurred (AccessDenied) when calling the GetObject operation: x",
+        "An error occurred (NoSuchKey) when calling the ListObjects operation: x",
+    ],
+)
+def test_s3_is_not_found_fails_closed(tmp_path: Path, msg: str) -> None:
+    err = tmp_path / "err.txt"
+    err.write_text(msg + "\n", encoding="utf-8")
+    result = _run(
+        ["bash", "-c", f"source {LIB} && cc_s3_is_not_found {err}"],
+        env=_job_dirs(tmp_path),
+    )
+    assert result.returncode != 0
+
+
+def test_s3_cp_treats_strict_not_found_as_missing(tmp_path: Path) -> None:
+    _fake_aws_err(tmp_path, S3_NOT_FOUND_GET)
+    result = _s3_cp(tmp_path)
+    assert result.returncode == 1
+    assert "ERROR: S3" not in result.stderr
+    _fake_aws_err(tmp_path, S3_NOT_FOUND_HEAD)
+    result = _s3_cp(tmp_path)
+    assert result.returncode == 1
+    assert "ERROR: S3" not in result.stderr
+
+
+def test_s3_object_exists_treats_strict_not_found_as_missing(tmp_path: Path) -> None:
+    _fake_aws_err(tmp_path, S3_NOT_FOUND_GET)
+    result = _s3_exists(tmp_path)
+    assert result.returncode == 1
+    assert "ERROR: S3" not in result.stderr
+    assert "Could not check" not in result.stderr
+    _fake_aws_err(tmp_path, S3_NOT_FOUND_HEAD)
+    result = _s3_exists(tmp_path)
+    assert result.returncode == 1
+    assert "ERROR: S3" not in result.stderr
+    assert "Could not check" not in result.stderr
+
+
+@pytest.mark.parametrize("msg", ["NoSuchKey", "404", "Not Found"])
+def test_s3_cp_fails_closed_on_loose_404(tmp_path: Path, msg: str) -> None:
+    _fake_aws_err(tmp_path, msg)
+    result = _s3_cp(tmp_path)
+    assert result.returncode != 0
+    assert "ERROR: S3 get-object" in result.stderr
+
+
+@pytest.mark.parametrize("msg", ["NoSuchKey", "404", "Not Found"])
+def test_s3_object_exists_fails_closed_on_loose_404(tmp_path: Path, msg: str) -> None:
+    _fake_aws_err(tmp_path, msg)
+    result = _s3_exists(tmp_path)
+    assert result.returncode != 0
+    assert "Could not check" in result.stderr
+
+
+def test_pod_up_fails_closed_on_loose_s3_404(tmp_path: Path) -> None:
+    _fake_aws_err(tmp_path, "NoSuchKey")
+    result = _run(
+        [str(POD_UP), "--job", "gpu_tests", "--ref", SHA40, "--dry-run"],
+        env={
+            "CC_JOB_ID": "job-loose",
+            "CC_VOLUME_DIR": str(tmp_path / "empty-vol"),
+        },
+        bin_dir=tmp_path,
+    )
+    assert result.returncode != 0
+    assert "job_id=job-loose" not in result.stdout
+    assert "Could not check" in result.stderr or "S3 get-object" in result.stderr
+
+
+def test_parse_ttl_leading_zero_is_decimal() -> None:
+    cases = (("010", "10"), ("010s", "10"), ("010m", "600"), ("08", "8"))
+    for raw, want in cases:
+        result = _run(["bash", "-c", f"source {LIB} && cc_parse_ttl {raw}"])
+        assert result.returncode == 0, f"{raw}: {result.stderr}"
+        assert result.stdout.strip() == want, raw
 
 
 def test_terminate_stamp_dir_must_not_be_tmp(tmp_path: Path) -> None:
@@ -1639,6 +1831,43 @@ def test_run_job_fails_fast_without_repo_token(tmp_path: Path) -> None:
     assert status.read_text(encoding="utf-8").strip() == "failed"
     assert metrics["error"] == "CC_REPO_TOKEN is empty"
     assert "Clone" not in log.read_text(encoding="utf-8")
+    text = log.read_text(encoding="utf-8")
+    assert "job=gpu_tests" in text
+    assert "gpu_name=unknown" in text
+
+
+def test_run_job_header_includes_nvidia_smi_gpu_name(tmp_path: Path) -> None:
+    nvidia = tmp_path / "nvidia-smi"
+    nvidia.write_text(
+        "#!/usr/bin/env bash\necho 'NVIDIA GeForce RTX 4090'\n",
+        encoding="utf-8",
+    )
+    nvidia.chmod(0o755)
+    result = _run(
+        [str(RUN_JOB)],
+        env={
+            "CC_VOLUME_DIR": str(tmp_path / "vol"),
+            "CC_JOB": "gpu_tests",
+            "CC_GIT_REF": SHA40,
+            "CC_JOB_ID": "job-gpu-name",
+            "CC_TTL_S": "60",
+            "CC_IN_GPU_TESTS": "",
+            **_job_dirs(tmp_path),
+        },
+        bin_dir=tmp_path,
+    )
+    assert result.returncode != 0
+    text = (tmp_path / "vol" / "runs" / "job-gpu-name" / "log.txt").read_text(
+        encoding="utf-8"
+    )
+    assert "job=gpu_tests" in text
+    assert "job_id=job-gpu-name" in text
+    assert f"git_ref={SHA40}" in text
+    assert "ttl_s=60" in text
+    assert "gpu_name=NVIDIA GeForce RTX 4090" in text
+    header = RUN_JOB.read_text(encoding="utf-8")
+    assert "--query-gpu=name" in header
+    assert "gpu_name=${gpu_name:-unknown}" in header
 
 
 def test_run_job_empty_token_pings_webhook(tmp_path: Path) -> None:
@@ -1728,7 +1957,10 @@ def test_webhook_ping_ok_on_2xx(tmp_path: Path) -> None:
 
 def test_webhook_ping_failed_on_non_2xx(tmp_path: Path) -> None:
     _webhook_curl(tmp_path, http="500", exit_code=0)
-    result = _run_job_webhook(tmp_path, "job-hook-500")
+    pod = "pod-hook-500"
+    result = _run_job_webhook(
+        tmp_path, "job-hook-500", pod=pod, api_key="ok-key"
+    )
     assert result.returncode != 0
     log = tmp_path / "vol" / "runs" / "job-hook-500" / "log.txt"
     text = log.read_text(encoding="utf-8")
@@ -1736,11 +1968,16 @@ def test_webhook_ping_failed_on_non_2xx(tmp_path: Path) -> None:
     assert "webhook ping ok" not in text
     assert "example.invalid" not in text + result.stdout + result.stderr
     assert "https://" not in text
+    assert _stamp_path(pod).is_file()
+    assert not Path(f"/tmp/.cc_terminated.{pod}").exists()
 
 
 def test_webhook_ping_failed_on_curl_error(tmp_path: Path) -> None:
     _webhook_curl(tmp_path, http="000", exit_code=7)
-    result = _run_job_webhook(tmp_path, "job-hook-curl7")
+    pod = "pod-hook-curl7"
+    result = _run_job_webhook(
+        tmp_path, "job-hook-curl7", pod=pod, api_key="ok-key"
+    )
     assert result.returncode != 0
     log = tmp_path / "vol" / "runs" / "job-hook-curl7" / "log.txt"
     text = log.read_text(encoding="utf-8")
@@ -1748,6 +1985,8 @@ def test_webhook_ping_failed_on_curl_error(tmp_path: Path) -> None:
     assert "webhook ping ok" not in text
     assert "example.invalid" not in text + result.stdout + result.stderr
     assert "https://" not in text
+    assert _stamp_path(pod).is_file()
+    assert not Path(f"/tmp/.cc_terminated.{pod}").exists()
 
 
 def test_webhook_curl_stderr_url_does_not_leak_into_log(tmp_path: Path) -> None:
@@ -2289,6 +2528,18 @@ def test_unwritable_watchdog_run_log_still_terminates(tmp_path: Path) -> None:
     assert "terminate ok" in result.stdout
 
 
+def test_watchdog_started_at_read_is_fail_safe() -> None:
+    text = LIB.read_text(encoding="utf-8")
+    fn = text.split("cc_watchdog_start()")[1].split("cc_require_repo_token()")[0]
+    assert '-e "${run_dir}/started_at"' in fn
+    assert '-f "${run_dir}/started_at"' not in fn
+    assert "2>/dev/null || true" in fn
+    assert "10#$started" in fn
+    ttl = text.split("cc_parse_ttl()")[1].split("cc_require_ttl()")[0]
+    assert "10#$raw" in ttl
+    assert "10#$n" in ttl
+
+
 def test_unreadable_started_at_still_terminates(tmp_path: Path) -> None:
     _fake_curl(tmp_path, "200", '{"id":"pod-wd-unread"}')
     run_dir = tmp_path / "vol" / "runs" / "job-wd-unread"
@@ -2300,6 +2551,10 @@ def test_unreadable_started_at_still_terminates(tmp_path: Path) -> None:
     assert not Path("/tmp/.cc_terminated.pod-wd-unread").exists()
     assert "TTL 1s expired" in result.stdout
     assert "terminate ok" in result.stdout
+    watchdog = LIB.read_text(encoding="utf-8").split("cc_watchdog_start()")[1]
+    watchdog = watchdog.split("cc_require_repo_token()")[0]
+    assert '-e "${run_dir}/started_at"' in watchdog
+    assert "2>/dev/null || true" in watchdog
 
 
 @pytest.mark.parametrize(
@@ -2333,7 +2588,7 @@ def test_started_at_injection_does_not_run(tmp_path: Path) -> None:
     run_dir.mkdir(parents=True)
     marker = tmp_path / "pwned"
     (run_dir / "started_at").write_text(
-        f"a[$(touch {marker})]\n",
+        f"PATH[$(touch {marker})]\n",
         encoding="utf-8",
     )
     result = _watchdog_errexit(tmp_path, run_dir, pod="pod-wd-inj")

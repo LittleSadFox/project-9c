@@ -73,6 +73,54 @@ def test_gpu_tests_job_writes_metrics(tmp_path: Path) -> None:
     assert f"ort_providers={providers} used_cuda={used}" in log
 
 
+def test_gpu_tests_writes_ort_providers_before_cuda_job_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _cpu_only(*, require_cuda: bool) -> dict[str, object]:
+        del require_cuda
+        return {
+            "available_providers": ["CPUExecutionProvider"],
+            "session_providers": ["CPUExecutionProvider"],
+            "used_cuda": False,
+            "output_shape": [1, 4],
+        }
+
+    monkeypatch.setattr("ml.jobs.check_cuda_session", _cpu_only)
+    sample = tmp_path / "sample_test.py"
+    sample.write_text("def test_ok() -> None:\n    assert True\n", encoding="utf-8")
+    run_dir = tmp_path / "run"
+    with pytest.raises(JobError, match="CUDAExecutionProvider"):
+        gpu_tests(
+            run_dir,
+            pytest_args=[str(sample), "-q"],
+            require_cuda=True,
+        )
+    log = (run_dir / "log.txt").read_text(encoding="utf-8")
+    assert "ort_providers=CPUExecutionProvider used_cuda=false" in log
+
+
+def test_gpu_tests_writes_ort_providers_on_cuda_check_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _boom(*, require_cuda: bool) -> dict[str, object]:
+        del require_cuda
+        raise RuntimeError("ort missing")
+
+    monkeypatch.setattr("ml.jobs.check_cuda_session", _boom)
+    sample = tmp_path / "sample_test.py"
+    sample.write_text("def test_ok() -> None:\n    assert True\n", encoding="utf-8")
+    run_dir = tmp_path / "run"
+    with pytest.raises(JobError, match="CUDA session check failed"):
+        gpu_tests(
+            run_dir,
+            pytest_args=[str(sample), "-q"],
+            require_cuda=True,
+        )
+    log = (run_dir / "log.txt").read_text(encoding="utf-8")
+    assert "ort_providers=" in log
+    assert "used_cuda=false" in log
+
+
 def test_gpu_tests_does_not_leak_cc_require(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
