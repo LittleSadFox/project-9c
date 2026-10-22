@@ -11,11 +11,17 @@ import pytest
 
 from app.pose.estimator import POSE_MODES, FixtureEstimator
 from ml.jobs import (
+    DEFAULT_BENCH_CLIP,
+    DEFAULT_BENCH_N_FRAMES,
+    DEFAULT_BENCH_START,
+    DEFAULT_MIN_COMPARED_FRAC,
     JOBS,
     JobError,
+    _debug_enabled,
     _take_frames,
     compare_keypoints,
     ensure_bench_weights,
+    main,
     pair_people,
     pose_bench,
     resolve_bench_clip,
@@ -39,8 +45,10 @@ def test_pose_bench_fixture_writes_metrics(tmp_path: Path, monkeypatch: pytest.M
     assert metrics["modes"]["balanced"]["cpu"]["fps"] > 0
     saved = json.loads((run_dir / "metrics.json").read_text(encoding="utf-8"))
     assert saved["status"] == "passed"
-    assert saved["clip"]["name"] == "synthetic"
-    assert "debug" not in saved
+    assert saved["clip"]["name"] == "sample1.mp4"
+    assert saved["clip"]["start_frame"] == 0
+    assert "debug" in saved
+    assert saved["debug"]["channel_order"] == "BGR"
     assert "pose_bench status=passed" in (run_dir / "log.txt").read_text(encoding="utf-8")
 
 
@@ -296,6 +304,62 @@ def test_load_bench_frames_uses_named_clip_not_first_file(
     assert "src:aaa.mp4" not in seen
 
 
+def test_load_bench_frames_defaults_to_sample1_and_start_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.storage import safe_ext, safe_join
+    from ml.jobs import _load_bench_frames
+
+    joined: list[tuple[str, ...]] = []
+    checked: list[str] = []
+
+    def record_join(root: Path, *parts: str) -> Path:
+        joined.append(parts)
+        return safe_join(root, *parts)
+
+    def record_ext(path: Path, allowed: set[str] | None = None) -> Path:
+        checked.append(path.name)
+        return safe_ext(path, allowed)
+
+    monkeypatch.setenv("CC_GOLDEN_DIR", str(tmp_path))
+    monkeypatch.setenv("CC_POSE_BACKEND", "fixture")
+    monkeypatch.delenv("CC_BENCH_CLIP", raising=False)
+    monkeypatch.delenv("CC_BENCH_START", raising=False)
+    monkeypatch.setattr("app.storage.safe_join", record_join)
+    monkeypatch.setattr("app.storage.safe_ext", record_ext)
+    frames, meta = _load_bench_frames(3)
+    assert len(frames) == 3
+    assert joined == [(DEFAULT_BENCH_CLIP,)]
+    assert checked == [DEFAULT_BENCH_CLIP]
+    assert meta["name"] == DEFAULT_BENCH_CLIP
+    assert meta["start_frame"] == DEFAULT_BENCH_START
+
+
+def test_pose_bench_bare_cli_uses_sample1_100_frames_and_frac(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_pose_bench(run_dir: Path, **kwargs: object) -> dict[str, object]:
+        seen["run_dir"] = run_dir
+        seen.update(kwargs)
+        return {}
+
+    monkeypatch.delenv("CC_POSE_BENCH_DEBUG", raising=False)
+    monkeypatch.setattr("ml.jobs.pose_bench", fake_pose_bench)
+    assert main(["pose_bench", "--run-dir", str(tmp_path / "run")]) == 0
+    assert seen["n_frames"] == DEFAULT_BENCH_N_FRAMES
+    assert seen["min_compared_frac"] == DEFAULT_MIN_COMPARED_FRAC
+    assert seen["clip_name"] is None
+    assert seen["start_frame"] is None
+    assert seen["debug"] is None
+    assert _debug_enabled(None) is True
+    assert DEFAULT_BENCH_CLIP == "sample1.mp4"
+    assert DEFAULT_BENCH_START == 0
+    assert DEFAULT_BENCH_N_FRAMES == 100
+    assert DEFAULT_MIN_COMPARED_FRAC == 0.9
+
+
 def test_load_bench_frames_missing_named_clip_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -309,6 +373,18 @@ def test_load_bench_frames_missing_named_clip_fails(
         _load_bench_frames(4)
 
 
+def test_pose_bench_debug_off_omits_numbers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CC_POSE_BACKEND", "fixture")
+    monkeypatch.delenv("CC_REQUIRE", raising=False)
+    monkeypatch.setenv("CC_DEVICE", "cpu")
+    monkeypatch.setenv("CC_POSE_BENCH_DEBUG", "0")
+    metrics = pose_bench(tmp_path / "run", n_frames=4, require_cuda=False, modes=["balanced"])
+    assert "debug" not in metrics
+    assert "debug_detections" not in metrics["modes"]["balanced"]
+
+
 def test_pose_bench_debug_writes_numbers_not_images(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -316,7 +392,7 @@ def test_pose_bench_debug_writes_numbers_not_images(
     monkeypatch.delenv("CC_REQUIRE", raising=False)
     monkeypatch.setenv("CC_DEVICE", "cpu")
     run_dir = tmp_path / "run"
-    metrics = pose_bench(run_dir, n_frames=4, require_cuda=False, modes=["balanced"], debug=True)
+    metrics = pose_bench(run_dir, n_frames=4, require_cuda=False, modes=["balanced"])
     assert "debug" in metrics
     debug = metrics["debug"]
     assert debug["dtype"] == "uint8"
@@ -324,7 +400,8 @@ def test_pose_bench_debug_writes_numbers_not_images(
     assert debug["frame_shape"][-1] == 3
     assert len(debug["channel_mean"]) == 3
     assert "clip" in metrics
-    assert metrics["clip"]["name"] == "synthetic"
+    assert metrics["clip"]["name"] == "sample1.mp4"
+    assert metrics["clip"]["start_frame"] == 0
     detections = metrics["modes"]["balanced"]["debug_detections"]["cpu"]
     assert detections[0]["count"] == 1
     assert len(detections[0]["boxes"][0]) == 4
@@ -332,6 +409,93 @@ def test_pose_bench_debug_writes_numbers_not_images(
     images.extend(run_dir.rglob("*.jpg"))
     images.extend(run_dir.rglob("*.webp"))
     assert images == []
+
+
+def _run_videos(run_dir: Path) -> list[Path]:
+    found: list[Path] = []
+    for path in run_dir.rglob("*"):
+        if not path.is_file():
+            continue
+        suffix = path.suffix.lower()
+        if suffix in {".mp4", ".mov", ".m4v"} or path.name.endswith(".u8.mp4"):
+            found.append(path)
+    return found
+
+
+def _install_proxy_mocks(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    written: list[Path] = []
+
+    class DummyReader:
+        def __init__(self, path: Path) -> None:
+            del path
+
+        def __enter__(self) -> DummyReader:
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+        def iter_frames(self) -> object:
+            yield 0, np.zeros((4, 4, 3), dtype=np.uint8)
+
+    def fake_proxy(src: Path, dest: Path) -> Path:
+        del src
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"proxy-bytes")
+        written.append(Path(dest))
+        return dest
+
+    monkeypatch.setattr("app.media.frames.FrameReader", DummyReader)
+    monkeypatch.setattr("app.media.frames.make_upright_u8_proxy", fake_proxy)
+    monkeypatch.setattr(
+        "app.media.frames.probe_video_stream",
+        lambda _path: {"codec_name": "h264", "pix_fmt": "yuv420p"},
+    )
+    monkeypatch.setattr("app.media.frames.probe_rotation_degrees", lambda _path: 0)
+    return written
+
+
+def test_pose_bench_leaves_no_video_under_run_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    golden = tmp_path / "golden"
+    golden.mkdir()
+    (golden / "sample1.mp4").write_bytes(b"named-clip")
+    written = _install_proxy_mocks(monkeypatch)
+    monkeypatch.setenv("CC_GOLDEN_DIR", str(golden))
+    monkeypatch.setenv("CC_POSE_BACKEND", "fixture")
+    monkeypatch.delenv("CC_REQUIRE", raising=False)
+    monkeypatch.setenv("CC_DEVICE", "cpu")
+    monkeypatch.delenv("CC_BENCH_CLIP", raising=False)
+
+    passed = tmp_path / "pass"
+    pose_bench(passed, n_frames=1, require_cuda=False, modes=["balanced"])
+    assert written
+    assert all(passed.resolve() not in path.resolve().parents for path in written)
+    assert all(not path.exists() for path in written)
+    assert _run_videos(passed) == []
+
+    def no_compare(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {
+            "mean_abs_px": None,
+            "parity_ok": False,
+            "frames_total": 1,
+            "frames_with_detections_cpu": 0,
+            "frames_with_detections_cuda": 0,
+            "frames_compared": 0,
+            "min_compared_frac": 0.9,
+            "parity_limit_px": 1.0,
+        }
+
+    written.clear()
+    monkeypatch.setattr("ml.jobs.compare_keypoints", no_compare)
+    failed = tmp_path / "fail"
+    with pytest.raises(JobError):
+        pose_bench(failed, n_frames=1, require_cuda=False, modes=["balanced"])
+    assert written
+    assert all(failed.resolve() not in path.resolve().parents for path in written)
+    assert all(not path.exists() for path in written)
+    assert _run_videos(failed) == []
 
 
 @pytest.mark.media

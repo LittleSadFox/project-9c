@@ -473,9 +473,14 @@ OpenCV then reads the proxy, not the raw 10-bit `.mov`.
 `compare_keypoints` matches people in one frame by box IoU, then by nearest centroid.
 It does not zip people by list order.
 
-`--debug` / `CC_POSE_BENCH_DEBUG=1` writes numbers to `metrics.json`.
-It writes clip name, size, sha256, codecs, pixel formats, rotation, frame shape, dtype, BGR channel means, and boxes.
+Debug numbers are on by default.
+`--no-debug` or `CC_POSE_BENCH_DEBUG=0` turns them off.
+The debug block writes clip name, size, sha256, codecs, pixel formats, rotation, frame shape, dtype, BGR channel means, and boxes.
 It does not write a frame or a drawn image.
+
+The upright 8-bit proxy is written to a pod-local temp folder.
+`pose_bench` does not pass `run_dir/artifacts`.
+A `finally` block deletes the proxy after the frames are in memory.
 
 `pod_up.sh` passes `CC_BENCH_CLIP` and `CC_BENCH_START` for `pose_bench`.
 The default is `sample1.mp4` and start frame `0`.
@@ -485,15 +490,17 @@ The 90% compared-frame rule and the 1 px mean stay in place.
 A committed `testsrc` clip (`backend/tests/fixtures/pose/rotated_10bit_testsrc.mp4`) is HEVC Main 10 with a −90° display matrix.
 Tests that need ffmpeg use the `media` marker.
 
-Rerun on a pod:
+The code default is `sample1.mp4` and start frame `0`.
+Env and args only override those defaults.
+The default name still goes through `safe_join` and `safe_ext`.
+`python -m ml.jobs pose_bench --run-dir "$RUN_DIR"` with no extra flags uses `sample1.mp4`, start frame 0, 100 frames, `min-compared-frac` 0.9, and debug on.
+
+Ubuntu CI sets `CC_REQUIRE_MEDIA=1`.
+A skipped `media` test then fails when ffmpeg is missing or too old.
+The macOS CI job and `pod-layout` leave that flag unset.
+
+Rerun on a pod launched from main's `pod_up.sh`:
 
 ```text
-CC_GOLDEN_DIR=/workspace/videos \
-CC_BENCH_CLIP=sample1.mp4 \
-CC_BENCH_START=0 \
-CC_MODELS_DIR=/workspace/models \
-CC_POSE_BACKEND=rtmlib \
-CC_DEVICE=auto \
-CC_POSE_BENCH_DEBUG=1 \
-python -m ml.jobs pose_bench --run-dir "$RUN_DIR" --n-frames 100 --min-compared-frac 0.9 --clip sample1.mp4 --start-frame 0 --debug
+python -m ml.jobs pose_bench --run-dir "$RUN_DIR"
 ```

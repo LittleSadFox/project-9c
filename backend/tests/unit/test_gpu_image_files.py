@@ -74,6 +74,18 @@ def test_ci_runs_gpu_tests_from_tmp_cc_src() -> None:
     assert "/opt/cc/venv/bin/python" in text
 
 
+def test_ci_ubuntu_sets_require_media() -> None:
+    text = CI.read_text(encoding="utf-8")
+    assert "CC_REQUIRE_MEDIA=1" in text
+    assert "matrix.os == 'ubuntu-24.04'" in text
+    ci_job, pod_job = text.split("pod-layout:", 1)
+    assert "CC_REQUIRE_MEDIA=1" in ci_job
+    assert "CC_REQUIRE_MEDIA" not in pod_job
+    require_step = ci_job.split("Require media on Ubuntu", 1)[1].split("Pytest unmarked", 1)[0]
+    assert "ubuntu-24.04" in require_step
+    assert "macos-15" not in require_step
+
+
 def test_dockerfile_uses_ci_ffmpeg_pin() -> None:
     docker = DOCKERFILE.read_text(encoding="utf-8")
     ci = CI.read_text(encoding="utf-8")

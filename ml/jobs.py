@@ -25,6 +25,10 @@ from ml.tiny_onnx import tiny_identity_bytes
 
 ROOT = Path(__file__).resolve().parents[1]
 JobFn = Callable[[Path], dict[str, Any]]
+DEFAULT_BENCH_CLIP = "sample1.mp4"
+DEFAULT_BENCH_START = 0
+DEFAULT_BENCH_N_FRAMES = 100
+DEFAULT_MIN_COMPARED_FRAC = 0.9
 
 
 class JobError(Exception):
@@ -258,6 +262,29 @@ def _is_filename_only(name: str) -> bool:
     return Path(name).name == name
 
 
+def _pick_clip_name(clip_name: str | None) -> str:
+    """Return a filename. Code default is sample1.mp4. Env and args override it."""
+    if clip_name is not None and str(clip_name).strip():
+        return str(clip_name).strip()
+    env_name = os.environ.get("CC_BENCH_CLIP", "").strip()
+    if env_name:
+        return env_name
+    return DEFAULT_BENCH_CLIP
+
+
+def _pick_start_frame(start_frame: int | None) -> int:
+    """Return a start frame. Code default is 0. Env and args override it."""
+    if start_frame is not None:
+        return max(0, int(start_frame))
+    raw = os.environ.get("CC_BENCH_START", "").strip()
+    if not raw:
+        return DEFAULT_BENCH_START
+    try:
+        return max(0, int(raw))
+    except ValueError as exc:
+        raise JobError("CC_BENCH_START must be an integer.") from exc
+
+
 def resolve_bench_clip(name: str, golden_dir: Path) -> Path:
     """Resolve a golden-dir filename. Refuse paths and unknown suffixes."""
     from app.errors import AppError
@@ -294,20 +321,8 @@ def _load_bench_frames(
 ) -> tuple[list[Any], dict[str, Any]]:
     """Load an explicit golden clip through the upright 8-bit proxy."""
     backend = os.environ.get("CC_POSE_BACKEND", "rtmlib").strip() or "rtmlib"
-    requested = clip_name if clip_name is not None else os.environ.get("CC_BENCH_CLIP", "")
-    requested = (requested or "").strip()
-    if start_frame is None:
-        raw_start = os.environ.get("CC_BENCH_START", "0").strip() or "0"
-        try:
-            start_frame = int(raw_start)
-        except ValueError as exc:
-            raise JobError("CC_BENCH_START must be an integer.") from exc
-    start_frame = max(0, int(start_frame))
-    if not requested:
-        if backend == "fixture":
-            return _synthetic_bench_frames(n_frames), _empty_clip_meta(start_frame, name="synthetic")
-        requested = "sample1.mp4"
-
+    requested = _pick_clip_name(clip_name)
+    start_frame = _pick_start_frame(start_frame)
     golden = Path(os.environ.get("CC_GOLDEN_DIR", "/workspace/videos"))
     src = resolve_bench_clip(requested, golden)
     if not src.is_file():
@@ -325,34 +340,42 @@ def _load_bench_frames(
 
     source_probe = probe_video_stream(src)
     rotation = probe_rotation_degrees(src)
-    dest_dir = Path(proxy_dir) if proxy_dir is not None else Path(tempfile.mkdtemp(prefix="cc-bench-proxy-"))
-    dest_dir.mkdir(parents=True, exist_ok=True)
     digest = _file_sha256(src)
-    dest = dest_dir / f"{src.stem}.{digest[:12]}.u8.mp4"
+    owned_dir: Path | None = None
     try:
-        make_upright_u8_proxy(src, dest)
-    except FrameError as exc:
-        raise JobError(str(exc)) from exc
-    proxy_probe = probe_video_stream(dest)
-    proxy_rotation = probe_rotation_degrees(dest)
-    with FrameReader(dest) as reader:
-        frames = _take_frames(reader.iter_frames(), n_frames, start_frame)
-    if not frames:
-        raise JobError(f"Bench clip {requested} produced no frames.")
-    meta = {
-        "name": src.name,
-        "size_bytes": int(src.stat().st_size),
-        "sha256": digest,
-        "start_frame": start_frame,
-        "source_codec": source_probe.get("codec_name"),
-        "source_pix_fmt": source_probe.get("pix_fmt"),
-        "source_rotation_deg": rotation,
-        "proxy_codec": proxy_probe.get("codec_name"),
-        "proxy_pix_fmt": proxy_probe.get("pix_fmt"),
-        "proxy_rotation_deg": proxy_rotation,
-        "rotation_applied_deg": rotation,
-    }
-    return frames, meta
+        if proxy_dir is None:
+            owned_dir = Path(tempfile.mkdtemp(prefix="cc-bench-proxy-"))
+            dest_dir = owned_dir
+        else:
+            dest_dir = Path(proxy_dir)
+            dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / f"{src.stem}.{digest[:12]}.u8.mp4"
+        try:
+            make_upright_u8_proxy(src, dest)
+        except FrameError as exc:
+            raise JobError(str(exc)) from exc
+        proxy_probe = probe_video_stream(dest)
+        proxy_rotation = probe_rotation_degrees(dest)
+        with FrameReader(dest) as reader:
+            frames = _take_frames(reader.iter_frames(), n_frames, start_frame)
+        if not frames:
+            raise JobError(f"Bench clip {requested} produced no frames.")
+        return frames, {
+            "name": src.name,
+            "size_bytes": int(src.stat().st_size),
+            "sha256": digest,
+            "start_frame": start_frame,
+            "source_codec": source_probe.get("codec_name"),
+            "source_pix_fmt": source_probe.get("pix_fmt"),
+            "source_rotation_deg": rotation,
+            "proxy_codec": proxy_probe.get("codec_name"),
+            "proxy_pix_fmt": proxy_probe.get("pix_fmt"),
+            "proxy_rotation_deg": proxy_rotation,
+            "rotation_applied_deg": rotation,
+        }
+    finally:
+        if owned_dir is not None:
+            shutil.rmtree(owned_dir, ignore_errors=True)
 
 
 def _has_detections(raw: Any) -> bool:
@@ -616,10 +639,11 @@ def _selected_modes(requested: list[str] | None) -> list[str]:
 
 
 def _debug_enabled(flag: bool | None = None) -> bool:
+    """Debug numbers are on unless an arg or env turns them off."""
     if flag is not None:
         return bool(flag)
     raw = os.environ.get("CC_POSE_BENCH_DEBUG", "").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
+    return raw not in {"0", "false", "no", "off"}
 
 
 def _frame_debug(frames: list[Any], clip: dict[str, Any]) -> dict[str, Any]:
@@ -673,9 +697,9 @@ def _boxes_debug(boxes_list: list[Any]) -> list[dict[str, Any]]:
 def pose_bench(
     run_dir: Path,
     *,
-    n_frames: int = 100,
+    n_frames: int = DEFAULT_BENCH_N_FRAMES,
     require_cuda: bool | None = None,
-    min_compared_frac: float = 0.9,
+    min_compared_frac: float = DEFAULT_MIN_COMPARED_FRAC,
     modes: list[str] | None = None,
     limit_px: float = 1.0,
     clip_name: str | None = None,
@@ -706,7 +730,7 @@ def pose_bench(
         n_frames,
         clip_name=clip_name,
         start_frame=start_frame,
-        proxy_dir=run_dir / "artifacts",
+        proxy_dir=None,
     )
     n_used = len(frames)
     want_debug = _debug_enabled(debug)
@@ -848,11 +872,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run a Climbing Coach pod job.")
     parser.add_argument("job", choices=sorted(JOBS))
     parser.add_argument("--run-dir", type=Path, required=True)
-    parser.add_argument("--n-frames", type=int, default=100)
+    parser.add_argument("--n-frames", type=int, default=DEFAULT_BENCH_N_FRAMES)
     parser.add_argument(
         "--min-compared-frac",
         type=float,
-        default=0.9,
+        default=DEFAULT_MIN_COMPARED_FRAC,
         help="Minimum fraction of frames that must compare for pose_bench parity.",
     )
     parser.add_argument(
@@ -863,18 +887,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--clip",
         default="",
-        help="Filename of the golden clip. Never a path. Default: CC_BENCH_CLIP or sample1.mp4.",
+        help="Filename of the golden clip. Never a path. Default: sample1.mp4.",
     )
     parser.add_argument(
         "--start-frame",
         type=int,
         default=None,
-        help="First proxy frame to read. Default: CC_BENCH_START or 0.",
+        help="First proxy frame to read. Default: 0.",
     )
     parser.add_argument(
         "--debug",
-        action="store_true",
-        help="Write frame numbers and boxes to metrics.json. Do not save images.",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Write frame numbers and boxes to metrics.json. Default: on. No images.",
     )
     args = parser.parse_args(argv)
     if args.job == "gpu_tests" and os.environ.get("CC_IN_GPU_TESTS") == "1":
@@ -893,7 +918,7 @@ def main(argv: list[str] | None = None) -> int:
                 modes=requested or None,
                 clip_name=args.clip or None,
                 start_frame=args.start_frame,
-                debug=True if args.debug else None,
+                debug=args.debug,
             )
         else:
             JOBS[args.job](args.run_dir)
