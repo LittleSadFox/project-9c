@@ -22,6 +22,7 @@ from app.routes import include_routers
 from app.security import HostAllowlistMiddleware
 from app.services.attempts import make_cut_handler
 from app.services.ingest import make_ingest_handler
+from app.services.pose_service import bind_pose_runtime
 from app.storage import LibraryPaths, safe_join
 
 FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
@@ -48,6 +49,7 @@ def create_app(
     if media is None:
         media = FfmpegTool(settings.ffmpeg_bin, settings.ffprobe_bin)
     resolved_media: MediaTool = media
+    bind_pose_runtime(settings=settings, paths=paths, estimator=estimator)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:

@@ -396,3 +396,26 @@ A stored trash path that resolves to `trash/` itself, or above it, raises `bad_p
 `write_vfr_video` now uses `-fps_mode vfr`.
 Homebrew ffmpeg on macos-15 rejects `-vsync`.
 The pinned 7.1.5 static build accepts `-fps_mode` and still marks the clip as VFR.
+
+## 2026-10-22 — p1-B pose
+
+Add the Phase 1 pose slice.
+
+- `core/halpe26.py`, `core/tracking.py`, `core/climber.py`, and `core/smoothing.py` stay numpy-only.
+- `RtmlibEstimator` calls rtmlib `YOLOX` and `RTMPose` from local ONNX files. It does not use `PoseTracker`.
+- `FixtureEstimator` feeds prepared boxes to tests. `CC_POSE_BACKEND=fixture` selects it.
+- Skip the pose call when the detector returns no boxes.
+- The detector runs every `det_every` frames. In-between frames use keypoint boxes.
+- Store tracks as `pose/<video_id>/<run_id>.npz`. The effective cache key is an edits hash.
+- `media/frames.py` is the OpenCV `FrameReader` over the proxy.
+- The pose job runs on the compute lane. A's ingest enqueues it.
+- Phase 1 routes: `GET /pose`, `GET /pose/keypoints` (gzip), and `GET /pose/persons`.
+- Scene edits, `PUT /pose/climber`, and the review queue stay in Phase 2.
+- `ml/jobs.py` registers `pose_bench`. It measures fps per mode and CUDA vs CPU mean error.
+- ONNX weights come from `download_models.py` into `CC_MODELS_DIR`. Do not commit them. On a pod that path is `/workspace/models`. Fetch the weights once before the first `pose_bench`.
+
+Out of scope:
+
+- Pod `pose_bench` run (Runpod bot, after merge)
+- 1080p transcode
+- Slice A media and library routes
