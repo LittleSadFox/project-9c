@@ -81,6 +81,22 @@ Copy this block for a new entry.
 - Fix: Read objects with `aws s3api get-object`. Keep the 403 and `SignatureDoesNotMatch` retry. Print one summary line per poll.
 - Prevention: Do not use `aws s3 cp ... -` against the Runpod S3 endpoint.
 
+### 2026-10-22 — loose S3 404 looked like a missing object
+
+- Symptom: A 404 substring in any S3 error looked like a missing object.
+- Where it failed: review
+- Cause: `cc_s3_cp_stdout` and `cc_s3_object_exists` matched `NoSuchKey|Not Found|404`.
+- Fix: Match only `\((NoSuchKey|404)\) when calling the (GetObject|HeadObject) operation`. Fail closed on any other error.
+- Prevention: Keep the match on the AWS CLI phrase. Test the full GetObject and HeadObject lines. Test a loose `NoSuchKey` or `404`.
+
+### 2026-10-22 — leading-zero TTL used octal
+
+- Symptom: `cc_parse_ttl 010m` became 480s.
+- Where it failed: review
+- Cause: Bash `$((n * 60))` reads a leading zero as octal.
+- Fix: Use `10#` in `cc_parse_ttl` and in the watchdog `started_at` math.
+- Prevention: Keep a decimal test for `010m` and `010`.
+
 ### 2026-10-22 — unwritable log aborted terminate
 
 - Symptom: A failed `tee -a` on `CC_RUN_LOG` could stop `cc_terminate_self` before the API call under `pipefail`. A failed watchdog `mkdir` or `started_at` write could exit the watchdog before `sleep`. A bad `started_at` read or parse could also kill the watchdog after a container restart.

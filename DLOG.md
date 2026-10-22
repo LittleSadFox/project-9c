@@ -248,3 +248,15 @@ The watchdog treats `mkdir`, `started_at`, and the TTL `printf` as best effort.
 A bad `started_at` read must not kill the watchdog.
 Only a digit timestamp enters arithmetic.
 A 401 webhook ping still reaches terminate.
+
+## 2026-10-22 — p0-followups-1 S3 match and watchdog tests
+
+Treat an S3 object as missing only on the AWS CLI phrase
+`\((NoSuchKey|404)\) when calling the (GetObject|HeadObject) operation`.
+Any other error fails closed.
+`cc_parse_ttl` and the watchdog use `10#` so a leading zero is decimal.
+`run_job.sh` writes `gpu_name=<nvidia-smi name>` in the log header.
+`gpu_tests` writes `ort_providers=` before a CUDA `JobError`.
+The webhook Authorization header is not in this change.
+
+See `TROUBLESHOOTING_LOG.md`.

@@ -106,6 +106,19 @@ def check_cuda_session(*, require_cuda: bool) -> dict[str, Any]:
     return result
 
 
+def _write_ort_providers(run_dir: Path, cuda_metrics: dict[str, Any]) -> None:
+    providers = cuda_metrics.get("session_providers") or []
+    if not isinstance(providers, list):
+        providers = []
+    used = "true" if cuda_metrics.get("used_cuda") else "false"
+    with (run_dir / "log.txt").open("a", encoding="utf-8") as log:
+        log.write(
+            "ort_providers="
+            + ",".join(str(item) for item in providers)
+            + f" used_cuda={used}\n"
+        )
+
+
 def gpu_tests(run_dir: Path, *, pytest_args: list[str] | None = None, require_cuda: bool = True) -> dict[str, Any]:
     """Run every pytest tier that Linux supports. Record counts and the CUDA check."""
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -141,23 +154,19 @@ def gpu_tests(run_dir: Path, *, pytest_args: list[str] | None = None, require_cu
     pytest_metrics = parse_junit(junit)
     cuda_metrics: dict[str, Any]
     try:
-        cuda_metrics = check_cuda_session(require_cuda=require_cuda)
-    except JobError:
-        raise
+        cuda_metrics = check_cuda_session(require_cuda=False)
     except Exception as exc:
         if require_cuda:
+            cuda_metrics = {"error": str(exc), "used_cuda": False}
+            _write_ort_providers(run_dir, cuda_metrics)
             raise JobError(f"CUDA session check failed: {exc}") from exc
         cuda_metrics = {"error": str(exc), "used_cuda": False}
 
-    providers = cuda_metrics.get("session_providers") or []
-    if not isinstance(providers, list):
-        providers = []
-    used = "true" if cuda_metrics.get("used_cuda") else "false"
-    with (run_dir / "log.txt").open("a", encoding="utf-8") as log:
-        log.write(
-            "ort_providers="
-            + ",".join(str(item) for item in providers)
-            + f" used_cuda={used}\n"
+    _write_ort_providers(run_dir, cuda_metrics)
+    if require_cuda and not cuda_metrics.get("used_cuda"):
+        raise JobError(
+            "CUDAExecutionProvider did not run the session. "
+            f"session.get_providers()={cuda_metrics.get('session_providers')!r}."
         )
 
     status = "passed"
