@@ -21,7 +21,7 @@ HOST = "127.0.0.1:8810"
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    config.addinivalue_line("markers", "media: needs ffmpeg 7+")
+    config.addinivalue_line("markers", "media: needs ffmpeg 7+ and ffprobe")
     config.addinivalue_line("markers", "model: needs ONNX weights")
     config.addinivalue_line("markers", "gpu: needs CUDAExecutionProvider")
     config.addinivalue_line("markers", "macos: needs CoreML or VideoToolbox on a Mac")
@@ -40,8 +40,20 @@ def _skip_or_fail(name: str, reason: str) -> None:
     pytest.skip(reason)
 
 
+def _media_bin(name: str, env_key: str) -> str | None:
+    raw = os.environ.get(env_key, name).strip() or name
+    return shutil.which(raw)
+
+
+def _media_bins_on_path() -> bool:
+    return (
+        _media_bin("ffmpeg", "CC_FFMPEG_BIN") is not None
+        and _media_bin("ffprobe", "CC_FFPROBE_BIN") is not None
+    )
+
+
 def _ffmpeg_major() -> int | None:
-    ffmpeg = shutil.which(os.environ.get("CC_FFMPEG_BIN", "ffmpeg"))
+    ffmpeg = _media_bin("ffmpeg", "CC_FFMPEG_BIN")
     if ffmpeg is None:
         return None
     try:
@@ -69,6 +81,8 @@ def _ffmpeg_major() -> int | None:
 def pytest_runtest_setup(item: pytest.Item) -> None:
     marks = {mark.name for mark in item.iter_markers()}
     if "media" in marks:
+        if not _media_bins_on_path():
+            _skip_or_fail("media", "ffmpeg or ffprobe is not on PATH")
         major = _ffmpeg_major()
         if major is None or major < 7:
             _skip_or_fail("media", "ffmpeg 7+ is not available")

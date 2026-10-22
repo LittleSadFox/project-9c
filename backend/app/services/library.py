@@ -16,7 +16,7 @@ from app.repo import sessions as sessions_repo
 from app.repo import settings as settings_repo
 from app.repo import trash as trash_repo
 from app.repo import videos as videos_repo
-from app.storage import LibraryPaths, move_into
+from app.storage import LibraryPaths, move_into, safe_join
 
 VIDEO_PATCH_FIELDS = frozenset(
     {"boulder_id", "session_id", "recorded_at", "notes", "review_status"}
@@ -239,7 +239,7 @@ def restore_trash(conn: sqlite3.Connection, paths: LibraryPaths, trash_id: str) 
     if item is None:
         raise AppError("not_found", 404, "The trash item is not here.")
     payload = json.loads(item["payload"] or "{}")
-    trash_dir = paths.root / str(item["path"]) if item["path"] else paths.trash_item_dir(trash_id)
+    trash_dir = _resolve_trash_dir(paths, item.get("path"), trash_id)
     if item["kind"] == "video":
         row = payload.get("row") or {}
         video_id = str(item["entity_id"])
@@ -273,20 +273,39 @@ def restore_trash(conn: sqlite3.Connection, paths: LibraryPaths, trash_id: str) 
 
 def empty_trash(conn: sqlite3.Connection, paths: LibraryPaths) -> None:
     items = trash_repo.list_items(conn)
+    targets: list[tuple[dict[str, Any], Path | None]] = []
     for item in items:
         rel = item.get("path")
-        if rel:
-            target = paths.root / str(rel)
-            if target.exists():
-                if target.is_dir():
-                    shutil.rmtree(target, ignore_errors=True)
-                else:
-                    target.unlink(missing_ok=True)
+        target = _resolve_trash_dir(paths, rel, str(item["id"])) if rel else None
+        targets.append((item, target))
+    for item, target in targets:
+        if target is not None and target.exists():
+            if target.is_dir():
+                shutil.rmtree(target, ignore_errors=True)
+            else:
+                target.unlink(missing_ok=True)
         if item["kind"] == "video":
             videos_repo.hard_delete(conn, str(item["entity_id"]))
         elif item["kind"] == "attempt":
             attempts_repo.hard_delete(conn, str(item["entity_id"]))
     trash_repo.delete_all(conn)
+
+
+def _resolve_trash_dir(
+    paths: LibraryPaths, stored: str | None, trash_id: str
+) -> Path:
+    """Resolve a stored trash path and keep it inside trash/."""
+    if not stored:
+        return paths.trash_item_dir(trash_id)
+    raw = str(stored).strip().replace("\\", "/")
+    if not raw or Path(raw).is_absolute():
+        raise AppError("bad_path", 400, "The path is not allowed.")
+    parts = [part for part in Path(raw).parts if part not in {"", "."}]
+    if parts and parts[0] == "trash":
+        parts = parts[1:]
+    if not parts:
+        raise AppError("bad_path", 400, "The path is not allowed.")
+    return safe_join(paths.trash, *parts)
 
 
 def resolve_video_file(

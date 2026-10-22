@@ -377,3 +377,9 @@ Add Phase 1 slice A: library CRUD, streaming upload, ingest, media endpoints, tr
 - No 0002 migration. Schema stays `0001_init.sql`.
 - Do not start a pod. Do not touch `scripts/gpu/`, `docker/`, `AGENTS.md`, or `coding_plan.md`.
 - Local checks (ffmpeg 7.1.5 static build): ruff clean, mypy clean, pytest `not model and not gpu and not macos and not golden and not slow` → 227 passed, 1 skipped, 1 deselected.
+
+## 2026-10-22 — p1-A trash path and media skip
+
+`empty_trash` and `restore_trash` resolve the stored path with `safe_join(paths.trash, ...)`.
+A row whose path leaves `trash/` raises `bad_path` and deletes nothing.
+The `media` marker skips when `ffmpeg` or `ffprobe` is missing from PATH.
