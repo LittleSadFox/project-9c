@@ -417,6 +417,7 @@ from pathlib import Path
 text = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
 text = re.sub(r"(authorization:\s*)(basic|bearer)\s+\S+", r"\1\2 REDACTED", text, flags=re.I)
 text = re.sub(r"(?i)(api[_-]?key|token|secret)(\"?\s*[:=]\s*\"?)[^\"\s]+", r"\1REDACTED", text)
+text = re.sub(r"A[KS]IA[0-9A-Z]{16}", "REDACTED", text)
 text = text.replace("\n", " ")
 if len(text) > 400:
     text = text[:400] + "…"
@@ -542,6 +543,12 @@ def redact(text):
     if hook_key:
         text = text.replace(hook_key, "REDACTED")
     text = re.sub("rp" + "a_" + r"[A-Za-z0-9]+", "REDACTED", text)
+    text = re.sub(r"A[KS]IA[0-9A-Z]{16}", "REDACTED", text)
+    text = re.sub(
+        r"(?i)(aws_?(?:secret_?access_?key|access_?key_?id))(\"?\s*[:=]\s*\"?)[^\"\s]+",
+        r"\1\2REDACTED",
+        text,
+    )
     return text
 
 for line in sys.stdin:
@@ -673,6 +680,16 @@ cc_path_inside() {
   [[ "$resolved" == "$protected"/* ]]
 }
 
+cc_path_under_tmp_cc_src() {
+  # /tmp/cc-src and sibling /tmp/cc-src-* paths (and their children).
+  local resolved="$1"
+  local tmp_root="$2"
+  [[ -n "$resolved" && -n "$tmp_root" ]] || return 1
+  [[ "$resolved" == "${tmp_root}/cc-src" ||
+     "$resolved" == "${tmp_root}/cc-src/"* ||
+     "$resolved" == "${tmp_root}/cc-src-"* ]]
+}
+
 cc_real_home() {
   local home=""
   if [[ -n "${HOME:-}" ]]; then
@@ -733,9 +750,11 @@ cc_assert_safe_wipe_dir() {
   tmpdir_root=""
   if [[ -n "${TMPDIR:-}" ]]; then
     tmpdir_root="$(cc_realpath "$TMPDIR")"
-    local protected clone_root
-    clone_root="${tmp_root}/cc-src"
-    for protected in "$volume" "$scratch" "$repo_root" "$home" "$clone_root"; do
+    local protected
+    if cc_path_under_tmp_cc_src "$tmpdir_root" "$tmp_root"; then
+      tmpdir_root=""
+    fi
+    for protected in "$volume" "$scratch" "$repo_root" "$home"; do
       if [[ -n "$protected" && -n "$tmpdir_root" ]]; then
         if [[ "$tmpdir_root" == "$protected" || "$tmpdir_root" == "$protected"/* ]]; then
           tmpdir_root=""
@@ -821,7 +840,10 @@ cc_run_logged() {
   fifo_dir="$(mktemp -d)"
   fifo="${fifo_dir}/out.fifo"
   mkfifo "$fifo"
-  cc_redact_stream <"$fifo" | tee -a "${CC_RUN_LOG:-/dev/null}" &
+  # Subshell so wait covers redact_stream and tee, not only tee.
+  (
+    cc_redact_stream <"$fifo" | tee -a "${CC_RUN_LOG:-/dev/null}"
+  ) &
   reader=$!
   set +e
   if [[ "$wait_bg" == "1" ]]; then
@@ -989,7 +1011,7 @@ cc_s3_object_exists() {
   local uri="$1"
   local region="$2"
   local endpoint="$3"
-  local err dest parts bucket key
+  local err parts bucket key
   command -v aws >/dev/null 2>&1 || cc_fail "Install AWS CLI v2."
   if ! parts="$(cc_s3_uri_parts "$uri")"; then
     cc_fail "S3 URI ${uri} is not s3://bucket/key."
@@ -997,24 +1019,23 @@ cc_s3_object_exists() {
   bucket="$(printf '%s\n' "$parts" | sed -n '1p')"
   key="$(printf '%s\n' "$parts" | sed -n '2p')"
   err="$(mktemp)"
-  dest="$(mktemp)"
   # shellcheck disable=SC2046
-  if aws s3api get-object \
+  if aws s3api head-object \
     --bucket "$bucket" \
     --key "$key" \
     --region "$region" \
     --endpoint-url "$endpoint" \
     $(cc_aws_args) \
-    "$dest" >/dev/null 2>"$err"; then
-    rm -f "$err" "$dest"
+    >/dev/null 2>"$err"; then
+    rm -f "$err"
     return 0
   fi
   if cc_s3_is_not_found "$err"; then
-    rm -f "$err" "$dest"
+    rm -f "$err"
     return 1
   fi
-  echo "ERROR: S3 get-object ${uri} failed. $(cc_s3_err_summary "$err" "$key")" >&2
-  rm -f "$err" "$dest"
+  echo "ERROR: S3 head-object ${uri} failed. $(cc_s3_err_summary "$err" "$key")" >&2
+  rm -f "$err"
   cc_fail "Could not check ${uri}."
 }
 
@@ -1067,6 +1088,27 @@ cc_aws_args() {
   if [[ -n "${CC_AWS_PROFILE:-}" ]]; then
     printf '%s\n' --profile "$CC_AWS_PROFILE"
   fi
+}
+
+cc_aws_export_multipart_config() {
+  # Pin multipart_threshold so Runpod S3 uses PutObject, not CreateMultipartUpload.
+  # Write a temp config only. Do not edit ~/.aws/config.
+  local dest="${CC_AWS_CONFIG_FILE:-}"
+  if [[ -z "$dest" ]]; then
+    dest="$(mktemp)"
+  fi
+  local header="[default]"
+  if [[ -n "${CC_AWS_PROFILE:-}" ]]; then
+    header="[profile ${CC_AWS_PROFILE}]"
+  fi
+  cat >"$dest" <<EOF
+${header}
+s3 =
+    multipart_threshold = 128MB
+    multipart_chunksize = 128MB
+EOF
+  export AWS_CONFIG_FILE="$dest"
+  printf '%s\n' "$dest"
 }
 
 cc_setup_ssh() {
@@ -1132,6 +1174,58 @@ cc_log() {
   fi
 }
 
+cc_resolve_terminate_stamp_dir() {
+  # Tests may set CC_TERMINATE_STAMP_DIR. A pod must not point it at the volume.
+  local dir="$1"
+  dir="$(cc_trim "$dir")"
+  [[ "$dir" == /* ]] || return 1
+  if [[ -L "$dir" ]]; then
+    return 1
+  fi
+  local resolved volume scratch tmp_root tmpdir_root raw_parent
+  resolved="$(cc_realpath "$dir" 2>/dev/null || true)"
+  [[ -n "$resolved" ]] || return 1
+  if [[ -L "$resolved" ]]; then
+    return 1
+  fi
+  volume="$(cc_realpath "${CC_VOLUME_DIR:-/workspace}" 2>/dev/null || true)"
+  if [[ -n "$volume" ]] && { [[ "$resolved" == "$volume" || "$resolved" == "$volume"/* ]]; }; then
+    return 1
+  fi
+  scratch="$(cc_realpath "${CC_LIBRARY_DIR:-/tmp/cc-library}" 2>/dev/null || true)"
+  if [[ -n "$scratch" ]] && { [[ "$resolved" == "$scratch" || "$resolved" == "$scratch"/* ]]; }; then
+    return 1
+  fi
+  tmp_root="$(cc_realpath /tmp)"
+  if [[ "$resolved" == "$tmp_root" || "$resolved" == "$tmp_root"/* ]]; then
+    if cc_path_under_tmp_cc_src "$resolved" "$tmp_root"; then
+      return 1
+    fi
+    printf '%s\n' "$resolved"
+    return 0
+  fi
+  tmpdir_root=""
+  if [[ -n "${TMPDIR:-}" ]]; then
+    tmpdir_root="$(cc_realpath "$TMPDIR" 2>/dev/null || true)"
+  fi
+  if [[ -n "$tmpdir_root" ]] && { [[ "$resolved" == "$tmpdir_root" || "$resolved" == "$tmpdir_root"/* ]]; }; then
+    if cc_path_under_tmp_cc_src "$tmpdir_root" "$tmp_root"; then
+      return 1
+    fi
+    if [[ -n "$volume" ]] && { [[ "$tmpdir_root" == "$volume" || "$tmpdir_root" == "$volume"/* ]]; }; then
+      return 1
+    fi
+    printf '%s\n' "$resolved"
+    return 0
+  fi
+  raw_parent="${dir%/}"
+  raw_parent="${raw_parent%/*}"
+  if [[ -L "$raw_parent" ]]; then
+    return 1
+  fi
+  return 1
+}
+
 cc_terminate_stamp() {
   local pod="${RUNPOD_POD_ID:-}"
   local dir="${CC_TERMINATE_STAMP_DIR:-/tmp}"
@@ -1143,22 +1237,60 @@ cc_terminate_stamp() {
       return 1
       ;;
   esac
-  dir="$(cc_trim "$dir")"
-  [[ "$dir" == /* ]] || return 1
+  dir="$(cc_resolve_terminate_stamp_dir "$dir")" || return 1
   printf '%s\n' "${dir}/.cc_terminated.${pod}"
+}
+
+cc_terminate_write_stamp() {
+  local stamp="$1"
+  [[ -n "$stamp" ]] || return 1
+  if [[ -L "$stamp" ]]; then
+    echo "ERROR: terminate stamp is a symlink." >&2
+    return 1
+  fi
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 - "$stamp" <<'PY'
+import os
+import sys
+
+path = sys.argv[1]
+if os.path.lexists(path) and os.path.islink(path):
+    sys.exit(1)
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+try:
+    fd = os.open(path, flags, 0o600)
+except FileExistsError:
+    sys.exit(0 if (os.path.isfile(path) and not os.path.islink(path)) else 1)
+except OSError:
+    sys.exit(1)
+try:
+    os.write(fd, b"ok\n")
+finally:
+    os.close(fd)
+PY
 }
 
 cc_terminate_mark() {
   local stamp dir
   stamp="$(cc_terminate_stamp)" || return 0
   dir="${stamp%/*}"
-  mkdir -p "$dir"
-  printf 'ok\n' >"$stamp"
+  if [[ -L "$dir" ]]; then
+    echo "ERROR: terminate stamp dir is a symlink." >&2
+    return 1
+  fi
+  mkdir -p "$dir" || return 1
+  if [[ -L "$dir" || -L "$stamp" ]]; then
+    echo "ERROR: terminate stamp is a symlink." >&2
+    return 1
+  fi
+  cc_terminate_write_stamp "$stamp" || return 1
 }
 
 cc_terminate_self() {
   local stamp
-  if stamp="$(cc_terminate_stamp)" && [[ -f "$stamp" ]]; then
+  if stamp="$(cc_terminate_stamp)" && [[ -e "$stamp" && ! -L "$stamp" && -f "$stamp" ]]; then
     return 0
   fi
   if [[ -z "${RUNPOD_POD_ID:-}" ]]; then
@@ -1176,14 +1308,14 @@ cc_terminate_self() {
       if ctl="$(cc_run_timeout 20 runpodctl remove pod "$RUNPOD_POD_ID" 2>&1)" \
         || ctl="$(cc_run_timeout 20 runpodctl pod delete "$RUNPOD_POD_ID" 2>&1)"; then
         cc_log "terminate ok via runpodctl attempt=${attempt}"
-        cc_terminate_mark
+        cc_terminate_mark || true
         return 0
       fi
       cc_log "runpodctl failed attempt=${attempt}: $(cc_redact_oneline "$ctl")"
     fi
     if cc_rest DELETE "/pods/${RUNPOD_POD_ID}" >/dev/null; then
       cc_log "terminate ok via curl attempt=${attempt}"
-      cc_terminate_mark
+      cc_terminate_mark || true
       return 0
     fi
     delay=$((attempt * 2))

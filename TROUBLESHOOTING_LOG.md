@@ -62,7 +62,7 @@ Copy this block for a new entry.
 - Symptom: The second live `gpu_tests` pod at `73be826` used CUDA and `CUDAExecutionProvider`. Pytest reported 82 passed, 28 failed, and 1 skipped. Many of the failures were missing repo files.
 - Where it failed: pod
 - Cause: `test_run_job_logs_redacted_clone_stderr` ran `run_job.sh` with `CC_SRC_DIR` unset. `SRC` defaulted to `/tmp/climbing-coach`. `rm -rf "$SRC"` deleted the live checkout.
-- Fix: Tests now default `CC_SRC_DIR` and `CC_LIBRARY_DIR` under pytest `tmp_path`. The default clone dir is `/tmp/cc-src`. `run_job.sh` only removes a resolved path whose basename matches `cc-src`, whose parent is exactly `/tmp` or a trusted `$TMPDIR`, and that is not a symlink or a live checkout, volume, scratch, HOME, or working-directory path. `$TMPDIR` is untrusted when it resolves inside the volume, scratch, repo, HOME, or `/tmp/cc-src`. CI copies the repo to `/tmp/cc-src` and runs the `gpu_tests` pytest selection from there.
+- Fix: Tests now default `CC_SRC_DIR` and `CC_LIBRARY_DIR` under pytest `tmp_path`. The default clone dir is `/tmp/cc-src`. `run_job.sh` only removes a resolved path whose basename matches `cc-src`, whose parent is exactly `/tmp` or a trusted `$TMPDIR`, and that is not a symlink or a live checkout, volume, scratch, HOME, or working-directory path. `$TMPDIR` is untrusted when it resolves inside the volume, scratch, repo, HOME, `/tmp/cc-src`, or a sibling `/tmp/cc-src-*` path. CI copies the repo to `/tmp/cc-src` and runs the `gpu_tests` pytest selection from there.
 - Prevention: Keep destructive paths on `tmp_path`. Do not run `run_job.sh` against the live checkout. The remaining check-to-rm race needs `/tmp` write access on the pod; do not give extra writers access to `/tmp` on a job pod.
 
 ### 2026-10-21 — live gpu_tests nested pytest through /opt/cc python
@@ -128,6 +128,22 @@ Copy this block for a new entry.
 - Cause: `curl` returned 0 for a non-2xx reply. The ping discarded stdout. Curl stderr can contain the host or the URL.
 - Fix: Read `%{http_code}` and the curl exit. Log `webhook ping ok status=<code> curl_rc=<n>` only for HTTP 2xx. Log `webhook ping failed status=<code> curl_rc=<n>` otherwise. Discard curl stderr. Set `--max-time 15`.
 - Prevention: Do not write curl stderr, the webhook URL, or the token to `log.txt` or the run folder.
+
+### 2026-10-22 — Mac sync_volume multipart SignatureDoesNotMatch
+
+- Symptom: Runpod S3 `CreateMultipartUpload` returned `SignatureDoesNotMatch` on a ~40MiB golden video.
+- Where it failed: Mac / volume S3
+- Cause: AWS CLI `s3 cp` uses multipart above 8MB. Runpod S3 rejects that signing path. A single `PutObject` works.
+- Fix: `sync_volume.sh` uses `aws s3api put-object` and `get-object`. It writes a temp AWS config with `s3.multipart_threshold = 128MB`. It does not edit `~/.aws/config`.
+- Prevention: Do not use `aws s3 cp` against the Runpod S3 endpoint. Keep the 128MB pin.
+
+### 2026-10-22 — terminate stamp symlink and volume override
+
+- Symptom: A planted `/tmp` symlink or `CC_TERMINATE_STAMP_DIR` on the volume could skip terminate after a restart.
+- Where it failed: review
+- Cause: `printf >stamp` follows a symlink. The stamp dir hook had no volume guard.
+- Fix: Write the stamp with `O_NOFOLLOW` and `O_EXCL`. Refuse a symlink stamp. Allow the hook only under `/tmp` or a trusted `$TMPDIR`, never on the volume.
+- Prevention: Keep stamps off the volume. Test a planted symlink and a volume stamp dir.
 
 ### 2026-10-21 — Shared SSH host keys in the GPU image
 

@@ -45,6 +45,9 @@ cc_require_cuda_driver
 if [[ -n "${CC_JOB:-}" ]]; then
   echo "Start job ${CC_JOB} (ttl=${CC_TTL_S}s)"
   trap - EXIT INT TERM HUP
+  # A top-level pod must not inherit a leftover CC_IN_GPU_TESTS=1.
+  # Runpod restarts the container when the main process exits.
+  unset CC_IN_GPU_TESTS
   exec /opt/cc/scripts/gpu/run_job.sh
 fi
 

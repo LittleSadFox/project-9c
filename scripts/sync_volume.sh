@@ -61,13 +61,18 @@ command -v aws >/dev/null 2>&1 || fail "Install AWS CLI v2 from the official ins
 if [ -n "${CC_AWS_PROFILE:-}" ]; then
   export AWS_PROFILE="$CC_AWS_PROFILE"
 fi
+# Runpod S3 rejects CreateMultipartUpload (SignatureDoesNotMatch on ~40MiB files).
+CREATED_CFG=0
+if [ -z "${CC_AWS_CONFIG_FILE:-}" ]; then
+  CREATED_CFG=1
+fi
+AWS_CFG="$(cc_aws_export_multipart_config)"
 
 MANIFEST_LOCAL="$(mktemp)"
 NEW_MANIFEST="$(mktemp)"
-trap 'rm -f "$MANIFEST_LOCAL" "$NEW_MANIFEST"' EXIT
-# shellcheck disable=SC2046
-if aws s3 cp "s3://${VOLUME}/${PREFIX}/manifest.json" "$MANIFEST_LOCAL" \
-  --region "$REGION" --endpoint-url "$ENDPOINT" $(cc_aws_args) >/dev/null 2>&1; then
+trap 'rm -f "$MANIFEST_LOCAL" "$NEW_MANIFEST"; if [ "${CREATED_CFG}" -eq 1 ]; then rm -f "$AWS_CFG"; fi' EXIT
+if cc_s3_cp_stdout "s3://${VOLUME}/${PREFIX}/manifest.json" "$REGION" "$ENDPOINT" \
+  >"$MANIFEST_LOCAL"; then
   :
 else
   echo '{"files":{}}' >"$MANIFEST_LOCAL"
@@ -75,6 +80,7 @@ fi
 
 python3 - "$MANIFEST_LOCAL" "$NEW_MANIFEST" "$GOLDEN" "$VOLUME" "$PREFIX" "$REGION" "$ENDPOINT" <<'PY'
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -99,6 +105,27 @@ def digest(path: Path) -> str:
             h.update(chunk)
     return h.hexdigest()
 
+def aws_put(path: Path, key: str) -> None:
+    cmd = [
+        "aws",
+        "s3api",
+        "put-object",
+        "--bucket",
+        volume,
+        "--key",
+        f"{prefix}/{key}",
+        "--body",
+        str(path),
+        "--region",
+        region,
+        "--endpoint-url",
+        endpoint,
+    ]
+    profile = os.environ.get("CC_AWS_PROFILE") or os.environ.get("AWS_PROFILE")
+    if profile:
+        cmd.extend(["--profile", profile])
+    subprocess.run(cmd, check=True)
+
 candidates: list[tuple[str, Path]] = []
 labels = golden / "labels" / "labels.json"
 if labels.is_file():
@@ -119,28 +146,19 @@ for key, path in candidates:
     if listed_sha == actual:
         print(f"skip {key}")
         continue
-    dest = f"s3://{volume}/{prefix}/{key}"
     print(f"upload {key}")
-    subprocess.run(
-        [
-            "aws",
-            "s3",
-            "cp",
-            str(path),
-            dest,
-            "--region",
-            region,
-            "--endpoint-url",
-            endpoint,
-        ],
-        check=True,
-    )
+    aws_put(path, key)
     files[key] = {"sha256": actual, "size": path.stat().st_size}
 
 Path(new_path).write_text(json.dumps({"files": files}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
 
 # shellcheck disable=SC2046
-aws s3 cp "$NEW_MANIFEST" "s3://${VOLUME}/${PREFIX}/manifest.json" \
-  --region "$REGION" --endpoint-url "$ENDPOINT" $(cc_aws_args)
+aws s3api put-object \
+  --bucket "$VOLUME" \
+  --key "${PREFIX}/manifest.json" \
+  --body "$NEW_MANIFEST" \
+  --region "$REGION" \
+  --endpoint-url "$ENDPOINT" \
+  $(cc_aws_args) >/dev/null
 echo "sync_volume.sh finished."
