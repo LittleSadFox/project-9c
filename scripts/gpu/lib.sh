@@ -362,16 +362,17 @@ cc_ghcr_manifest_url() {
 
 cc_ghcr_manifest_head() {
   local image="${1:-}"
-  local url http
+  local url
   command -v curl >/dev/null 2>&1 || return 2
   command -v python3 >/dev/null 2>&1 || return 2
   url="$(cc_ghcr_manifest_url "$image")" || return 2
-  http="$(
-    # Subshell so the EXIT trap cannot run the caller's cleanup.
+  # Subshell so the EXIT trap cannot run the caller's cleanup.
+  (
     cfg="$(mktemp)"
     trap 'rm -f -- "$cfg"' EXIT
-    # Token stays in this 0600 file. It does not go on curl argv.
-    python3 -c '
+    # Token stays in this 0600 file. It does not go on curl argv or in logs.
+    if ! python3 -c '
+import base64
 import os
 import sys
 
@@ -381,23 +382,52 @@ def esc(value):
 url = esc(sys.argv[1])
 sys.stdout.write("url = \"%s\"\n" % url)
 sys.stdout.write(
-    "header = \"Accept: application/vnd.oci.image.manifest.v1+json, "
+    "header = \"Accept: application/vnd.oci.image.index.v1+json, "
+    "application/vnd.docker.distribution.manifest.list.v2+json, "
+    "application/vnd.oci.image.manifest.v1+json, "
     "application/vnd.docker.distribution.manifest.v2+json\"\n"
 )
-token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
+token = (
+    os.environ.get("CC_GHCR_TOKEN")
+    or os.environ.get("GITHUB_TOKEN")
+    or os.environ.get("GH_TOKEN")
+    or ""
+)
 if token:
-    sys.stdout.write("header = \"Authorization: Bearer %s\"\n" % esc(token))
-' "$url" >"$cfg"
+    for ch in ("\n", "\r", "\"", "\\"):
+        if ch in token:
+            sys.stderr.write("ERROR: GHCR token contains an invalid character.\n")
+            sys.exit(1)
+    encoded = base64.b64encode(token.encode("ascii")).decode("ascii")
+    sys.stdout.write("header = \"Authorization: Bearer %s\"\n" % encoded)
+' "$url" >"$cfg"; then
+      exit 1
+    fi
     chmod 600 "$cfg"
-    curl -sS --max-time 15 -o /dev/null -w '%{http_code}' -I --config "$cfg" 2>/dev/null || true
+    http="$(curl -sS --max-time 15 -o /dev/null -w '%{http_code}' -I --config "$cfg" 2>/dev/null)" || true
     rm -f -- "$cfg"
-  )"
-  case "$http" in
-    2[0-9][0-9])
-      return 0
-      ;;
-  esac
-  return 1
+    case "$http" in
+      200)
+        exit 0
+        ;;
+      404)
+        echo "ERROR: image not on GHCR (${image})." >&2
+        exit 1
+        ;;
+      401|403)
+        echo "ERROR: GHCR auth failed." >&2
+        exit 1
+        ;;
+      000|"")
+        echo "ERROR: GHCR unreachable." >&2
+        exit 1
+        ;;
+      *)
+        echo "ERROR: GHCR returned HTTP ${http}." >&2
+        exit 1
+        ;;
+    esac
+  )
 }
 
 cc_verify_gpu_image_exists() {
@@ -420,7 +450,7 @@ cc_verify_gpu_image_exists() {
   if [[ "$head_rc" -eq 2 ]]; then
     cc_fail "Cannot verify GPU image ${image}. Install docker or curl. No pod was created."
   fi
-  cc_fail "GPU image ${image} is not on GHCR. Push climbing-coach-gpu for this sha, or set CC_GPU_IMAGE to an existing tag or digest. No pod was created."
+  cc_fail "No pod was created."
 }
 
 cc_verify_registry_auth() {

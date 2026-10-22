@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -1674,6 +1675,172 @@ exit 0
     assert token not in result.stdout
     assert token not in result.stderr
     assert "Authorization" not in logged.split("argv=")[-1]
+
+
+def _ghcr_head_stub(
+    tmp_path: Path,
+    *,
+    status: str,
+    hits: Path,
+    cfg_copy: Path,
+) -> None:
+    curl = tmp_path / "curl"
+    curl.write_text(
+        f"""#!/usr/bin/env bash
+printf 'argv=%s\\n' "$*" >> "{hits}"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --config)
+      printf 'cfg=%s\\n' "$2" >> "{hits}"
+      if [[ -f "$2" ]]; then
+        cp "$2" "{cfg_copy}"
+        stat -c 'mode=%a' "$2" >> "{hits}" 2>/dev/null \
+          || stat -f 'mode=%Lp' "$2" >> "{hits}"
+      fi
+      shift 2
+      ;;
+    *) shift ;;
+  esac
+done
+printf '%s' "{status}"
+exit 0
+""",
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+
+
+def _ghcr_head_env(
+    tmp_path: Path,
+    tmpdir: Path,
+    *,
+    cc_token: str,
+    github_token: str = "ghs_not_selected",
+    gh_token: str = "gh_not_selected",
+) -> dict[str, str]:
+    return {
+        "TMPDIR": str(tmpdir),
+        "CC_GHCR_TOKEN": cc_token,
+        "GITHUB_TOKEN": github_token,
+        "GH_TOKEN": gh_token,
+    }
+
+
+def _run_ghcr_head(tmp_path: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    image = f"ghcr.io/littlesadfox/climbing-coach-gpu:{SHA40}"
+    return _run(
+        [
+            "bash",
+            "-c",
+            f"source {LIB}; "
+            f'export PATH="{tmp_path}:/usr/bin:/bin"; '
+            f'cc_ghcr_manifest_head "{image}"',
+        ],
+        env=env,
+        bin_dir=tmp_path,
+    )
+
+
+def test_ghcr_manifest_head_auth_accept_and_status_messages(tmp_path: Path) -> None:
+    hits = tmp_path / "ghcr-curl.log"
+    cfg_copy = tmp_path / "curl-config.copy"
+    tmpdir = tmp_path / "ghcr-tmp"
+    tmpdir.mkdir()
+    token = "cc_not_a_real_token"
+    encoded = base64.b64encode(token.encode("ascii")).decode("ascii")
+    github_token = "ghs_not_selected"
+    gh_token = "gh_not_selected"
+    image = f"ghcr.io/littlesadfox/climbing-coach-gpu:{SHA40}"
+    expected = {
+        "200": (0, None),
+        "401": (1, "GHCR auth failed"),
+        "403": (1, "GHCR auth failed"),
+        "404": (1, "image not on GHCR"),
+        "000": (1, "GHCR unreachable"),
+    }
+    for status, (rc, phrase) in expected.items():
+        hits.write_text("", encoding="utf-8")
+        if cfg_copy.exists():
+            cfg_copy.unlink()
+        _ghcr_head_stub(tmp_path, status=status, hits=hits, cfg_copy=cfg_copy)
+        result = _run_ghcr_head(
+            tmp_path,
+            _ghcr_head_env(tmp_path, tmpdir, cc_token=token),
+        )
+        assert result.returncode == rc, result.stderr
+        combined = result.stdout + result.stderr
+        if phrase is None:
+            assert "ERROR:" not in combined
+        else:
+            assert phrase in combined
+            assert "No pod was created" not in result.stdout
+        logged = hits.read_text(encoding="utf-8")
+        assert "--config" in logged
+        assert token not in logged
+        assert encoded not in logged
+        assert token not in combined
+        assert encoded not in combined
+        assert github_token not in combined
+        assert gh_token not in combined
+        cfg = cfg_copy.read_text(encoding="utf-8")
+        assert 'header = "Authorization: Bearer %s"' % encoded in cfg
+        assert "application/vnd.oci.image.index.v1+json" in cfg
+        assert "application/vnd.docker.distribution.manifest.list.v2+json" in cfg
+        assert "application/vnd.oci.image.manifest.v1+json" in cfg
+        assert "application/vnd.docker.distribution.manifest.v2+json" in cfg
+        assert token not in cfg
+        assert github_token not in cfg
+        assert gh_token not in cfg
+        leftover = [path for path in tmpdir.iterdir() if path.is_file()]
+        assert leftover == []
+    text = LIB.read_text(encoding="utf-8")
+    head_fn = text.split("cc_ghcr_manifest_head()")[1].split(
+        "cc_verify_gpu_image_exists()"
+    )[0]
+    token_at = head_fn.index("CC_GHCR_TOKEN")
+    assert token_at < head_fn.index("GITHUB_TOKEN")
+    assert head_fn.index("GITHUB_TOKEN") < head_fn.index("GH_TOKEN")
+    _ghcr_head_stub(tmp_path, status="404", hits=hits, cfg_copy=cfg_copy)
+    verify = _run(
+        [
+            "bash",
+            "-c",
+            f"source {LIB}; "
+            f'export PATH="{tmp_path}:/usr/bin:/bin"; '
+            f'export CC_GPU_IMAGE="{image}"; '
+            "cc_verify_gpu_image_exists",
+        ],
+        env=_ghcr_head_env(tmp_path, tmpdir, cc_token=token),
+        bin_dir=tmp_path,
+    )
+    assert verify.returncode != 0
+    assert "image not on GHCR" in verify.stderr
+    assert "No pod was created" in verify.stderr
+    assert token not in verify.stdout + verify.stderr
+    assert encoded not in verify.stdout + verify.stderr
+
+
+def test_ghcr_manifest_head_refuses_token_with_newline(tmp_path: Path) -> None:
+    hits = tmp_path / "ghcr-curl.log"
+    cfg_copy = tmp_path / "curl-config.copy"
+    tmpdir = tmp_path / "ghcr-tmp"
+    tmpdir.mkdir()
+    token = "cc_not_a_real_token\nmore"
+    encoded = base64.b64encode(b"cc_not_a_real_token\nmore").decode("ascii")
+    _ghcr_head_stub(tmp_path, status="200", hits=hits, cfg_copy=cfg_copy)
+    result = _run_ghcr_head(
+        tmp_path,
+        _ghcr_head_env(tmp_path, tmpdir, cc_token=token),
+    )
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "invalid character" in combined
+    assert token not in combined
+    assert "cc_not_a_real_token" not in combined
+    assert encoded not in combined
+    assert not hits.exists() or "argv=" not in hits.read_text(encoding="utf-8")
+    leftover = [path for path in tmpdir.iterdir() if path.is_file()]
+    assert leftover == []
 
 
 def test_pod_up_keeps_caller_volume_id() -> None:
