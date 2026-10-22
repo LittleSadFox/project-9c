@@ -28,21 +28,35 @@ from app.core.halpe26 import (
 )
 
 ALLOWED_DEVICES = ("auto", "cuda", "mps", "cpu")
-POSE_MODES = ("balanced",)
+POSE_MODES = ("lightweight", "balanced", "performance")
+
+
+def _weight_names(folder: str, stem: str) -> tuple[str, ...]:
+    return (f"{folder}/{stem}.zip", f"{folder}/{stem}.onnx", f"{stem}.zip", f"{stem}.onnx")
+
 
 MODE_FILES: dict[str, dict[str, object]] = {
+    "lightweight": {
+        "det": _weight_names("det", "yolox_tiny"),
+        "pose": _weight_names("pose", "rtmpose_s_halpe26"),
+        "det_size": (416, 416),
+        "pose_size": (192, 256),
+        "model_version": "rtmpose-s-halpe26",
+    },
     "balanced": {
-        "det": ("det/yolox_m.zip", "det/yolox_m.onnx", "yolox_m.zip", "yolox_m.onnx"),
-        "pose": (
-            "pose/rtmpose_m_halpe26.zip",
-            "pose/rtmpose_m_halpe26.onnx",
-            "rtmpose_m_halpe26.zip",
-            "rtmpose_m_halpe26.onnx",
-        ),
+        "det": _weight_names("det", "yolox_m"),
+        "pose": _weight_names("pose", "rtmpose_m_halpe26"),
         "det_size": (640, 640),
         "pose_size": (192, 256),
         "model_version": "rtmpose-m-halpe26",
-    }
+    },
+    "performance": {
+        "det": _weight_names("det", "yolox_x"),
+        "pose": _weight_names("pose", "rtmpose_x_halpe26"),
+        "det_size": (640, 640),
+        "pose_size": (288, 384),
+        "model_version": "rtmpose-x-halpe26",
+    },
 }
 
 
@@ -134,9 +148,12 @@ class FixtureEstimator:
         self,
         detections: dict[int, np.ndarray] | None = None,
         people: dict[int, dict[str, np.ndarray]] | None = None,
+        *,
+        mode: str = "balanced",
     ) -> None:
         self.detections = detections or {}
         self.people = people or {}
+        self.mode = mode
         self.detect_calls = 0
         self.pose_calls = 0
 
@@ -284,7 +301,7 @@ class RtmlibEstimator:
     def _ensure(self) -> None:
         if self._det is not None and self._pose is not None:
             return
-        from rtmlib import YOLOX, RTMPose  # type: ignore[import-untyped]
+        from rtmlib import YOLOX, RTMPose  # type: ignore[import-not-found, import-untyped]
 
         det_path, pose_path, spec = resolve_mode_paths(self.models_dir, self.mode)
         self._det = YOLOX(
@@ -350,5 +367,5 @@ def make_estimator(
     mode: str = "balanced",
 ) -> PoseEstimator:
     if pose_backend == "fixture":
-        return FixtureEstimator()
+        return FixtureEstimator(mode=mode)
     return RtmlibEstimator(models_dir=models_dir, device=device, mode=mode)

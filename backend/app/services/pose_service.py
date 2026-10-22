@@ -67,7 +67,7 @@ def current_runtime() -> PoseRuntime:
     return _RUNTIME
 
 
-def current_estimator() -> PoseEstimator:
+def current_estimator(*, mode: str = "balanced") -> PoseEstimator:
     if _RUNTIME.estimator is not None:
         return _RUNTIME.estimator
     settings = _RUNTIME.settings
@@ -77,6 +77,7 @@ def current_estimator() -> PoseEstimator:
         pose_backend=settings.pose_backend,
         models_dir=settings.models_dir,
         device=settings.device,
+        mode=mode,
     )
     _RUNTIME.estimator = estimator
     return estimator
@@ -110,13 +111,69 @@ def _setting(conn: sqlite3.Connection, key: str, default: Any) -> Any:
 
 
 def _set_pose_status(
-    conn: sqlite3.Connection, video_id: str, status: str, error: str | None = None
+    conn: sqlite3.Connection,
+    video_id: str,
+    status: str,
+    error: str | None = None,
+    *,
+    commit: bool = True,
 ) -> None:
     conn.execute(
         "UPDATE videos SET pose_status = ?, error = ? WHERE id = ?",
         (status, error, video_id),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
+
+
+def _rollback_quiet(conn: sqlite3.Connection) -> None:
+    try:
+        conn.rollback()
+    except sqlite3.Error:
+        return
+
+
+def _remove_pose_artifacts(dest: Path | None) -> None:
+    if dest is None:
+        return
+    for path in (dest, dest.with_name(dest.name + ".tmp")):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            continue
+
+
+def _insert_pose_run(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    video_id: str,
+    device_name: object,
+    provider: object,
+    mode: str,
+    det_every: int,
+    climber_id: int | None,
+    status: str,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO pose_runs (
+            id, video_id, model_version_id, device, provider, mode, det_every,
+            fps_measured, climber_track_id, status, created_at
+        ) VALUES (?, ?, NULL, ?, ?, ?, ?, NULL, ?, ?, ?)
+        """,
+        (
+            run_id,
+            video_id,
+            str(device_name),
+            provider,
+            mode,
+            det_every,
+            climber_id,
+            status,
+            utc_now(),
+        ),
+    )
 
 
 def process_frames(
@@ -131,13 +188,14 @@ def process_frames(
     """Detect, pose, track, pick the climber, and smooth that track."""
     tracker = Tracker()
     last_boxes: np.ndarray | None = None
-    frame_list = list(frames)
-    total = n_frames if n_frames and n_frames > 0 else max(len(frame_list), 1)
+    total = n_frames if n_frames and n_frames > 0 else 0
     stride = max(int(det_every), 1)
-    for index, frame in frame_list:
+    for index, frame in frames:
         if ctx is not None:
             ctx.check_cancel()
-            ctx.progress((index + 1) / total, f"Frame {index + 1} of {total}")
+            seen = index + 1
+            denom = total if total > 0 else seen
+            ctx.progress(min(1.0, seen / denom), f"Frame {seen} of {denom}")
         run_detector = index % stride == 0 or last_boxes is None
         if run_detector:
             boxes = np.asarray(estimator.detect(frame, frame_index=index), dtype=np.float32)
@@ -184,13 +242,18 @@ def handle_pose_job(
     video_id = str(job["entity_id"])
     paths = _paths_from_conn(ctx.conn)
     video = _video(ctx.conn, video_id)
-    estimator = current_estimator()
+    mode = str(_setting(ctx.conn, "pose_mode", "balanced"))
+    estimator = current_estimator(mode=mode)
     settings = _RUNTIME.settings
     fps = float(video.get("proxy_fps") or 30.0)
     n_frames = int(video.get("n_frames") or 0)
     det_every = int(_setting(ctx.conn, "det_every", 5))
-    mode = str(_setting(ctx.conn, "pose_mode", "balanced"))
     _set_pose_status(ctx.conn, video_id, "running")
+    run_id: str | None = None
+    dest: Path | None = None
+    climber_id: int | None = None
+    device_name: object = settings.device if settings else "cpu"
+    provider: object = None
     try:
         if frames is None:
             proxy = paths.proxies / f"{video_id}.mp4"
@@ -200,18 +263,26 @@ def handle_pose_job(
                 else:
                     n_frames = reader.check_count(None)
                     fps = fps or reader.fps or 30.0
-                frames = list(reader.iter_frames())
-        tracks, climber_id = process_frames(
-            frames,
-            estimator,
-            fps=fps,
-            det_every=det_every,
-            ctx=ctx,
-            n_frames=n_frames or None,
-        )
+                tracks, climber_id = process_frames(
+                    reader.iter_frames(),
+                    estimator,
+                    fps=fps,
+                    det_every=det_every,
+                    ctx=ctx,
+                    n_frames=n_frames or None,
+                )
+        else:
+            tracks, climber_id = process_frames(
+                frames,
+                estimator,
+                fps=fps,
+                det_every=det_every,
+                ctx=ctx,
+                n_frames=n_frames or None,
+            )
         run_id = str(uuid4())
         arrays = tracks_to_arrays(tracks)
-        device_name = getattr(estimator, "device_name", settings.device if settings else "cpu")
+        device_name = getattr(estimator, "device_name", device_name)
         provider = getattr(estimator, "provider", None)
         model_version = getattr(estimator, "model_version", None)
         dest = pose_path(paths.pose, video_id, run_id)
@@ -234,15 +305,17 @@ def handle_pose_job(
                 "edits_hash": edits_hash([]),
             },
         )
-        now = utc_now()
-        ctx.conn.execute(
-            """
-            INSERT INTO pose_runs (
-                id, video_id, model_version_id, device, provider, mode, det_every,
-                fps_measured, climber_track_id, status, created_at
-            ) VALUES (?, ?, NULL, ?, ?, ?, ?, NULL, ?, 'done', ?)
-            """,
-            (run_id, video_id, str(device_name), provider, mode, det_every, climber_id, now),
+        ctx.conn.execute("BEGIN")
+        _insert_pose_run(
+            ctx.conn,
+            run_id=run_id,
+            video_id=video_id,
+            device_name=device_name,
+            provider=provider,
+            mode=mode,
+            det_every=det_every,
+            climber_id=climber_id,
+            status="done",
         )
         for track in tracks:
             ctx.conn.execute(
@@ -263,9 +336,24 @@ def handle_pose_job(
                     1 if track.track_id == climber_id else 0,
                 ),
             )
-        _set_pose_status(ctx.conn, video_id, "done")
+        _set_pose_status(ctx.conn, video_id, "done", commit=False)
+        ctx.conn.commit()
         return {"run_id": run_id, "climber_track_id": climber_id, "n_tracks": len(tracks)}
     except Exception as exc:
+        _rollback_quiet(ctx.conn)
+        _remove_pose_artifacts(dest)
+        if run_id is not None:
+            _insert_pose_run(
+                ctx.conn,
+                run_id=run_id,
+                video_id=video_id,
+                device_name=device_name,
+                provider=provider,
+                mode=mode,
+                det_every=det_every,
+                climber_id=climber_id,
+                status="failed",
+            )
         _set_pose_status(ctx.conn, video_id, "failed", str(exc))
         raise
 

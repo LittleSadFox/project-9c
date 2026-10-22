@@ -419,3 +419,32 @@ Out of scope:
 - Pod `pose_bench` run (Runpod bot, after merge)
 - 1080p transcode
 - Slice A media and library routes
+
+## 2026-10-22 — p1-B stream pose frames
+
+`handle_pose_job` no longer calls `list(reader.iter_frames())`.
+`process_frames` walks the iterator once.
+The frame count comes from the video row.
+A 2-minute 1280 proxy no longer sits in RAM as one list.
+
+`RtmlibEstimator` ignores `import-not-found` and `import-untyped` for rtmlib.
+`models.lock.json` pins YOLOX tiny/m/x and RTMPose s/m/x Halpe26 zip sha256 values.
+`download_models.py` checks the digest on the temp file before it replaces dest.
+A mismatch deletes the file and exits 1.
+A null digest is refused unless `--allow-unpinned` is set.
+
+A failed pose job rolls back the run transaction.
+No track rows stay.
+The run is written again as `failed`.
+Partial NPZ and `.tmp` files are removed.
+`GET /pose` serves only a `done` run.
+
+`pose_bench` loops `lightweight`, `balanced`, and `performance`.
+It passes `mode` into the estimator.
+Before a real bench it runs `download_models.py` into `CC_MODELS_DIR`.
+A present file with a matching sha256 is skipped.
+A mismatch deletes the file and fails the job.
+It stops reading the golden clip after `n_frames`.
+Parity fails when fewer than 90% of frames compare, or when the mean is above 1 px.
+`metrics.json` records `frames_total`, detection counts, and `frames_compared`.
+The next pod command is `python -m ml.jobs pose_bench --run-dir "$RUN_DIR"`.

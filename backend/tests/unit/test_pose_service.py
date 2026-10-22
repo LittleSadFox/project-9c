@@ -5,13 +5,21 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from app.config import Settings
+from app.core.climber import coverage as real_coverage
 from app.db import apply_migrations, connect
+from app.errors import AppError
 from app.jobs.context import JobContext
 from app.pose.estimator import FixtureEstimator
 from app.repo import jobs as jobs_repo
-from app.services.pose_service import bind_pose_runtime, handle_pose_job, process_frames
+from app.services.pose_service import (
+    bind_pose_runtime,
+    get_pose_summary,
+    handle_pose_job,
+    process_frames,
+)
 from app.storage import LibraryPaths
 
 
@@ -99,4 +107,126 @@ def test_handle_pose_job_writes_run(tmp_path: Path) -> None:
     run = conn.execute("SELECT id, climber_track_id, status FROM pose_runs").fetchone()
     assert run["status"] == "done"
     assert (paths.pose / video_id / f"{run['id']}.npz").is_file()
+    conn.close()
+
+
+class _OnceLazyFrames:
+    """Yield frames once. Fail if the source is listed early or iterated twice."""
+
+    def __init__(self, count: int, estimator: FixtureEstimator) -> None:
+        self._count = count
+        self._estimator = estimator
+        self._started = 0
+
+    def __iter__(self) -> object:
+        self._started += 1
+        if self._started > 1:
+            raise AssertionError("frame source was read twice")
+        for index in range(self._count):
+            if index > 0 and self._estimator.detect_calls < index:
+                raise AssertionError("frame source was turned into a list early")
+            yield index, np.zeros((8, 8, 3), dtype=np.uint8)
+
+
+def test_lazy_frames_reject_early_list() -> None:
+    estimator = FixtureEstimator()
+    frames = _OnceLazyFrames(3, estimator)
+    with pytest.raises(AssertionError, match="list early"):
+        list(frames)
+
+
+def test_process_frames_reads_iterator_once_lazily() -> None:
+    estimator = FixtureEstimator()
+    frames = _OnceLazyFrames(6, estimator)
+    tracks, climber = process_frames(frames, estimator, fps=30.0, det_every=5, n_frames=6)
+    assert tracks == []
+    assert climber is None
+    assert estimator.detect_calls == 6
+    assert estimator.pose_calls == 0
+    with pytest.raises(AssertionError, match="read twice"):
+        list(frames)
+
+
+def test_handle_pose_job_streams_injected_frames(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    paths = LibraryPaths(settings.library_dir)
+    paths.ensure()
+    conn = connect(paths.db)
+    apply_migrations(conn)
+    video_id = "22222222-2222-2222-2222-222222222222"
+    _insert_video(conn, video_id, n_frames=5)
+    job = jobs_repo.insert_job(
+        conn,
+        job_id="pose-job-lazy",
+        kind="pose",
+        lane="compute",
+        entity_type="video",
+        entity_id=video_id,
+    )
+    estimator = FixtureEstimator()
+    bind_pose_runtime(settings=settings, paths=paths, estimator=estimator)
+    frames = _OnceLazyFrames(5, estimator)
+    ctx = JobContext(conn, str(job["id"]))
+    result = handle_pose_job(ctx, frames=frames)
+    assert result["n_tracks"] == 0
+    assert estimator.detect_calls == 5
+    with pytest.raises(AssertionError, match="read twice"):
+        next(iter(frames))
+    conn.close()
+
+
+def test_handle_pose_job_rolls_back_partial_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path)
+    paths = LibraryPaths(settings.library_dir)
+    paths.ensure()
+    conn = connect(paths.db)
+    apply_migrations(conn)
+    video_id = "33333333-3333-3333-3333-333333333333"
+    _insert_video(conn, video_id, n_frames=8)
+    job = jobs_repo.insert_job(
+        conn,
+        job_id="pose-job-rollback",
+        kind="pose",
+        lane="compute",
+        entity_type="video",
+        entity_id=video_id,
+    )
+    detections = {}
+    for index in range(8):
+        left = np.array([[20.0, 160.0, 60.0, 220.0]], dtype=np.float32)
+        y = 200.0 - 15.0 * index
+        right = np.array([[200.0, y, 240.0, y + 60.0]], dtype=np.float32)
+        detections[index] = np.vstack([left, right])
+    estimator = FixtureEstimator(detections=detections)
+    bind_pose_runtime(settings=settings, paths=paths, estimator=estimator)
+    frames = [(index, np.zeros((8, 8, 3), dtype=np.uint8)) for index in range(8)]
+    ctx = JobContext(conn, str(job["id"]))
+    seen = {"n": 0}
+
+    def coverage_once(track: object) -> float:
+        seen["n"] += 1
+        if seen["n"] > 1:
+            raise RuntimeError("injected track write failure")
+        return float(real_coverage(track))  # type: ignore[arg-type]
+
+    monkeypatch.setattr("app.services.pose_service.coverage", coverage_once)
+    with pytest.raises(RuntimeError, match="injected track write failure"):
+        handle_pose_job(ctx, frames=frames)
+    tracks = conn.execute("SELECT COUNT(*) AS n FROM pose_tracks").fetchone()
+    assert int(tracks["n"]) == 0
+    run = conn.execute("SELECT id, status FROM pose_runs").fetchone()
+    assert run is not None
+    assert run["status"] != "done"
+    with pytest.raises(AppError) as err:
+        get_pose_summary(conn, paths, video_id)
+    assert err.value.status == 404
+    leftovers = list(paths.pose.rglob("*"))
+    assert leftovers == [] or all(
+        item.is_dir() or (item.suffix not in {".npz", ".tmp"} and ".tmp" not in item.name)
+        for item in leftovers
+    )
+    assert not any(path.is_file() for path in paths.pose.rglob("*.npz"))
+    assert not any(path.is_file() for path in paths.pose.rglob("*.tmp"))
     conn.close()

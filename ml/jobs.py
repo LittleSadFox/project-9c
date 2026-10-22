@@ -15,6 +15,7 @@ import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -219,6 +220,14 @@ def _synthetic_bench_frames(n_frames: int) -> list[Any]:
     return frames
 
 
+def _take_frames(source: Any, n_frames: int) -> list[Any]:
+    """Read at most n_frames from a (index, frame) iterator, then stop."""
+    frames: list[Any] = []
+    for item in islice(source, n_frames):
+        frames.append(item[1] if isinstance(item, tuple) else item)
+    return frames
+
+
 def _load_bench_frames(n_frames: int) -> list[Any]:
     golden = Path(os.environ.get("CC_GOLDEN_DIR", "/workspace/videos"))
     if golden.is_dir():
@@ -231,26 +240,69 @@ def _load_bench_frames(n_frames: int) -> list[Any]:
             from app.media.frames import FrameReader
 
             with FrameReader(videos[0]) as reader:
-                frames = [frame for _, frame in reader.iter_frames()]
+                frames = _take_frames(reader.iter_frames(), n_frames)
             if frames:
-                return frames[:n_frames]
+                return frames
     return _synthetic_bench_frames(n_frames)
 
 
-def _mean_abs_px(left: Any, right: Any) -> float:
+def _has_detections(raw: Any) -> bool:
+    import numpy as np
+
+    array = np.asarray(raw)
+    return array.size > 0
+
+
+def compare_keypoints(
+    cpu_kpts: Any,
+    cuda_kpts: Any,
+    *,
+    frames_total: int,
+    min_compared_frac: float = 0.9,
+    limit_px: float = 1.0,
+) -> dict[str, Any]:
+    """Compare CUDA and CPU keypoints. Fail when too few frames match."""
     import numpy as np
 
     totals: list[float] = []
-    for a_raw, b_raw in zip(left, right, strict=False):
+    frames_compared = 0
+    frames_cpu = 0
+    frames_cuda = 0
+    for a_raw, b_raw in zip(cpu_kpts, cuda_kpts, strict=False):
         a = np.asarray(a_raw, dtype=np.float32)
         b = np.asarray(b_raw, dtype=np.float32)
+        if _has_detections(a):
+            frames_cpu += 1
+        if _has_detections(b):
+            frames_cuda += 1
         if a.size == 0 or b.size == 0 or a.shape != b.shape:
             continue
+        frames_compared += 1
         delta = np.linalg.norm(a[..., :2] - b[..., :2], axis=-1)
         totals.extend(float(v) for v in delta.ravel())
+    mean_abs: float | None
     if not totals:
-        return 0.0
-    return float(sum(totals) / len(totals))
+        mean_abs = None
+    else:
+        mean_abs = float(sum(totals) / len(totals))
+    denom = max(0, frames_total)
+    frac = (frames_compared / denom) if denom else 0.0
+    parity_ok = (
+        mean_abs is not None
+        and mean_abs <= limit_px
+        and frames_compared > 0
+        and frac >= min_compared_frac
+    )
+    return {
+        "mean_abs_px": mean_abs,
+        "parity_ok": parity_ok,
+        "frames_total": frames_total,
+        "frames_with_detections_cpu": frames_cpu,
+        "frames_with_detections_cuda": frames_cuda,
+        "frames_compared": frames_compared,
+        "min_compared_frac": min_compared_frac,
+        "parity_limit_px": limit_px,
+    }
 
 
 def _run_estimator(estimator: Any, frames: list[Any]) -> tuple[list[Any], float]:
@@ -271,11 +323,65 @@ def _run_estimator(estimator: Any, frames: list[Any]) -> tuple[list[Any], float]
     return keypoints, len(frames) / elapsed
 
 
+def _lock_dests_for_modes(modes: list[str]) -> set[str]:
+    from app.pose.estimator import MODE_FILES
+
+    dests: set[str] = set()
+    for mode in modes:
+        spec = MODE_FILES.get(mode)
+        if spec is None:
+            continue
+        for key in ("det", "pose"):
+            names = spec.get(key)
+            if isinstance(names, tuple) and names:
+                dests.add(str(names[0]))
+    return dests
+
+
+def ensure_bench_weights(models_dir: Path, modes: list[str] | None = None) -> list[str]:
+    """Download any missing lock-file weights. Skip files that already verify."""
+    from scripts.download_models import DownloadError, download_one, load_lock
+
+    wanted = None if modes is None else _lock_dests_for_modes(modes)
+    names: list[str] = []
+    try:
+        for entry in load_lock():
+            dest = str(entry.get("dest") or "")
+            if wanted is not None and dest not in wanted:
+                continue
+            download_one(entry, models_dir)
+            names.append(str(entry["name"]))
+    except DownloadError as exc:
+        raise JobError(str(exc)) from exc
+    return names
+
+
+def _selected_modes(requested: list[str] | None) -> list[str]:
+    from app.pose.estimator import MODE_FILES
+
+    available = list(MODE_FILES)
+    if not requested:
+        return available
+    unknown = [name for name in requested if name not in MODE_FILES]
+    if unknown:
+        raise JobError(
+            "Unknown pose mode(s): "
+            + ", ".join(unknown)
+            + ". Use: "
+            + ", ".join(available)
+            + "."
+        )
+    return requested
+
+
 def pose_bench(
     run_dir: Path,
     *,
     n_frames: int = 100,
     require_cuda: bool | None = None,
+    min_compared_frac: float = 0.9,
+    modes: list[str] | None = None,
+    limit_px: float = 1.0,
 ) -> dict[str, Any]:
     """Measure pose fps per mode. Compare CUDA and CPU keypoints (mean ≤ 1 px)."""
     import numpy as np
@@ -294,6 +400,9 @@ def pose_bench(
         require = {part.strip() for part in os.environ.get("CC_REQUIRE", "").split(",") if part.strip()}
         require_cuda = "gpu" in require or device_env == "cuda"
 
+    selected = _selected_modes(modes)
+    if backend != "fixture":
+        ensure_bench_weights(models_dir, selected)
     frames = _load_bench_frames(n_frames)
     n_used = len(frames)
     modes_out: dict[str, Any] = {}
@@ -306,14 +415,16 @@ def pose_bench(
         available = []
     have_cuda = "CUDAExecutionProvider" in available
 
-    for mode in MODE_FILES:
+    for mode in selected:
+        if mode not in MODE_FILES:
+            raise JobError(f"Unknown pose mode {mode!r}.")
         if backend == "fixture":
             detections = {
                 index: np.array([[20.0 + (index % 60), 30.0, 44.0 + (index % 60), 90.0]], dtype=np.float32)
                 for index in range(n_used)
             }
-            cpu_est: Any = FixtureEstimator(detections=detections)
-            cuda_est: Any = FixtureEstimator(detections=detections)
+            cpu_est: Any = FixtureEstimator(detections=detections, mode=mode)
+            cuda_est: Any = FixtureEstimator(detections=detections, mode=mode)
         else:
             try:
                 cpu_est = RtmlibEstimator(models_dir=models_dir, device="cpu", mode=mode)
@@ -326,19 +437,32 @@ def pose_bench(
 
         cpu_kpts, cpu_fps = _run_estimator(cpu_est, frames)
         mode_metrics: dict[str, Any] = {
-            "cpu": {"fps": round(cpu_fps, 3), "provider": getattr(cpu_est, "provider", "CPUExecutionProvider")}
+            "mode": mode,
+            "estimator_mode": getattr(cpu_est, "mode", mode),
+            "cpu": {"fps": round(cpu_fps, 3), "provider": getattr(cpu_est, "provider", "CPUExecutionProvider")},
         }
         if cuda_est is not None:
             cuda_kpts, cuda_fps = _run_estimator(cuda_est, frames)
-            mean_abs = _mean_abs_px(cuda_kpts, cpu_kpts)
+            parity = compare_keypoints(
+                cpu_kpts,
+                cuda_kpts,
+                frames_total=n_used,
+                min_compared_frac=min_compared_frac,
+                limit_px=limit_px,
+            )
+            mean_abs = parity["mean_abs_px"]
             mode_metrics["cuda"] = {
                 "fps": round(cuda_fps, 3),
                 "provider": getattr(cuda_est, "provider", "CUDAExecutionProvider"),
-                "mean_abs_px": round(mean_abs, 4),
-                "parity_ok": mean_abs <= 1.0,
+                "mean_abs_px": None if mean_abs is None else round(float(mean_abs), 4),
+                "parity_ok": parity["parity_ok"],
+                "frames_total": parity["frames_total"],
+                "frames_with_detections_cpu": parity["frames_with_detections_cpu"],
+                "frames_with_detections_cuda": parity["frames_with_detections_cuda"],
+                "frames_compared": parity["frames_compared"],
             }
         elif have_cuda:
-            mode_metrics["cuda"] = {"error": "CUDA estimator failed to start"}
+            mode_metrics["cuda"] = {"error": "CUDA estimator failed to start", "parity_ok": False}
         else:
             mode_metrics["cuda"] = None
         modes_out[mode] = mode_metrics
@@ -355,6 +479,14 @@ def pose_bench(
     if parity_fail:
         status = "failed"
 
+    first_cuda: dict[str, Any] = next(
+        (
+            item["cuda"]
+            for item in modes_out.values()
+            if isinstance(item.get("cuda"), dict) and "frames_compared" in item["cuda"]
+        ),
+        {},
+    )
     metrics = {
         "job": "pose_bench",
         "status": status,
@@ -363,11 +495,24 @@ def pose_bench(
         "device": resolved,
         "available_providers": available,
         "modes": modes_out,
-        "parity_limit_px": 1.0,
+        "mode_list": selected,
+        "parity_limit_px": limit_px,
+        "min_compared_frac": min_compared_frac,
+        "frames_total": first_cuda.get("frames_total", n_used),
+        "frames_with_detections_cpu": first_cuda.get("frames_with_detections_cpu"),
+        "frames_with_detections_cuda": first_cuda.get("frames_with_detections_cuda"),
+        "frames_compared": first_cuda.get("frames_compared"),
     }
     _atomic_metrics(run_dir, metrics)
     with (run_dir / "log.txt").open("a", encoding="utf-8") as log:
         log.write(f"pose_bench status={status} backend={backend} n_frames={n_used}\n")
+        for name, item in modes_out.items():
+            cpu_fps = item.get("cpu", {}).get("fps")
+            cuda_block = item.get("cuda") if isinstance(item.get("cuda"), dict) else {}
+            log.write(
+                f"pose_bench mode={name} cpu_fps={cpu_fps} "
+                f"cuda_fps={cuda_block.get('fps')} parity_ok={cuda_block.get('parity_ok')}\n"
+            )
     if status != "passed":
         raise JobError("pose_bench failed CUDA/CPU parity or CUDA was required and missing.")
     return metrics
@@ -387,6 +532,18 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run a Climbing Coach pod job.")
     parser.add_argument("job", choices=sorted(JOBS))
     parser.add_argument("--run-dir", type=Path, required=True)
+    parser.add_argument("--n-frames", type=int, default=100)
+    parser.add_argument(
+        "--min-compared-frac",
+        type=float,
+        default=0.9,
+        help="Minimum fraction of frames that must compare for pose_bench parity.",
+    )
+    parser.add_argument(
+        "--modes",
+        default="",
+        help="Comma-separated pose modes. Default: every mode in MODE_FILES.",
+    )
     args = parser.parse_args(argv)
     if args.job == "gpu_tests" and os.environ.get("CC_IN_GPU_TESTS") == "1":
         print(
@@ -395,7 +552,16 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
     try:
-        JOBS[args.job](args.run_dir)
+        if args.job == "pose_bench":
+            requested = [part.strip() for part in args.modes.split(",") if part.strip()]
+            pose_bench(
+                args.run_dir,
+                n_frames=args.n_frames,
+                min_compared_frac=args.min_compared_frac,
+                modes=requested or None,
+            )
+        else:
+            JOBS[args.job](args.run_dir)
     except JobError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
