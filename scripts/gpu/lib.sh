@@ -133,6 +133,10 @@ cc_secret_ref_webhook() {
   printf '%s' '{{ RUNPOD_SECRET_cc_webhook_url }}'
 }
 
+cc_secret_ref_webhook_key() {
+  printf '%s' '{{ RUNPOD_SECRET_cc_webhook_key }}'
+}
+
 cc_default_gpu_csv() {
   # ONNX Runtime has never been verified on sm_120 (Blackwell) on a pod.
   # Leave RTX PRO 4500/4000 Blackwell and RTX 5090 out of the default list.
@@ -221,6 +225,7 @@ cc_build_pod_env_json() {
       --arg golden "/workspace/videos" \
       --arg token "$(cc_secret_ref_repo_token)" \
       --arg hook "$(cc_secret_ref_webhook)" \
+      --arg hook_key "$(cc_secret_ref_webhook_key)" \
       '{
         CC_TTL_S: $ttl,
         CC_GIT_REF: $ref,
@@ -228,7 +233,8 @@ cc_build_pod_env_json() {
         CC_MODELS_DIR: $models,
         CC_GOLDEN_DIR: $golden,
         CC_REPO_TOKEN: $token,
-        CC_WEBHOOK_URL: $hook
+        CC_WEBHOOK_URL: $hook,
+        CC_WEBHOOK_KEY: $hook_key
       }'
   )"
   if [[ "$interactive" == "1" ]]; then
@@ -528,10 +534,13 @@ def redact(text):
         text = re.sub(re.escape(header), "AUTHORIZATION: basic REDACTED", text, flags=re.I)
     pod_key = os.environ.get("RUNPOD_API_KEY") or ""
     hook = os.environ.get("CC_WEBHOOK_URL") or ""
+    hook_key = os.environ.get("CC_WEBHOOK_KEY") or ""
     if pod_key:
         text = text.replace(pod_key, "REDACTED")
     if hook:
         text = text.replace(hook, "REDACTED")
+    if hook_key:
+        text = text.replace(hook_key, "REDACTED")
     text = re.sub("rp" + "a_" + r"[A-Za-z0-9]+", "REDACTED", text)
     return text
 
@@ -567,10 +576,19 @@ cc_curl_post_json() {
     return 1
   fi
   cfg="$(mktemp)"
+  # URL and bearer stay in this 0600 file. They do not go on curl argv.
   python3 -c '
+import os
 import sys
-url = sys.argv[1].replace("\\", "\\\\").replace("\"", "\\\"")
+
+def esc(value):
+    return value.replace("\\", "\\\\").replace("\"", "\\\"")
+
+url = esc(sys.argv[1])
 sys.stdout.write("url = \"%s\"\n" % url)
+key = os.environ.get("CC_WEBHOOK_KEY") or ""
+if key and "{{" not in key:
+    sys.stdout.write("header = \"Authorization: Bearer %s\"\n" % esc(key))
 ' "$url" >"$cfg"
   chmod 600 "$cfg"
   # Keep curl stderr off the log. -S can print the host or the full URL.

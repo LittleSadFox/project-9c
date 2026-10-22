@@ -262,6 +262,11 @@ while [[ $# -gt 0 ]]; do
     --config)
       has_config=1
       url="$(sed -n 's/^url = \"\\(.*\\)\"$/\\1/p' "$2")"
+      if grep -q '^header = "Authorization: Bearer ' "$2"; then
+        printf 'auth=1\\n' >> "{hits}"
+      else
+        printf 'auth=0\\n' >> "{hits}"
+      fi
       shift 2
       ;;
     -d)
@@ -311,6 +316,7 @@ def _run_job_webhook(
     *,
     pod: str | None = None,
     api_key: str | None = None,
+    webhook_key: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     env = {
         "CC_VOLUME_DIR": str(tmp_path / "vol"),
@@ -326,6 +332,8 @@ def _run_job_webhook(
         env["RUNPOD_POD_ID"] = pod
     if api_key:
         env["RUNPOD_API_KEY"] = api_key
+    if webhook_key:
+        env["CC_WEBHOOK_KEY"] = webhook_key
     return _run([str(RUN_JOB)], env=env, bin_dir=tmp_path)
 
 
@@ -722,6 +730,7 @@ def test_pod_up_dry_run_sets_ttl_and_secret_refs() -> None:
     assert env["CC_GIT_REF"] == SHA40
     assert env["CC_REPO_TOKEN"] == "{{ RUNPOD_SECRET_cc_repo_token }}"
     assert env["CC_WEBHOOK_URL"] == "{{ RUNPOD_SECRET_cc_webhook_url }}"
+    assert env["CC_WEBHOOK_KEY"] == "{{ RUNPOD_SECRET_cc_webhook_key }}"
     assert "RUNPOD_API_KEY" not in env
     assert "test-key-do-not-inject" not in result.stdout
     assert "GET /containerregistryauth/cmvhzigy8002b13z5y84jqc73" in result.stdout
@@ -2014,6 +2023,85 @@ def test_webhook_curl_stderr_url_does_not_leak_into_log(tmp_path: Path) -> None:
             assert leak not in path.name
 
 
+def test_webhook_key_never_appears_in_run_folder(tmp_path: Path) -> None:
+    key = "whk_test_not_a_real_secret"
+    hits = _webhook_curl(tmp_path)
+    result = _run_job_webhook(tmp_path, "job-hook-key", webhook_key=key)
+    assert result.returncode != 0
+    run_dir = tmp_path / "vol" / "runs" / "job-hook-key"
+    dumped = _run_dir_text(run_dir)
+    log = (run_dir / "log.txt").read_text(encoding="utf-8")
+    assert "webhook ping ok status=200 curl_rc=0" in log
+    assert "auth=1" in hits.read_text(encoding="utf-8")
+    assert key not in dumped
+    assert key not in result.stdout
+    assert key not in result.stderr
+    assert "Authorization" not in log
+    assert "Bearer" not in log
+    assert "CC_WEBHOOK_KEY" not in log
+    for line in hits.read_text(encoding="utf-8").splitlines():
+        if line.startswith("argv="):
+            assert key not in line
+            assert "Authorization" not in line
+            assert "Bearer" not in line
+    for path in run_dir.rglob("*"):
+        if path.is_file():
+            assert key not in path.name
+
+
+def test_webhook_key_in_curl_stderr_does_not_leak(tmp_path: Path) -> None:
+    key = "whk_stderr_not_a_real_secret"
+    _webhook_curl(
+        tmp_path,
+        http="000",
+        exit_code=7,
+        stderr=f"curl: (7) Failed to connect Authorization: Bearer {key}\n",
+    )
+    result = _run_job_webhook(tmp_path, "job-hook-key-stderr", webhook_key=key)
+    assert result.returncode != 0
+    run_dir = tmp_path / "vol" / "runs" / "job-hook-key-stderr"
+    dumped = _run_dir_text(run_dir)
+    log = (run_dir / "log.txt").read_text(encoding="utf-8")
+    assert "webhook ping failed status=000 curl_rc=7" in log
+    assert key not in dumped
+    assert key not in result.stdout
+    assert key not in result.stderr
+    assert "Authorization" not in log
+    assert "Bearer" not in log
+
+
+def test_unresolved_webhook_key_is_not_sent(tmp_path: Path) -> None:
+    unresolved = "{{ RUNPOD_SECRET_cc_webhook_key }}"
+    hits = _webhook_curl(tmp_path)
+    result = _run_job_webhook(
+        tmp_path, "job-hook-key-unresolved", webhook_key=unresolved
+    )
+    assert result.returncode != 0
+    logged = hits.read_text(encoding="utf-8")
+    assert "auth=0" in logged
+    assert "auth=1" not in logged
+    dumped = _run_dir_text(tmp_path / "vol" / "runs" / "job-hook-key-unresolved")
+    assert unresolved not in dumped
+    assert "cc_webhook_key" not in dumped
+    assert unresolved not in result.stdout
+    assert unresolved not in result.stderr
+
+
+def test_cc_redact_redacts_webhook_key(tmp_path: Path) -> None:
+    key = "whk_redact_not_a_real_secret"
+    result = _run(
+        [
+            "bash",
+            "-c",
+            f'source {LIB} && cc_redact_oneline "Authorization: Bearer {key} extra={key}"',
+        ],
+        env={"CC_WEBHOOK_KEY": key},
+    )
+    assert result.returncode == 0, result.stderr
+    assert key not in result.stdout
+    assert "REDACTED" in result.stdout
+
+
 def test_webhook_ping_failed_on_401_still_terminates(tmp_path: Path) -> None:
     curl = tmp_path / "curl"
     curl.write_text(
@@ -3288,6 +3376,16 @@ def test_webhook_url_stays_off_curl_argv() -> None:
             if "curl " in line:
                 assert "CC_WEBHOOK_URL" not in line
                 assert "WEBHOOK_URL" not in line
+                assert "CC_WEBHOOK_KEY" not in line
+                assert "WEBHOOK_KEY" not in line
+                assert "Authorization" not in line
+                assert "Bearer" not in line
+    text = LIB.read_text(encoding="utf-8")
+    assert "RUNPOD_SECRET_cc_webhook_key" in text
+    assert "header = \\\"Authorization: Bearer" in text
+    curl_fn = text.split("cc_curl_post_json()")[1].split("cc_log_webhook_ping")[0]
+    assert "--config" in curl_fn
+    assert "chmod 600" in curl_fn
 
 
 def test_gpu_scripts_pass_shellcheck() -> None:
