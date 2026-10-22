@@ -193,7 +193,11 @@ def test_rtmlib_estimator_replaces_cuda_sessions_only(
     class FakeTool:
         def __init__(self, **kwargs: object) -> None:
             self.device = kwargs.get("device")
-            self.session = object()
+            self.session = type(
+                "KeptSession",
+                (),
+                {"get_providers": lambda self: ["CPUExecutionProvider"]},
+            )()
 
     def install_rtmlib() -> None:
         fake_rtmlib = types.SimpleNamespace(YOLOX=FakeTool, RTMPose=FakeTool)
