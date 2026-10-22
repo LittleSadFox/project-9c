@@ -288,6 +288,10 @@ The entrypoint unsets `CC_IN_GPU_TESTS` before it execs `run_job.sh`.
 
 See `TROUBLESHOOTING_LOG.md`.
 
+## 2026-10-22 — coding_plan.md Ryan decisions
+
+`coding_plan.md` synced with Ryan's decisions: single put-object with a 150 MiB cap, a 1080p transcode pre-step before the golden-set sync, Phase 0 visual checks waived.
+
 ## 2026-10-22 — p0-followups-3 curl trap, image pin, sync_volume
 
 `cc_curl_post_json` is a subshell with `trap 'rm -f -- "$cfg"' EXIT`.
@@ -346,3 +350,4 @@ The nvidia-smi hang test forces that fallback so Linux matches macOS.
 The no-job-id watchdog test sets `CC_TERMINATE_NO_SLEEP=1` and a 200 curl stub.
 
 See `TROUBLESHOOTING_LOG.md`.
+
