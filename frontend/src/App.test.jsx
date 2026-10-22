@@ -1,18 +1,11 @@
 import { render, screen } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 
 import { App } from "./App.jsx";
+import { installFetch } from "./test/mockApi.js";
 
 beforeEach(() => {
-  globalThis.fetch = vi.fn(async (url) => {
-    if (String(url).includes("/health")) {
-      return new Response(JSON.stringify({ status: "ok", dev: false }), { status: 200 });
-    }
-    if (String(url).includes("/api/jobs")) {
-      return new Response(JSON.stringify({ items: [], total: 0 }), { status: 200 });
-    }
-    return new Response("{}", { status: 200 });
-  });
+  installFetch([]);
 });
 
 describe("App shell", () => {
@@ -23,6 +16,7 @@ describe("App shell", () => {
     expect(screen.getByRole("link", { name: "Library" })).toBeTruthy();
     expect(screen.getByRole("link", { name: "Compare" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Library" })).toBeTruthy();
-    expect(await screen.findByText("No videos yet. Import starts in Phase 1.")).toBeTruthy();
+    expect(await screen.findByText("No videos yet.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Import" })).toBeTruthy();
   });
 });

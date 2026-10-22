@@ -621,3 +621,38 @@ Ingest and `original_path` call `sanitize_ext`.
 A non-numeric stamp is rewritten to that same `now`.
 `remain` then equals `CC_TTL_S`.
 A clock tick no longer sends a fresh stamp down the expired foreground path.
+
+## 2026-10-22 — p1-C frontend library, playback, review v1
+
+Add the Phase 1 frontend under `frontend/`.
+
+Library:
+
+- Sidebar: gyms, boulders, sessions, Unsorted, Needs review, Trash
+- Video and attempt grids
+- Inspector
+- Drop zone with per-file progress
+- Search and filters
+
+Player:
+
+- `VideoStage`
+- `SkeletonCanvas` (overlay, skeleton only, limb trails)
+- `TransportBar`
+- `Timeline` with zoom, ticks, and in/out handles
+
+Review v1:
+
+- Set in and out points
+- Create attempt
+
+Attempt page:
+
+- Clip playback
+- `RatingPanel` autosave
+
+API modules follow coding_plan §9 Phase 1 only.
+Vitest mocks `api/*` through `fetch` and XHR.
+Playwright Phase 1 e2e is written and skipped until A and B merge.
+
+Do not change `AGENTS.md`, `coding_plan.md`, `scripts/gpu/`, or `docker/`.

@@ -98,6 +98,12 @@
   transform: scale(var(--lg-press-scale));
 }
 
+.lg-button:disabled,
+.lg-icon-button:disabled {
+  opacity: 0.42;
+  pointer-events: none;
+}
+
 .lg-icon-button:focus-visible,
 .lg-button:focus-visible,
 .lg-nav a:focus-visible,
