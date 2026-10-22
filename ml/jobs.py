@@ -16,7 +16,8 @@ import subprocess
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from itertools import islice
 from pathlib import Path
 from typing import Any
@@ -385,6 +386,22 @@ def _has_detections(raw: Any) -> bool:
     return array.size > 0
 
 
+def _as_scores(raw: Any, kpts: Any) -> Any:
+    import numpy as np
+
+    people = _as_people(kpts)
+    if raw is not None:
+        array = np.asarray(raw, dtype=np.float32)
+        if array.size > 0:
+            if array.ndim == 1:
+                array = array[None, ...]
+            if array.shape[:2] == people.shape[:2]:
+                return array
+    if people.ndim == 3 and people.shape[-1] >= 3:
+        return people[..., 2]
+    return np.ones(people.shape[:2], dtype=np.float32)
+
+
 def _as_people(raw: Any) -> Any:
     import numpy as np
 
@@ -501,6 +518,51 @@ def pair_people(
     return pairs
 
 
+def _mean_or_none(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return float(sum(values) / len(values))
+
+
+def apply_cuda_tf32_off(providers: Any) -> Any:
+    """Force use_tf32=0 on CUDA EP entries. Leave other providers unchanged."""
+    if not providers:
+        return providers
+    updated: list[Any] = []
+    for item in providers:
+        if item == "CUDAExecutionProvider":
+            updated.append(("CUDAExecutionProvider", {"use_tf32": 0}))
+            continue
+        if isinstance(item, (tuple, list)) and item and item[0] == "CUDAExecutionProvider":
+            opts = dict(item[1]) if len(item) > 1 and isinstance(item[1], dict) else {}
+            opts["use_tf32"] = 0
+            updated.append(("CUDAExecutionProvider", opts))
+            continue
+        updated.append(item)
+    return updated
+
+
+@contextmanager
+def cuda_tf32_off() -> Iterator[None]:
+    """Patch ORT session create so pose_bench CUDA sessions turn TF32 off."""
+    import onnxruntime as ort
+
+    original = ort.InferenceSession
+
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        if "providers" in kwargs:
+            kwargs["providers"] = apply_cuda_tf32_off(kwargs["providers"])
+        elif len(args) >= 2:
+            args = (args[0], apply_cuda_tf32_off(args[1]), *args[2:])
+        return original(*args, **kwargs)
+
+    ort.InferenceSession = wrapped  # type: ignore[method-assign]
+    try:
+        yield
+    finally:
+        ort.InferenceSession = original  # type: ignore[method-assign]
+
+
 def compare_keypoints(
     cpu_kpts: Any,
     cuda_kpts: Any,
@@ -510,11 +572,21 @@ def compare_keypoints(
     limit_px: float = 1.0,
     cpu_boxes: Any = None,
     cuda_boxes: Any = None,
+    cpu_scores: Any = None,
+    cuda_scores: Any = None,
 ) -> dict[str, Any]:
-    """Compare CUDA and CPU keypoints. Match people by frame index, then IoU."""
+    """Compare CUDA and CPU keypoints. Gate on the all-keypoint mean."""
     import numpy as np
+    from app.core.halpe26 import NAMES, N_KEYPOINTS, SCORE_THR
 
     totals: list[float] = []
+    confident: list[float] = []
+    kept = 0
+    dropped = 0
+    frame_errors: list[tuple[int, float]] = []
+    kpt_errors: list[list[float]] = [[] for _ in range(N_KEYPOINTS)]
+    kpt_score_cpu: list[list[float]] = [[] for _ in range(N_KEYPOINTS)]
+    kpt_score_cuda: list[list[float]] = [[] for _ in range(N_KEYPOINTS)]
     frames_compared = 0
     frames_cpu = 0
     frames_cuda = 0
@@ -530,22 +602,41 @@ def compare_keypoints(
             continue
         box_a = cpu_boxes[index] if cpu_boxes is not None and index < len(cpu_boxes) else None
         box_b = cuda_boxes[index] if cuda_boxes is not None and index < len(cuda_boxes) else None
+        score_a = cpu_scores[index] if cpu_scores is not None and index < len(cpu_scores) else None
+        score_b = cuda_scores[index] if cuda_scores is not None and index < len(cuda_scores) else None
         pairs = pair_people(a, b, box_a, box_b)
         if not pairs:
             continue
         frames_compared += 1
+        sa = _as_scores(score_a, a)
+        sb = _as_scores(score_b, b)
+        frame_deltas: list[float] = []
         for ia, ib in pairs:
             left = a[ia, ..., :2]
             right = b[ib, ..., :2]
             if left.shape != right.shape:
                 continue
             delta = np.linalg.norm(left - right, axis=-1)
-            totals.extend(float(v) for v in delta.ravel())
-    mean_abs: float | None
-    if not totals:
-        mean_abs = None
-    else:
-        mean_abs = float(sum(totals) / len(totals))
+            left_s = sa[ia] if ia < sa.shape[0] else np.ones(left.shape[0], dtype=np.float32)
+            right_s = sb[ib] if ib < sb.shape[0] else np.ones(right.shape[0], dtype=np.float32)
+            for joint, err in enumerate(delta.ravel()):
+                value = float(err)
+                totals.append(value)
+                frame_deltas.append(value)
+                if joint < N_KEYPOINTS:
+                    kpt_errors[joint].append(value)
+                    cpu_s = float(left_s[joint]) if joint < len(left_s) else 1.0
+                    cuda_s = float(right_s[joint]) if joint < len(right_s) else 1.0
+                    kpt_score_cpu[joint].append(cpu_s)
+                    kpt_score_cuda[joint].append(cuda_s)
+                    if cpu_s >= SCORE_THR and cuda_s >= SCORE_THR:
+                        confident.append(value)
+                        kept += 1
+                    else:
+                        dropped += 1
+        if frame_deltas:
+            frame_errors.append((index, float(sum(frame_deltas) / len(frame_deltas))))
+    mean_abs = _mean_or_none(totals)
     denom = max(0, frames_total)
     frac = (frames_compared / denom) if denom else 0.0
     parity_ok = (
@@ -554,6 +645,21 @@ def compare_keypoints(
         and frames_compared > 0
         and frac >= min_compared_frac
     )
+    frame_values = [error for _, error in frame_errors]
+    worst = sorted(frame_errors, key=lambda item: item[1], reverse=True)[:5]
+    keypoints_out: dict[str, Any] = {}
+    for joint, name in enumerate(NAMES):
+        keypoints_out[name] = {
+            "mean_error_px": None
+            if not kpt_errors[joint]
+            else round(float(sum(kpt_errors[joint]) / len(kpt_errors[joint])), 4),
+            "mean_score_cpu": None
+            if not kpt_score_cpu[joint]
+            else round(float(sum(kpt_score_cpu[joint]) / len(kpt_score_cpu[joint])), 4),
+            "mean_score_cuda": None
+            if not kpt_score_cuda[joint]
+            else round(float(sum(kpt_score_cuda[joint]) / len(kpt_score_cuda[joint])), 4),
+        }
     return {
         "mean_abs_px": mean_abs,
         "parity_ok": parity_ok,
@@ -563,28 +669,44 @@ def compare_keypoints(
         "frames_compared": frames_compared,
         "min_compared_frac": min_compared_frac,
         "parity_limit_px": limit_px,
+        "score_thr": SCORE_THR,
+        "mean_abs_px_confident": _mean_or_none(confident),
+        "keypoints_kept": kept,
+        "keypoints_dropped": dropped,
+        "frame_error": {
+            "median": None if not frame_values else round(float(np.median(frame_values)), 4),
+            "p95": None if not frame_values else round(float(np.percentile(frame_values, 95)), 4),
+            "max": None if not frame_values else round(float(max(frame_values)), 4),
+            "worst": [{"frame_index": idx, "error_px": round(err, 4)} for idx, err in worst],
+        },
+        "keypoints": keypoints_out,
     }
 
 
-def _run_estimator(estimator: Any, frames: list[Any]) -> tuple[list[Any], list[Any], float]:
+def _run_estimator(
+    estimator: Any, frames: list[Any]
+) -> tuple[list[Any], list[Any], list[Any], float]:
     import time
 
     import numpy as np
 
     keypoints: list[Any] = []
     boxes_out: list[Any] = []
+    scores_out: list[Any] = []
     started = time.perf_counter()
     for index, frame in enumerate(frames):
         boxes = np.asarray(estimator.detect(frame, frame_index=index))
         if boxes.size == 0:
             keypoints.append(np.zeros((0, 26, 2), dtype=np.float32))
             boxes_out.append(np.zeros((0, 4), dtype=np.float32))
+            scores_out.append(np.zeros((0, 26), dtype=np.float32))
             continue
         result = estimator.pose(frame, boxes, frame_index=index)
         keypoints.append(np.asarray(result["keypoints"], dtype=np.float32))
         boxes_out.append(np.asarray(result.get("boxes", boxes), dtype=np.float32))
+        scores_out.append(np.asarray(result.get("scores"), dtype=np.float32))
     elapsed = max(time.perf_counter() - started, 1e-6)
-    return keypoints, boxes_out, len(frames) / elapsed
+    return keypoints, boxes_out, scores_out, len(frames) / elapsed
 
 
 def _lock_dests_for_modes(modes: list[str]) -> set[str]:
@@ -762,9 +884,11 @@ def pose_bench(
                 raise JobError(str(exc)) from exc
             cuda_est = None
             if have_cuda:
-                cuda_est = RtmlibEstimator(models_dir=models_dir, device="cuda", mode=mode)
+                with cuda_tf32_off():
+                    cuda_est = RtmlibEstimator(models_dir=models_dir, device="cuda", mode=mode)
+                    cuda_est._ensure()
 
-        cpu_kpts, cpu_boxes, cpu_fps = _run_estimator(cpu_est, frames)
+        cpu_kpts, cpu_boxes, cpu_scores, cpu_fps = _run_estimator(cpu_est, frames)
         mode_metrics: dict[str, Any] = {
             "mode": mode,
             "estimator_mode": getattr(cpu_est, "mode", mode),
@@ -775,7 +899,7 @@ def pose_bench(
                 "cpu": _boxes_debug(cpu_boxes),
             }
         if cuda_est is not None:
-            cuda_kpts, cuda_boxes, cuda_fps = _run_estimator(cuda_est, frames)
+            cuda_kpts, cuda_boxes, cuda_scores, cuda_fps = _run_estimator(cuda_est, frames)
             if want_debug:
                 mode_metrics["debug_detections"]["cuda"] = _boxes_debug(cuda_boxes)
             parity = compare_keypoints(
@@ -786,8 +910,11 @@ def pose_bench(
                 limit_px=limit_px,
                 cpu_boxes=cpu_boxes,
                 cuda_boxes=cuda_boxes,
+                cpu_scores=cpu_scores,
+                cuda_scores=cuda_scores,
             )
             mean_abs = parity["mean_abs_px"]
+            conf_mean = parity.get("mean_abs_px_confident")
             mode_metrics["cuda"] = {
                 "fps": round(cuda_fps, 3),
                 "provider": getattr(cuda_est, "provider", "CUDAExecutionProvider"),
@@ -797,6 +924,13 @@ def pose_bench(
                 "frames_with_detections_cpu": parity["frames_with_detections_cpu"],
                 "frames_with_detections_cuda": parity["frames_with_detections_cuda"],
                 "frames_compared": parity["frames_compared"],
+                "score_thr": parity.get("score_thr"),
+                "mean_abs_px_confident": None if conf_mean is None else round(float(conf_mean), 4),
+                "keypoints_kept": parity.get("keypoints_kept"),
+                "keypoints_dropped": parity.get("keypoints_dropped"),
+                "frame_error": parity.get("frame_error"),
+                "keypoints": parity.get("keypoints"),
+                "cuda_provider_options": {"use_tf32": 0},
             }
         elif have_cuda:
             mode_metrics["cuda"] = {"error": "CUDA estimator failed to start", "parity_ok": False}

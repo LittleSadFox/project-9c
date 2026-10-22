@@ -19,7 +19,9 @@ from ml.jobs import (
     JobError,
     _debug_enabled,
     _take_frames,
+    apply_cuda_tf32_off,
     compare_keypoints,
+    cuda_tf32_off,
     ensure_bench_weights,
     main,
     pair_people,
@@ -28,11 +30,37 @@ from ml.jobs import (
 )
 
 
+def test_apply_cuda_tf32_off_only_changes_cuda() -> None:
+    assert apply_cuda_tf32_off(["CPUExecutionProvider"]) == ["CPUExecutionProvider"]
+    assert apply_cuda_tf32_off(["CUDAExecutionProvider"]) == [
+        ("CUDAExecutionProvider", {"use_tf32": 0})
+    ]
+    merged = apply_cuda_tf32_off([("CUDAExecutionProvider", {"device_id": 0})])
+    assert merged == [("CUDAExecutionProvider", {"device_id": 0, "use_tf32": 0})]
+
+
+def test_cuda_tf32_off_patches_inference_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    import onnxruntime as ort
+
+    seen: list[object] = []
+
+    class FakeSession:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            seen.append(kwargs.get("providers") or (args[1] if len(args) > 1 else None))
+
+    monkeypatch.setattr(ort, "InferenceSession", FakeSession)
+    with cuda_tf32_off():
+        ort.InferenceSession(path_or_bytes=b"x", providers=["CUDAExecutionProvider"])
+    assert seen == [[("CUDAExecutionProvider", {"use_tf32": 0})]]
+
+
 def test_pose_bench_is_registered() -> None:
     assert JOBS["pose_bench"] is pose_bench
 
 
 def test_pose_bench_fixture_writes_metrics(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.core.halpe26 import NAMES, SCORE_THR
+
     monkeypatch.setenv("CC_POSE_BACKEND", "fixture")
     monkeypatch.delenv("CC_REQUIRE", raising=False)
     monkeypatch.setenv("CC_DEVICE", "cpu")
@@ -50,6 +78,23 @@ def test_pose_bench_fixture_writes_metrics(tmp_path: Path, monkeypatch: pytest.M
     assert "debug" in saved
     assert saved["debug"]["channel_order"] == "BGR"
     assert "pose_bench status=passed" in (run_dir / "log.txt").read_text(encoding="utf-8")
+    cuda = saved["modes"]["balanced"]["cuda"]
+    assert cuda["parity_ok"] is True
+    assert cuda["mean_abs_px"] == 0.0
+    assert cuda["score_thr"] == SCORE_THR
+    assert cuda["mean_abs_px_confident"] == 0.0
+    assert cuda["keypoints_kept"] == 8 * 26
+    assert cuda["keypoints_dropped"] == 0
+    assert set(cuda["frame_error"]) == {"median", "p95", "max", "worst"}
+    assert cuda["frame_error"]["median"] == 0.0
+    assert cuda["frame_error"]["p95"] == 0.0
+    assert cuda["frame_error"]["max"] == 0.0
+    assert len(cuda["frame_error"]["worst"]) == 5
+    assert set(cuda["keypoints"]) == set(NAMES)
+    assert cuda["keypoints"]["nose"]["mean_error_px"] == 0.0
+    assert cuda["keypoints"]["nose"]["mean_score_cpu"] == 0.9
+    assert cuda["keypoints"]["nose"]["mean_score_cuda"] == 0.9
+    assert cuda["cuda_provider_options"] == {"use_tf32": 0}
 
 
 def test_pose_bench_passes_mode_to_estimator(
@@ -108,6 +153,77 @@ def test_compare_keypoints_ninety_five_within_one_px_passes() -> None:
     assert result["mean_abs_px"] is not None
     assert result["mean_abs_px"] <= 1.0
     assert result["parity_ok"] is True
+
+
+def test_compare_keypoints_low_score_error_is_diagnostic_only() -> None:
+    from app.core.halpe26 import SCORE_THR
+
+    cpu = [_kpts()]
+    cuda = [_kpts(shift=50.0)]
+    cuda[0][0, 1:, 0] = 10.0
+    cpu_scores = [np.full((1, 26), 0.9, dtype=np.float32)]
+    cuda_scores = [np.full((1, 26), 0.9, dtype=np.float32)]
+    cpu_scores[0][0, 0] = 0.1
+    cuda_scores[0][0, 0] = 0.1
+    result = compare_keypoints(
+        cpu,
+        cuda,
+        frames_total=1,
+        min_compared_frac=0.9,
+        cpu_scores=cpu_scores,
+        cuda_scores=cuda_scores,
+    )
+    assert result["score_thr"] == SCORE_THR
+    assert result["mean_abs_px"] is not None
+    assert result["mean_abs_px"] > 1.0
+    assert result["parity_ok"] is False
+    assert result["mean_abs_px_confident"] is not None
+    assert result["mean_abs_px_confident"] == 0.0
+    assert result["keypoints_kept"] == 25
+    assert result["keypoints_dropped"] == 1
+    assert result["keypoints"]["nose"]["mean_error_px"] == 50.0
+    assert result["keypoints"]["left_eye"]["mean_error_px"] == 0.0
+
+
+def test_compare_keypoints_records_frame_and_keypoint_stats() -> None:
+    cpu = [_kpts() for _ in range(3)]
+    cuda = [_kpts(), _kpts(shift=0.4), _kpts(shift=2.0)]
+    result = compare_keypoints(cpu, cuda, frames_total=3, min_compared_frac=0.9)
+    assert result["frames_compared"] == 3
+    assert result["frame_error"]["max"] == 2.0
+    assert result["frame_error"]["median"] == 0.4
+    assert result["frame_error"]["worst"][0]["frame_index"] == 2
+    assert result["frame_error"]["worst"][0]["error_px"] == 2.0
+    assert set(result["keypoints"]) == {
+        "nose",
+        "left_eye",
+        "right_eye",
+        "left_ear",
+        "right_ear",
+        "left_shoulder",
+        "right_shoulder",
+        "left_elbow",
+        "right_elbow",
+        "left_wrist",
+        "right_wrist",
+        "left_hip",
+        "right_hip",
+        "left_knee",
+        "right_knee",
+        "left_ankle",
+        "right_ankle",
+        "head",
+        "neck",
+        "hip",
+        "left_big_toe",
+        "right_big_toe",
+        "left_small_toe",
+        "right_small_toe",
+        "left_heel",
+        "right_heel",
+    }
+    assert result["keypoints"]["hip"]["mean_score_cpu"] == 1.0
+    assert result["keypoints"]["hip"]["mean_score_cuda"] == 1.0
 
 
 def test_compare_keypoints_ninety_five_over_one_px_fails() -> None:

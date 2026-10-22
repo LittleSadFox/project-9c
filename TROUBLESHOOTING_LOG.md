@@ -49,6 +49,14 @@ Copy this block for a new entry.
 - Fix: Use `transpose=1` for -90/270 and `transpose=2` for +90. Pass `-display_rotation 0` before `-i`. ffmpeg 7.1 ignores `-metadata:s:v rotate=0` for the display matrix.
 - Prevention: Assert a corner marker on -90 and +90 fixtures. Assert ffprobe reports no rotation on the proxy.
 
+### 2026-10-22 — lightweight rtmpose-s CUDA/CPU mean 1.053 px
+
+- Symptom: After the clip and pairing fix, `pose_bench` at `9466729` compared 100 of 100 frames. Balanced (0.234 px) and performance (0.088 px) passed. Lightweight failed at 1.053 px.
+- Where it failed: pod (RTX 4090)
+- Cause: CPU and CUDA rtmlib paths match except the ONNX Runtime provider. rtmpose-s decodes SIMCC with `argmax` and `simcc_split_ratio=2.0`. Ampere TF32 can move that argmax by about 1 px. The all-keypoint mean includes low-score points.
+- Fix: Keep the all-keypoint mean ≤ 1.0 px gate. Write per-frame, per-keypoint, and confident-mean numbers in `metrics.json`. Default `pose_bench` CUDA sessions to `use_tf32=0`. Do not change the app estimator.
+- Prevention: Do not change what the gate measures without Ryan. Treat score filters and TF32 as diagnostics or bench-only options.
+
 ### 2026-10-22 — pose_bench parity compared the wrong clip
 
 - Symptom: Pod `pose_bench` at `c5b5392` failed the 90% / 1 px gate. Lightweight and balanced compared 0 of 100 frames. Performance compared 21 of 100 with a 90.09 px mean.

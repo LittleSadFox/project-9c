@@ -504,3 +504,33 @@ Rerun on a pod launched from main's `pod_up.sh`:
 ```text
 python -m ml.jobs pose_bench --run-dir "$RUN_DIR"
 ```
+
+## 2026-10-22 — pose_bench diagnostics and TF32 off
+
+The parity gate stays the all-keypoint mean.
+`parity_ok` is true only when that mean is ≤ 1.0 px and at least 90% of frames compare.
+The gate does not filter by score.
+The gate does not use a kept-fraction floor.
+
+Each CUDA mode block in `metrics.json` now also records numbers only:
+
+- per-frame error: median, p95, max, and the five worst frames
+- each of the 26 Halpe names: mean error, mean CPU score, mean CUDA score
+- `mean_abs_px_confident` over keypoints with score ≥ `SCORE_THR` (0.3) on both devices
+- `keypoints_kept` and `keypoints_dropped`
+
+`pose_bench` CUDA sessions set `use_tf32=0`.
+The CPU and CUDA rtmlib paths match except the ONNX Runtime provider.
+Both use the same pose size, ImageNet BGR mean/std, float32 input, and `simcc_split_ratio=2.0`.
+rtmlib creates `InferenceSession(..., providers=[name])` with no session options.
+Ampere TF32 can move the SIMCC argmax on rtmpose-s by about 1 px.
+That option is for `pose_bench` only.
+The app estimator does not change.
+
+The plain command is unchanged:
+
+```text
+python -m ml.jobs pose_bench --run-dir "$RUN_DIR"
+```
+
+It still uses `sample1.mp4`, start frame 0, 100 frames, `min-compared-frac` 0.9, and debug on.
