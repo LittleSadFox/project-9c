@@ -328,7 +328,7 @@ Phase 0 image `climbing-coach-gpu`:
 - Python 3.12
 - `onnxruntime-gpu==1.23.2`
 - static ffmpeg 7
-- sshd, git, curl, jq, shellcheck
+- sshd, git, curl, jq, pinned shellcheck 0.11.0 (same pin as CI)
 - No PyTorch
 - No MMPose
 
@@ -351,6 +351,7 @@ CI copies the repo to `/tmp/cc-src` and runs the `gpu_tests` pytest selection fr
 `allowedCudaVersions` is opt-in via `CC_ALLOWED_CUDA` (unset by default). The image CUDA ≥12.8 guard is the real floor.
 The default GPU list is L4, RTX 2000 Ada, RTX 4090, and A100. It omits Blackwell. ONNX Runtime has never been verified on sm_120 on a pod.
 `$TMPDIR` under `/tmp/cc-src` is untrusted. `gpu_tests` sets `CC_IN_GPU_TESTS=1` on the pytest child. Tests keep that flag unless a case clears it. `run_job.sh` and `ml.jobs` refuse a nested `gpu_tests`. The nested refuse exits before the cleanup trap and before mkdir. Tests set `CC_PYTHON` so they do not use `/opt/cc/venv/bin/python`. `CC_PYTHON` is a test hook. A pod uses `/opt/cc/venv/bin/python` unless that file is missing. `run_job.sh` writes `python=<path>` to the job log. CI installs a fake interpreter at that path. Tests write terminate stamps under `CC_TERMINATE_STAMP_DIR`. `pod_up` refuses a reused job id.
+The fourth live `gpu_tests` pod at `2078682a` used an RTX 4090 and CUDA. Pytest reported 152 passed and 1 failed (`test_gpu_scripts_pass_shellcheck`). The image apt `shellcheck` flagged SC2031. CI and the image now pin shellcheck 0.11.0. The watchdog does not export `CC_RUN_LOG` in its subshell. `gpu_tests` writes `ort_providers=<list> used_cuda=<true|false>` to `log.txt`. The webhook ping logs `webhook ping ok status=<code> curl_rc=<n>` only on HTTP 2xx. Any other HTTP code or curl exit logs `webhook ping failed status=<code> curl_rc=<n>`. Curl uses `--max-time 15 -o /dev/null -w '%{http_code}'`. Curl stderr does not go to `log.txt` or the run folder.
 Do not put the account API key in the pod template or in pod env.
 
 The Docker files for `climbing-coach-train` land in the Phase 6 todo.

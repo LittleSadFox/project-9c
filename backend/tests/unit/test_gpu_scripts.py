@@ -237,8 +237,17 @@ def _job_dirs(tmp_path: Path, src: Path | None = None) -> dict[str, str]:
     return {"CC_SRC_DIR": str(src), "CC_LIBRARY_DIR": str(library)}
 
 
-def _webhook_curl(tmp_path: Path) -> Path:
+def _webhook_curl(
+    tmp_path: Path,
+    *,
+    http: str = "200",
+    exit_code: int = 0,
+    stderr: str = "",
+) -> Path:
     hits = tmp_path / "webhook.log"
+    err_file = tmp_path / "curl.stderr"
+    if stderr:
+        err_file.write_text(stderr, encoding="utf-8")
     curl = tmp_path / "curl"
     curl.write_text(
         f"""#!/usr/bin/env bash
@@ -261,13 +270,43 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 printf 'url=%s body=%s\\n' "$url" "$body" >> "{hits}"
-printf '200'
-exit 0
+if [[ -f "{err_file}" ]]; then
+  cat "{err_file}" >&2
+fi
+printf '%s' "{http}"
+exit {exit_code}
 """,
         encoding="utf-8",
     )
     curl.chmod(0o755)
     return hits
+
+
+def _run_job_webhook(tmp_path: Path, job_id: str) -> subprocess.CompletedProcess[str]:
+    return _run(
+        [str(RUN_JOB)],
+        env={
+            "CC_VOLUME_DIR": str(tmp_path / "vol"),
+            "CC_JOB": "gpu_tests",
+            "CC_GIT_REF": SHA40,
+            "CC_JOB_ID": job_id,
+            "CC_TTL_S": "60",
+            "CC_IN_GPU_TESTS": "",
+            "CC_WEBHOOK_URL": "https://example.invalid/hook",
+            **_job_dirs(tmp_path),
+        },
+        bin_dir=tmp_path,
+    )
+
+
+def _run_dir_text(run_dir: Path) -> str:
+    chunks: list[str] = []
+    if not run_dir.exists():
+        return ""
+    for path in run_dir.rglob("*"):
+        if path.is_file():
+            chunks.append(path.read_text(encoding="utf-8", errors="replace"))
+    return "\n".join(chunks)
 
 
 _FORBIDDEN_JOB_DIRS = {
@@ -1599,6 +1638,11 @@ def test_run_job_empty_token_pings_webhook(tmp_path: Path) -> None:
             assert "example.invalid/hook" not in line
     status = tmp_path / "vol" / "runs" / "job-hook" / "status"
     assert status.read_text(encoding="utf-8").strip() == "failed"
+    log = tmp_path / "vol" / "runs" / "job-hook" / "log.txt"
+    text = log.read_text(encoding="utf-8")
+    assert "webhook ping ok status=200 curl_rc=0" in text
+    assert "example.invalid" not in text
+    assert "https://" not in text
 
 
 def test_run_job_unresolved_token_pings_webhook(tmp_path: Path) -> None:
@@ -1634,6 +1678,71 @@ def test_run_job_unresolved_token_pings_webhook(tmp_path: Path) -> None:
             assert "example.invalid/hook" not in line
     status = tmp_path / "vol" / "runs" / "job-unresolved" / "status"
     assert status.read_text(encoding="utf-8").strip() == "failed"
+    text = log.read_text(encoding="utf-8")
+    assert "webhook ping ok status=200 curl_rc=0" in text
+    assert "example.invalid" not in text
+    assert "https://" not in text
+
+
+def test_webhook_ping_ok_on_2xx(tmp_path: Path) -> None:
+    _webhook_curl(tmp_path, http="204", exit_code=0)
+    result = _run_job_webhook(tmp_path, "job-hook-204")
+    assert result.returncode != 0
+    log = tmp_path / "vol" / "runs" / "job-hook-204" / "log.txt"
+    text = log.read_text(encoding="utf-8")
+    assert "webhook ping ok status=204 curl_rc=0" in text
+    assert "webhook ping failed" not in text
+    assert "example.invalid" not in text + result.stdout + result.stderr
+    assert "https://" not in text
+
+
+def test_webhook_ping_failed_on_non_2xx(tmp_path: Path) -> None:
+    _webhook_curl(tmp_path, http="500", exit_code=0)
+    result = _run_job_webhook(tmp_path, "job-hook-500")
+    assert result.returncode != 0
+    log = tmp_path / "vol" / "runs" / "job-hook-500" / "log.txt"
+    text = log.read_text(encoding="utf-8")
+    assert "webhook ping failed status=500 curl_rc=0" in text
+    assert "webhook ping ok" not in text
+    assert "example.invalid" not in text + result.stdout + result.stderr
+    assert "https://" not in text
+
+
+def test_webhook_ping_failed_on_curl_error(tmp_path: Path) -> None:
+    _webhook_curl(tmp_path, http="000", exit_code=7)
+    result = _run_job_webhook(tmp_path, "job-hook-curl7")
+    assert result.returncode != 0
+    log = tmp_path / "vol" / "runs" / "job-hook-curl7" / "log.txt"
+    text = log.read_text(encoding="utf-8")
+    assert "webhook ping failed status=000 curl_rc=7" in text
+    assert "webhook ping ok" not in text
+    assert "example.invalid" not in text + result.stdout + result.stderr
+    assert "https://" not in text
+
+
+def test_webhook_curl_stderr_url_does_not_leak_into_log(tmp_path: Path) -> None:
+    leak = "https://secret-webhook.example.invalid/hook?token=leak-me"
+    _webhook_curl(
+        tmp_path,
+        http="000",
+        exit_code=7,
+        stderr=f"curl: (7) Failed to connect to {leak}\n",
+    )
+    result = _run_job_webhook(tmp_path, "job-hook-leak")
+    assert result.returncode != 0
+    run_dir = tmp_path / "vol" / "runs" / "job-hook-leak"
+    dumped = _run_dir_text(run_dir)
+    log = (run_dir / "log.txt").read_text(encoding="utf-8")
+    assert "webhook ping failed status=000 curl_rc=7" in log
+    assert leak not in dumped
+    assert "secret-webhook" not in dumped
+    assert "leak-me" not in dumped
+    assert leak not in result.stdout
+    assert leak not in result.stderr
+    assert "https://" not in log
+    for path in run_dir.rglob("*"):
+        if path.is_file():
+            assert leak not in path.name
 
 
 def test_run_logged_streams_before_exit(tmp_path: Path) -> None:
@@ -1821,6 +1930,8 @@ def test_run_job_refuses_nested_gpu_tests(tmp_path: Path) -> None:
     assert not (tmp_path / "vol" / "runs" / "job-nested").exists()
     assert "Webhook ping" not in result.stdout
     assert "Webhook ping" not in result.stderr
+    assert "webhook ping" not in result.stdout
+    assert "webhook ping" not in result.stderr
 
 
 def test_nested_gpu_tests_guard_inherits_and_uses_real_ml_jobs(
@@ -2681,9 +2792,13 @@ def test_run_logged_fifo_uses_mktemp_dir() -> None:
     assert "trap 'rm -f" not in text
     assert "jq -c" in WAIT_JOB.read_text(encoding="utf-8")
     curl_fn = LIB.read_text(encoding="utf-8").split("cc_curl_post_json()")[1]
-    curl_fn = curl_fn.split("cc_realpath")[0]
+    curl_fn = curl_fn.split("cc_log_webhook_ping")[0]
     assert "return 1" in curl_fn
     assert "cc_fail" not in curl_fn
+    assert "--max-time 15" in curl_fn
+    assert "-o /dev/null" in curl_fn
+    assert "-w '%{http_code}'" in curl_fn
+    assert "2>/dev/null" in curl_fn
 
 
 def test_webhook_url_stays_off_curl_argv() -> None:

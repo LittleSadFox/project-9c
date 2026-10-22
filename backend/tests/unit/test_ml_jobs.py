@@ -67,6 +67,10 @@ def test_gpu_tests_job_writes_metrics(tmp_path: Path) -> None:
     assert metrics["status"] == "passed"
     assert metrics["pytest"]["passed"] >= 1
     assert (run_dir / "metrics.json").is_file()
+    log = (run_dir / "log.txt").read_text(encoding="utf-8")
+    providers = ",".join(str(item) for item in metrics["cuda"]["session_providers"])
+    used = "true" if metrics["cuda"]["used_cuda"] else "false"
+    assert f"ort_providers={providers} used_cuda={used}" in log
 
 
 def test_gpu_tests_does_not_leak_cc_require(

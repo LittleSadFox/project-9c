@@ -83,12 +83,26 @@ jobs:
           ffprobe -version
           ffmpeg -version | head -n 1 | grep -E 'ffmpeg version n?[7-9]\.'
 
+      - name: Install pinned shellcheck
+        if: runner.os == 'Linux'
+        env:
+          SHELLCHECK_URL: https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz
+          SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/shellcheck.tar.xz "$SHELLCHECK_URL"
+          echo "$SHELLCHECK_SHA256  /tmp/shellcheck.tar.xz" | sha256sum -c -
+          mkdir -p "$HOME/.local/bin"
+          tar -xJf /tmp/shellcheck.tar.xz -C /tmp
+          install -m 0755 /tmp/shellcheck-v0.11.0/shellcheck "$HOME/.local/bin/shellcheck"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/shellcheck" --version | grep -F '0.11.0'
+
       - name: Shellcheck
         if: runner.os == 'Linux'
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq shellcheck
+          shellcheck --version | grep -F '0.11.0'
           shellcheck -x scripts/gpu/*.sh scripts/sync_volume.sh docker/gpu/entrypoint.sh
 
       - name: Ruff
@@ -164,11 +178,19 @@ jobs:
           python -m pip install -r backend/requirements-dev.txt
           python -m pip install --no-deps -r backend/requirements-nodeps.txt
 
-      - name: Install shellcheck
+      - name: Install pinned shellcheck
+        env:
+          SHELLCHECK_URL: https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz
+          SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq shellcheck
+          curl -fsSL -o /tmp/shellcheck.tar.xz "$SHELLCHECK_URL"
+          echo "$SHELLCHECK_SHA256  /tmp/shellcheck.tar.xz" | sha256sum -c -
+          mkdir -p "$HOME/.local/bin"
+          tar -xJf /tmp/shellcheck.tar.xz -C /tmp
+          install -m 0755 /tmp/shellcheck-v0.11.0/shellcheck "$HOME/.local/bin/shellcheck"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/shellcheck" --version | grep -F '0.11.0'
 
       - name: Pytest gpu_tests selection from /tmp/cc-src
         run: |
