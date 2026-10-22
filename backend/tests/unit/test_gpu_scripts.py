@@ -4141,6 +4141,8 @@ def test_run_job_nvidia_smi_timeout_logs_unknown(tmp_path: Path) -> None:
             "CC_TTL_S": "60",
             "CC_IN_GPU_TESTS": "",
             "CC_NVIDIA_SMI_TIMEOUT_S": "1",
+            # macOS has no timeout or gtimeout. Force the portable fallback here.
+            "CC_TIMEOUT_FALLBACK": "1",
             **_job_dirs(tmp_path),
         },
         bin_dir=tmp_path,
@@ -4440,6 +4442,7 @@ def test_watchdog_without_job_id_persists_started_at(tmp_path: Path) -> None:
     vol = tmp_path / "vol"
     pod = "podttl1"
     state = vol / "runs" / f".ttl-{pod}"
+    _fake_curl(tmp_path, "200", '{"id":"podttl1"}')
     result = _run(
         [
             "bash",
@@ -4452,7 +4455,11 @@ def test_watchdog_without_job_id_persists_started_at(tmp_path: Path) -> None:
             "RUNPOD_API_KEY": "ok-key",
             "CC_VOLUME_DIR": str(vol),
             "CC_TTL_S": "2",
+            # The disowned watchdog fires at 2s and must not retry-sleep
+            # while it still holds this test's stdout pipe.
+            "CC_TERMINATE_NO_SLEEP": "1",
         },
+        bin_dir=tmp_path,
         timeout=10,
     )
     assert result.returncode == 0, result.stderr

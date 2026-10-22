@@ -169,6 +169,14 @@ Copy this block for a new entry.
 - Fix: Start the child with `perl setpgrp` or `set -m`. Read both pgids. Group-kill only when they differ. Kill only the child pid when they match.
 - Prevention: Test that a grandchild `sleep` dies and the parent still logs after the timeout.
 
+### 2026-10-22 — macOS nvidia-smi and watchdog test hangs
+
+- Symptom: `test_run_job_nvidia_smi_timeout_logs_unknown` and `test_watchdog_without_job_id_persists_started_at` hit `_run` timeouts on macos-15.
+- Where it failed: CI macos-15
+- Cause: The runner has no `timeout` or `gtimeout`. The old fallback killed only the nvidia-smi pid, so `sleep 30` kept the `$(… | head)` pipe open. The watchdog then retried terminate with 2/4/6/8s sleeps and held stdout.
+- Fix: Group-kill the timeout child after a pgid check. Force `CC_TIMEOUT_FALLBACK=1` in the nvidia-smi test. Set `CC_TERMINATE_NO_SLEEP=1` and a 200 curl stub in the watchdog persist test.
+- Prevention: Keep the fallback group-kill. Do not let a disowned watchdog retry-sleep on a captured stdout pipe.
+
 ### 2026-10-21 — Shared SSH host keys in the GPU image
 
 - Symptom: Every pod would have used the same SSH host private keys.

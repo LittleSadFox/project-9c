@@ -342,5 +342,7 @@ It uses `perl setpgrp` or `set -m`.
 It group-kills only when the child pgid differs from this shell.
 It never kills the caller group.
 A test times out a grandchild `sleep` and checks the parent still logs.
+The nvidia-smi hang test forces that fallback so Linux matches macOS.
+The no-job-id watchdog test sets `CC_TERMINATE_NO_SLEEP=1` and a 200 curl stub.
 
 See `TROUBLESHOOTING_LOG.md`.
