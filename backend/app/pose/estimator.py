@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import shutil
+import uuid
+import zipfile
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -239,20 +243,49 @@ def _find_weight(models_dir: Path, candidates: tuple[str, ...]) -> Path | None:
     return None
 
 
+def extract_temp_dir(extract_dir: Path) -> Path:
+    pid = os.getpid()
+    job = os.environ.get("CC_JOB_ID") or os.environ.get("CC_JOB") or "local"
+    token = uuid.uuid4().hex[:8]
+    return extract_dir.with_name(f"{extract_dir.name}.extract.{pid}.{job}.{token}")
+
+
+def extract_matches_zip(zip_path: Path, extract_dir: Path) -> bool:
+    """Return True when every zip member is present with the stored size."""
+    if not extract_dir.is_dir():
+        return False
+    with zipfile.ZipFile(zip_path) as archive:
+        for info in archive.infolist():
+            if info.is_dir():
+                continue
+            dest = extract_dir / info.filename
+            if not dest.is_file() or dest.stat().st_size != info.file_size:
+                return False
+    return True
+
+
 def resolve_onnx_file(path: Path) -> Path:
     """Return a local .onnx file. Extract a zip once. Never download."""
     if path.suffix.lower() == ".onnx" and path.is_file():
         return path
     if path.suffix.lower() == ".zip" and path.is_file():
         extract_dir = path.with_suffix("")
-        existing = sorted(extract_dir.rglob("*.onnx")) if extract_dir.is_dir() else []
-        if existing:
-            return existing[0]
-        extract_dir.mkdir(parents=True, exist_ok=True)
-        import zipfile
-
-        with zipfile.ZipFile(path) as archive:
-            archive.extractall(extract_dir)
+        if extract_dir.is_dir() and extract_matches_zip(path, extract_dir):
+            found = sorted(extract_dir.rglob("*.onnx"))
+            if found:
+                return found[0]
+        tmp_dir = extract_temp_dir(extract_dir)
+        try:
+            tmp_dir.mkdir(parents=True)
+            with zipfile.ZipFile(path) as archive:
+                archive.extractall(tmp_dir)
+            if extract_dir.exists():
+                shutil.rmtree(extract_dir)
+            os.replace(tmp_dir, extract_dir)
+        except Exception:
+            if tmp_dir.exists():
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise
         found = sorted(extract_dir.rglob("*.onnx"))
         if not found:
             raise FileNotFoundError(f"{path} has no ONNX file.")

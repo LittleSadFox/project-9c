@@ -16,6 +16,7 @@ from app.pose.estimator import FixtureEstimator
 from app.repo import jobs as jobs_repo
 from app.services.pose_service import (
     bind_pose_runtime,
+    current_estimator,
     get_pose_summary,
     handle_pose_job,
     process_frames,
@@ -229,4 +230,54 @@ def test_handle_pose_job_rolls_back_partial_run(
     )
     assert not any(path.is_file() for path in paths.pose.rglob("*.npz"))
     assert not any(path.is_file() for path in paths.pose.rglob("*.tmp"))
+    conn.close()
+
+
+def test_pose_job_rebuilds_estimator_when_mode_changes(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    paths = LibraryPaths(settings.library_dir)
+    paths.ensure()
+    conn = connect(paths.db)
+    apply_migrations(conn)
+    bind_pose_runtime(settings=settings, paths=paths, estimator=None)
+    video_a = "44444444-4444-4444-4444-444444444444"
+    video_b = "55555555-5555-5555-5555-555555555555"
+    _insert_video(conn, video_a, n_frames=3)
+    _insert_video(conn, video_b, n_frames=3)
+    frames = [(index, np.zeros((8, 8, 3), dtype=np.uint8)) for index in range(3)]
+    conn.execute("UPDATE settings SET value = ? WHERE key = 'pose_mode'", ('"balanced"',))
+    conn.commit()
+    job_a = jobs_repo.insert_job(
+        conn,
+        job_id="pose-job-balanced",
+        kind="pose",
+        lane="compute",
+        entity_type="video",
+        entity_id=video_a,
+    )
+    handle_pose_job(JobContext(conn, str(job_a["id"])), frames=frames)
+    first = current_estimator(mode="balanced")
+    assert first.mode == "balanced"
+    conn.execute("UPDATE settings SET value = ? WHERE key = 'pose_mode'", ('"lightweight"',))
+    conn.commit()
+    job_b = jobs_repo.insert_job(
+        conn,
+        job_id="pose-job-lightweight",
+        kind="pose",
+        lane="compute",
+        entity_type="video",
+        entity_id=video_b,
+    )
+    handle_pose_job(JobContext(conn, str(job_b["id"])), frames=frames)
+    second = current_estimator(mode="lightweight")
+    assert second.mode == "lightweight"
+    assert second is not first
+    mode_a = conn.execute(
+        "SELECT mode FROM pose_runs WHERE video_id = ?", (video_a,)
+    ).fetchone()
+    mode_b = conn.execute(
+        "SELECT mode FROM pose_runs WHERE video_id = ?", (video_b,)
+    ).fetchone()
+    assert mode_a["mode"] == "balanced"
+    assert mode_b["mode"] == "lightweight"
     conn.close()

@@ -11,6 +11,7 @@ import pytest
 from scripts.download_models import (
     DownloadError,
     download_one,
+    download_temp_path,
     import_from_volume,
     refuse_if_unsafe,
 )
@@ -157,3 +158,17 @@ def test_download_present_mismatch_deletes_file(
     with pytest.raises(DownloadError, match="sha256"):
         download_one(_lock_entry(), tmp_path)
     assert not dest.exists()
+
+
+def test_two_downloads_use_different_temp_names() -> None:
+    dest = Path("/workspace/models/det/yolox_x.zip")
+    first = download_temp_path(dest, pid=11, job="job-a", token="aaaa1111")
+    second = download_temp_path(dest, pid=22, job="job-b", token="bbbb2222")
+    assert first != second
+    assert first.parent == dest.parent
+    assert second.parent == dest.parent
+    assert "11" in first.name and "job-a" in first.name
+    assert "22" in second.name and "job-b" in second.name
+    same_pid = download_temp_path(dest, pid=11, job="job-a")
+    other = download_temp_path(dest, pid=11, job="job-a")
+    assert same_pid != other

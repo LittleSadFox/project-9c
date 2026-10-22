@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -46,6 +46,7 @@ class PoseRuntime:
     settings: Settings | None = None
     paths: LibraryPaths | None = None
     estimator: PoseEstimator | None = None
+    estimators: dict[str, PoseEstimator] = field(default_factory=dict)
 
 
 _RUNTIME = PoseRuntime()
@@ -61,6 +62,10 @@ def bind_pose_runtime(
     _RUNTIME.settings = settings
     _RUNTIME.paths = paths
     _RUNTIME.estimator = estimator
+    _RUNTIME.estimators = {}
+    if estimator is not None:
+        bound_mode = str(getattr(estimator, "mode", "balanced"))
+        _RUNTIME.estimators[bound_mode] = estimator
 
 
 def current_runtime() -> PoseRuntime:
@@ -68,8 +73,14 @@ def current_runtime() -> PoseRuntime:
 
 
 def current_estimator(*, mode: str = "balanced") -> PoseEstimator:
-    if _RUNTIME.estimator is not None:
-        return _RUNTIME.estimator
+    cached = _RUNTIME.estimators.get(mode)
+    if cached is not None:
+        _RUNTIME.estimator = cached
+        return cached
+    bound = _RUNTIME.estimator
+    if bound is not None and str(getattr(bound, "mode", mode)) == mode:
+        _RUNTIME.estimators[mode] = bound
+        return bound
     settings = _RUNTIME.settings
     if settings is None:
         raise AppError("pose_not_ready", 500, "The pose estimator is not configured.")
@@ -79,6 +90,7 @@ def current_estimator(*, mode: str = "balanced") -> PoseEstimator:
         device=settings.device,
         mode=mode,
     )
+    _RUNTIME.estimators[mode] = estimator
     _RUNTIME.estimator = estimator
     return estimator
 

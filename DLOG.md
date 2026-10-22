@@ -448,3 +448,11 @@ It stops reading the golden clip after `n_frames`.
 Parity fails when fewer than 90% of frames compare, or when the mean is above 1 px.
 `metrics.json` records `frames_total`, detection counts, and `frames_compared`.
 The next pod command is `python -m ml.jobs pose_bench --run-dir "$RUN_DIR"`.
+
+`current_estimator` keys the cache on mode.
+A pose job that changes `pose_mode` builds a new estimator.
+`pose_bench` does not use that cache. It builds one estimator per mode.
+
+Zip extract writes a unique sibling temp folder, then replaces the dest.
+A reused folder is checked against zip member sizes and re-extracted on a mismatch.
+Download temps include the pid and job id so two pods do not collide.

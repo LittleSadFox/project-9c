@@ -11,6 +11,7 @@ import shutil
 import sys
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 REFUSED_SUFFIXES = (".pkl", ".pickle", ".joblib")
@@ -64,6 +65,16 @@ def _delete_if_exists(path: Path) -> None:
         path.unlink()
 
 
+def download_temp_path(
+    dest: Path, *, pid: int | None = None, job: str | None = None, token: str | None = None
+) -> Path:
+    """Unique sibling temp name so two pods on one volume do not collide."""
+    process = os.getpid() if pid is None else pid
+    job_id = job if job is not None else os.environ.get("CC_JOB_ID") or os.environ.get("CC_JOB") or "local"
+    stamp = token if token is not None else uuid.uuid4().hex[:8]
+    return dest.with_name(f"{dest.name}.{process}.{job_id}.{stamp}.tmp")
+
+
 def download_one(
     entry: dict[str, object],
     models_dir: Path,
@@ -85,7 +96,7 @@ def download_one(
     if dest.exists() and expected is None:
         print(f"{name}: already present (unpinned)")
         return dest
-    tmp = dest.with_name(dest.name + ".tmp")
+    tmp = download_temp_path(dest)
     print(f"{name}: download {url}")
     try:
         with urllib.request.urlopen(url, timeout=120) as response, tmp.open("wb") as handle:
