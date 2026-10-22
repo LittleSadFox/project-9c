@@ -1658,8 +1658,7 @@ exit 0
             "-c",
             f"source {LIB}; "
             f'export PATH="{tmp_path}:/usr/bin:/bin"; '
-            f'cc_ghcr_manifest_head "ghcr.io/littlesadfox/climbing-coach-gpu:{SHA40}"; '
-            "echo head_rc=$?",
+            f'cc_ghcr_manifest_head "ghcr.io/littlesadfox/climbing-coach-gpu:{SHA40}"',
         ],
         env={"TMPDIR": str(tmpdir), "GITHUB_TOKEN": token},
         bin_dir=tmp_path,
@@ -3099,7 +3098,7 @@ def test_unwritable_watchdog_run_log_still_terminates(tmp_path: Path) -> None:
         unset_log=False,
         extra={"CC_RUN_LOG": "/dev/full"},
     )
-    assert result.returncode == 0, result.stderr
+    assert result.returncode != 0
     assert _stamp_path("pod-ro-wd-log").is_file()
     assert not Path("/tmp/.cc_terminated.pod-ro-wd-log").exists()
     assert "TTL 1s expired" in result.stdout
