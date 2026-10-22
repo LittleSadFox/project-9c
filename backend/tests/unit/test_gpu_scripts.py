@@ -912,7 +912,6 @@ def test_s3_cp_fails_closed_on_loose_404(tmp_path: Path, msg: str) -> None:
     assert "ERROR: S3 get-object" in result.stderr
 
 
-@pytest.mark.parametrize("msg", ["NoSuchKey", "404", "Not Found"])
 def test_s3_err_summary_redacts_aws_key_pattern(tmp_path: Path) -> None:
     access = "A" + "KIA" + "TESTFAKEKEY12345"
     err = tmp_path / "err.txt"
@@ -952,6 +951,7 @@ def test_default_aws_shim_blocks_real_bucket() -> None:
     assert "s3api" in log
 
 
+@pytest.mark.parametrize("msg", ["NoSuchKey", "404", "Not Found"])
 def test_s3_object_exists_fails_closed_on_loose_404(tmp_path: Path, msg: str) -> None:
     _fake_aws_err(tmp_path, msg)
     result = _s3_exists(tmp_path)
@@ -2705,6 +2705,7 @@ def test_terminate_refuses_symlink_stamp_and_still_terminates(tmp_path: Path) ->
     )
     curl.chmod(0o755)
     planted = tmp_path / "vol" / "planted-stamp"
+    planted.parent.mkdir(parents=True, exist_ok=True)
     planted.write_text("ok\n", encoding="utf-8")
     stamp = _stamp_path("pod-link")
     stamp.symlink_to(planted)
