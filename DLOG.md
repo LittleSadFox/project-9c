@@ -6,6 +6,61 @@ Use short sentences.
 Use active voice.
 Give one instruction per sentence.
 
+## 2026-10-22 — pose_bench live gate
+
+The live `pose_bench` job ran on 2026-10-22 (Asia/Shanghai).
+The job id is `cc-pose_bench-2c82036e-20261022T170415Z`.
+The ref that ran is `2c82036`.
+Approvals and the merge head for pull request #20 stay at `16c2908`.
+That head is one commit ahead of the run.
+A confirming rerun at `16c2908` was skipped.
+CUDA was already confirmed on `2c82036`.
+
+The job ran `pose_bench` on `sample1.mp4` on an RTX 4090.
+The pod self-terminated.
+The webhook returned 200.
+Terminate ran once.
+Zero pods remain.
+There were 0 secret hits.
+
+Cost was about $0.12.
+The job ran about 8.3 min on an RTX 4090 at $0.89/hr.
+That cost is under the $10 escalate line.
+
+The gate is a mean of 1 px or less over all keypoints.
+At least 90% of frames must compare.
+Every mode passed.
+
+CUDA was confirmed on every mode.
+The provider is `CUDAExecutionProvider`.
+`tf32_off_confirmed` is true.
+Det and pose both report `use_tf32=0`.
+
+| mode | mean_abs_px | mean_abs_px_confident | compared | CUDA fps | CPU fps |
+| --- | --- | --- | --- | --- | --- |
+| lightweight | 0.0071 | 0.0068 | 100/100 | 59.7 | 3.11 |
+| balanced | 0.0376 | 0.0379 | 100/100 | 52.9 | 0.95 |
+| performance | 0.0149 | 0.0149 | 100/100 | 33.7 | 0.35 |
+
+Lightweight was 1.053 px at `9466729` before TF32 was turned off.
+With `use_tf32=0` it is 0.0071 px.
+
+Per-frame and worst-keypoint numbers are diagnostic only.
+The gate uses the mean only.
+
+- lightweight: median 0, p95 0.043, max 0.100. Worst keypoints: right_ear 0.042, right_eye 0.022, left_wrist 0.020, left_small_toe 0.018, left_elbow 0.017. Confident kept 2408 / dropped 192.
+- balanced: median 0, p95 0.063, max 2.234 on frame 87. Worst keypoints: left_elbow 0.606, right_eye 0.041, left_ear 0.037, left_hip 0.031, right_hip 0.028. Kept 2578 / dropped 22. The frame-87 max is diagnostic only. The mean stayed 0.038.
+- performance: median 0.0001, p95 0.045, max 0.120. Worst keypoints: left_wrist 0.077, left_small_toe 0.037, nose 0.031, left_eye 0.029, right_wrist 0.028. Kept 2599 / dropped 1.
+
+The app wrote no WARNING lines.
+ORT node-assignment `[W]` and cudnn_frontend `[E]` lines are normal CUDA load.
+They are not a CPU fallback.
+
+The run artifacts are text and metrics only.
+The run folder holds no footage.
+
+Merge of pull request #20 still waits on Actions billing and Ryan's CI decision.
+
 ## 2026-10-21 — AGENTS.md
 
 Add the self-contained bot rule file.
