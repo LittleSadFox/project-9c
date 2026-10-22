@@ -17,7 +17,6 @@ import sys
 import tempfile
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
-from contextlib import AbstractContextManager
 from itertools import islice
 from pathlib import Path
 from typing import Any
@@ -531,13 +530,6 @@ def apply_cuda_tf32_off(providers: Any) -> Any:
     return apply_cuda_provider_options(providers)
 
 
-def cuda_tf32_off() -> AbstractContextManager[None]:
-    """Patch ORT session create with the shared CUDA provider options."""
-    from app.pose.estimator import cuda_provider_session
-
-    return cuda_provider_session()
-
-
 def compare_keypoints(
     cpu_kpts: Any,
     cuda_kpts: Any,
@@ -860,9 +852,8 @@ def pose_bench(
                 raise JobError(str(exc)) from exc
             cuda_est = None
             if have_cuda:
-                with cuda_tf32_off():
-                    cuda_est = RtmlibEstimator(models_dir=models_dir, device="cuda", mode=mode)
-                    cuda_est._ensure()
+                cuda_est = RtmlibEstimator(models_dir=models_dir, device="cuda", mode=mode)
+                cuda_est._ensure()
 
         cpu_kpts, cpu_boxes, cpu_scores, cpu_fps = _run_estimator(cpu_est, frames)
         mode_metrics: dict[str, Any] = {

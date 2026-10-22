@@ -6,8 +6,6 @@ import os
 import shutil
 import uuid
 import zipfile
-from collections.abc import Iterator
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -288,25 +286,21 @@ def apply_cuda_provider_options(providers: Any) -> Any:
     return updated
 
 
-@contextmanager
-def cuda_provider_session() -> Iterator[None]:
-    """Patch ORT session create so CUDA sessions use the shared options."""
+def session_providers_for_device(device: str) -> list[Any]:
+    """Provider list handed to InferenceSession for this device."""
+    name = provider_for_device(device)
+    if name == "CUDAExecutionProvider":
+        return apply_cuda_provider_options(["CUDAExecutionProvider", "CPUExecutionProvider"])
+    return [name]
+
+
+def bind_ort_session(tool: Any, onnx_path: Path, providers: list[Any]) -> Any:
+    """Create an ORT session with the given providers and attach it to a rtmlib tool."""
     import onnxruntime as ort
 
-    original = ort.InferenceSession
-
-    def wrapped(*args: Any, **kwargs: Any) -> Any:
-        if "providers" in kwargs:
-            kwargs["providers"] = apply_cuda_provider_options(kwargs["providers"])
-        elif len(args) >= 2:
-            args = (args[0], apply_cuda_provider_options(args[1]), *args[2:])
-        return original(*args, **kwargs)
-
-    ort.InferenceSession = wrapped  # type: ignore[method-assign]
-    try:
-        yield
-    finally:
-        ort.InferenceSession = original  # type: ignore[method-assign]
+    session = ort.InferenceSession(path_or_bytes=str(onnx_path), providers=providers)
+    tool.session = session
+    return session
 
 
 def _find_weight(models_dir: Path, candidates: tuple[str, ...]) -> Path | None:
@@ -412,7 +406,7 @@ class RtmlibEstimator:
 
     def session_providers(self) -> list[Any]:
         """Provider list the app and pose_bench pass to ONNX Runtime."""
-        return apply_cuda_provider_options([self.provider])
+        return session_providers_for_device(self.device_name)
 
     def _ensure(self) -> None:
         if self._det is not None and self._pose is not None:
@@ -420,19 +414,27 @@ class RtmlibEstimator:
         from rtmlib import YOLOX, RTMPose  # type: ignore[import-not-found, import-untyped]
 
         det_path, pose_path, spec = resolve_mode_paths(self.models_dir, self.mode)
-        with cuda_provider_session():
-            self._det = YOLOX(
-                onnx_model=str(det_path),
-                model_input_size=spec["det_size"],
-                backend="onnxruntime",
-                device=self.device_name,
-            )
-            self._pose = RTMPose(
-                onnx_model=str(pose_path),
-                model_input_size=spec["pose_size"],
-                backend="onnxruntime",
-                device=self.device_name,
-            )
+        # rtmlib 0.0.16 has no providers argument. Build bookkeeping on CPU
+        # when we need CUDA options, then hand those options to InferenceSession.
+        rtmlib_device = "cpu" if self.device_name == "cuda" else self.device_name
+        self._det = YOLOX(
+            onnx_model=str(det_path),
+            model_input_size=spec["det_size"],
+            backend="onnxruntime",
+            device=rtmlib_device,
+        )
+        self._pose = RTMPose(
+            onnx_model=str(pose_path),
+            model_input_size=spec["pose_size"],
+            backend="onnxruntime",
+            device=rtmlib_device,
+        )
+        if self.device_name == "cuda":
+            providers = self.session_providers()
+            bind_ort_session(self._det, det_path, providers)
+            bind_ort_session(self._pose, pose_path, providers)
+            self._det.device = "cuda"
+            self._pose.device = "cuda"
         session = getattr(self._pose, "session", None)
         if session is not None:
             used = list(session.get_providers())

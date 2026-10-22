@@ -528,8 +528,12 @@ Ampere TF32 can move the SIMCC argmax on rtmpose-s by about 1 px.
 ## 2026-10-22 — shared CUDA provider options
 
 `cuda_provider_options()` in `app/pose/estimator.py` returns `{use_tf32: 0}`.
-`RtmlibEstimator` and `pose_bench` both call that helper.
-The app CUDA path and the bench CUDA path now use the same provider options.
+`session_providers_for_device("cuda")` returns
+`[("CUDAExecutionProvider", {use_tf32: 0}), "CPUExecutionProvider"]`.
+`RtmlibEstimator` and `pose_bench` both use that list.
+rtmlib 0.0.16 has no `providers` argument.
+The estimator builds `InferenceSession` itself and assigns `tool.session`.
+It does not swap `ort.InferenceSession`.
 `pose_bench` reads `use_tf32` from the live det and pose sessions.
 It writes those values under `cuda_provider_options`.
 `tf32_off_confirmed` is true only when both sessions report `"0"`.
