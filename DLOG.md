@@ -527,18 +527,18 @@ Ampere TF32 can move the SIMCC argmax on rtmpose-s by about 1 px.
 
 ## 2026-10-22 — shared CUDA provider options
 
-`cuda_provider_options()` in `app/pose/estimator.py` returns `{use_tf32: 0}`.
-`session_providers_for_device("cuda")` returns
-`[("CUDAExecutionProvider", {use_tf32: 0}), "CPUExecutionProvider"]`.
-`RtmlibEstimator` and `pose_bench` both use that list.
-rtmlib 0.0.16 has no `providers` argument.
-The estimator builds `InferenceSession` itself and assigns `tool.session`.
+`cuda_providers()` returns
+`[("CUDAExecutionProvider", {device_id: 0, use_tf32: 0}), "CPUExecutionProvider"]`.
+`RtmlibEstimator` and `pose_bench` both call that helper.
+rtmlib 0.0.16 builds the provider list from `device` alone.
+The estimator builds YOLOX and RTMPose as usual, then on CUDA replaces
+`tool.session` with `InferenceSession(onnx_path, providers=cuda_providers())`.
+CPU sessions stay as rtmlib built them.
 It does not swap `ort.InferenceSession`.
 `pose_bench` reads `use_tf32` from the live det and pose sessions.
 It writes those values under `cuda_provider_options`.
 `tf32_off_confirmed` is true only when both sessions report `"0"`.
 A mismatch writes a WARNING line. It does not change the parity gate.
-Bench behaviour does not change.
 
 The plain command is unchanged:
 

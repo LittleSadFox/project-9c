@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from app.pose.estimator import POSE_MODES, FixtureEstimator
+from app.pose.estimator import POSE_MODES, FixtureEstimator, cuda_providers
 from ml.jobs import (
     DEFAULT_BENCH_CLIP,
     DEFAULT_BENCH_N_FRAMES,
@@ -19,7 +19,6 @@ from ml.jobs import (
     JobError,
     _debug_enabled,
     _take_frames,
-    apply_cuda_tf32_off,
     compare_keypoints,
     ensure_bench_weights,
     main,
@@ -27,34 +26,23 @@ from ml.jobs import (
     pose_bench,
     resolve_bench_clip,
 )
+from ml.jobs import (
+    cuda_providers as bench_cuda_providers,
+)
 
 
-def test_apply_cuda_tf32_off_only_changes_cuda() -> None:
-    assert apply_cuda_tf32_off(["CPUExecutionProvider"]) == ["CPUExecutionProvider"]
-    assert apply_cuda_tf32_off(["CUDAExecutionProvider"]) == [
-        ("CUDAExecutionProvider", {"use_tf32": 0})
-    ]
-    merged = apply_cuda_tf32_off([("CUDAExecutionProvider", {"device_id": 0})])
-    assert merged == [("CUDAExecutionProvider", {"device_id": 0, "use_tf32": 0})]
-
-
-def test_app_and_bench_build_identical_cuda_provider_options(tmp_path: Path) -> None:
-    from app.pose.estimator import (
-        RtmlibEstimator,
-        cuda_provider_options,
-        session_providers_for_device,
-    )
+def test_app_and_bench_build_identical_cuda_providers(tmp_path: Path) -> None:
+    from app.pose.estimator import RtmlibEstimator
 
     expected = [
-        ("CUDAExecutionProvider", {"use_tf32": 0}),
+        ("CUDAExecutionProvider", {"device_id": 0, "use_tf32": 0}),
         "CPUExecutionProvider",
     ]
     app = RtmlibEstimator(models_dir=tmp_path, device="cuda")
-    bench = session_providers_for_device("cuda")
-    assert app.session_providers() == bench
-    assert bench == expected
-    assert apply_cuda_tf32_off(["CUDAExecutionProvider", "CPUExecutionProvider"]) == expected
-    assert cuda_provider_options() == {"use_tf32": 0}
+    assert cuda_providers() == expected
+    assert bench_cuda_providers() == expected
+    assert app.session_providers() == bench_cuda_providers()
+    assert app.session_providers() == cuda_providers()
 
 
 class _FakeOrtSession:
@@ -156,35 +144,43 @@ def test_read_estimator_tf32_mismatch() -> None:
     assert result["tf32_off_confirmed"] is False
 
 
-def test_bind_ort_session_hands_shared_providers(
+def test_replace_cuda_session_does_not_patch_ort(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from app.pose.estimator import bind_ort_session, session_providers_for_device
+    import onnxruntime as ort
 
+    from app.pose.estimator import replace_cuda_session
+
+    original = ort.InferenceSession
     seen: list[object] = []
 
     class FakeSession:
         def __init__(self, *args: object, **kwargs: object) -> None:
             seen.append(kwargs.get("providers"))
 
-    monkeypatch.setattr("onnxruntime.InferenceSession", FakeSession)
+    monkeypatch.setattr(ort, "InferenceSession", FakeSession)
     tool = type("Tool", (), {})()
     onnx_path = tmp_path / "model.onnx"
     onnx_path.write_bytes(b"onnx")
-    providers = session_providers_for_device("cuda")
-    session = bind_ort_session(tool, onnx_path, providers)
-    assert seen == [providers]
+    session = replace_cuda_session(tool, onnx_path)
+    assert seen == [cuda_providers()]
     assert tool.session is session  # type: ignore[attr-defined]
+    assert ort.InferenceSession is FakeSession
+    monkeypatch.undo()
+    assert ort.InferenceSession is original
 
 
-def test_rtmlib_estimator_binds_shared_cuda_providers(
+def test_rtmlib_estimator_replaces_cuda_sessions_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import sys
     import types
 
-    from app.pose.estimator import RtmlibEstimator, session_providers_for_device
+    import onnxruntime as ort
 
+    from app.pose.estimator import RtmlibEstimator
+
+    original = ort.InferenceSession
     seen: list[object] = []
 
     class FakeSession:
@@ -199,30 +195,42 @@ def test_rtmlib_estimator_binds_shared_cuda_providers(
             self.device = kwargs.get("device")
             self.session = object()
 
-    fake_rtmlib = types.SimpleNamespace(YOLOX=FakeTool, RTMPose=FakeTool)
-    monkeypatch.setitem(sys.modules, "rtmlib", fake_rtmlib)
-    monkeypatch.setattr(
-        "app.pose.estimator.resolve_mode_paths",
-        lambda _models, _mode: (
-            tmp_path / "det.onnx",
-            tmp_path / "pose.onnx",
-            {
-                "model_version": "rtmpose-s-halpe26",
-                "det_size": (416, 416),
-                "pose_size": (192, 256),
-            },
-        ),
-    )
-    (tmp_path / "det.onnx").write_bytes(b"det")
-    (tmp_path / "pose.onnx").write_bytes(b"pose")
-    monkeypatch.setattr("onnxruntime.InferenceSession", FakeSession)
-    est = RtmlibEstimator(models_dir=tmp_path, device="cuda")
-    est._ensure()
-    expected = session_providers_for_device("cuda")
-    assert seen == [expected, expected]
-    assert est._det.device == "cuda"
-    assert est._pose.device == "cuda"
-    assert est.provider == "CUDAExecutionProvider"
+    def install_rtmlib() -> None:
+        fake_rtmlib = types.SimpleNamespace(YOLOX=FakeTool, RTMPose=FakeTool)
+        monkeypatch.setitem(sys.modules, "rtmlib", fake_rtmlib)
+        monkeypatch.setattr(
+            "app.pose.estimator.resolve_mode_paths",
+            lambda _models, _mode: (
+                tmp_path / "det.onnx",
+                tmp_path / "pose.onnx",
+                {
+                    "model_version": "rtmpose-s-halpe26",
+                    "det_size": (416, 416),
+                    "pose_size": (192, 256),
+                },
+            ),
+        )
+        (tmp_path / "det.onnx").write_bytes(b"det")
+        (tmp_path / "pose.onnx").write_bytes(b"pose")
+
+    install_rtmlib()
+    monkeypatch.setattr(ort, "InferenceSession", FakeSession)
+    cuda_est = RtmlibEstimator(models_dir=tmp_path, device="cuda")
+    cuda_est._ensure()
+    assert seen == [cuda_providers(), cuda_providers()]
+    assert cuda_est._det.device == "cuda"
+    assert cuda_est._pose.device == "cuda"
+    assert cuda_est.provider == "CUDAExecutionProvider"
+    assert ort.InferenceSession is FakeSession
+
+    seen.clear()
+    cpu_est = RtmlibEstimator(models_dir=tmp_path, device="cpu")
+    cpu_est._ensure()
+    assert seen == []
+    assert cpu_est._det.device == "cpu"
+    assert cpu_est._pose.session is not cuda_est._pose.session
+    monkeypatch.undo()
+    assert ort.InferenceSession is original
 
 
 def test_pose_bench_is_registered() -> None:

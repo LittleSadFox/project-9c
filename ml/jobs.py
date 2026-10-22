@@ -523,11 +523,11 @@ def _mean_or_none(values: list[float]) -> float | None:
     return float(sum(values) / len(values))
 
 
-def apply_cuda_tf32_off(providers: Any) -> Any:
-    """Apply the shared CUDA provider options. Same helper as RtmlibEstimator."""
-    from app.pose.estimator import apply_cuda_provider_options
+def cuda_providers(*, device_id: int = 0) -> Any:
+    """Same CUDA provider list as RtmlibEstimator."""
+    from app.pose.estimator import cuda_providers as shared
 
-    return apply_cuda_provider_options(providers)
+    return shared(device_id=device_id)
 
 
 def compare_keypoints(
@@ -804,6 +804,9 @@ def pose_bench(
         read_estimator_tf32,
         resolve_device,
     )
+    from app.pose.estimator import (
+        cuda_providers as shared_cuda_providers,
+    )
 
     run_dir.mkdir(parents=True, exist_ok=True)
     backend = os.environ.get("CC_POSE_BACKEND", "rtmlib").strip() or "rtmlib"
@@ -852,8 +855,11 @@ def pose_bench(
                 raise JobError(str(exc)) from exc
             cuda_est = None
             if have_cuda:
+                providers = shared_cuda_providers()
                 cuda_est = RtmlibEstimator(models_dir=models_dir, device="cuda", mode=mode)
                 cuda_est._ensure()
+                if cuda_est.session_providers() != providers:
+                    raise JobError("pose_bench CUDA providers do not match cuda_providers().")
 
         cpu_kpts, cpu_boxes, cpu_scores, cpu_fps = _run_estimator(cpu_est, frames)
         mode_metrics: dict[str, Any] = {

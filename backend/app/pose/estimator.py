@@ -231,9 +231,17 @@ def provider_for_device(device: str) -> str:
     return "CPUExecutionProvider"
 
 
-def cuda_provider_options() -> dict[str, int]:
+def cuda_provider_options(*, device_id: int = 0) -> dict[str, int]:
     """Shared CUDA EP options for the app estimator and pose_bench."""
-    return {"use_tf32": 0}
+    return {"device_id": int(device_id), "use_tf32": 0}
+
+
+def cuda_providers(*, device_id: int = 0) -> list[Any]:
+    """Provider list handed to CUDA InferenceSession by the app and pose_bench."""
+    return [
+        ("CUDAExecutionProvider", cuda_provider_options(device_id=device_id)),
+        "CPUExecutionProvider",
+    ]
 
 
 def read_session_use_tf32(session: Any) -> str | None:
@@ -268,37 +276,14 @@ def read_estimator_tf32(estimator: Any) -> dict[str, Any]:
     }
 
 
-def apply_cuda_provider_options(providers: Any) -> Any:
-    """Force the shared CUDA options on CUDA EP entries. Leave others unchanged."""
-    if not providers:
-        return providers
-    updated: list[Any] = []
-    for item in providers:
-        if item == "CUDAExecutionProvider":
-            updated.append(("CUDAExecutionProvider", cuda_provider_options()))
-            continue
-        if isinstance(item, (tuple, list)) and item and item[0] == "CUDAExecutionProvider":
-            opts = dict(item[1]) if len(item) > 1 and isinstance(item[1], dict) else {}
-            opts.update(cuda_provider_options())
-            updated.append(("CUDAExecutionProvider", opts))
-            continue
-        updated.append(item)
-    return updated
-
-
-def session_providers_for_device(device: str) -> list[Any]:
-    """Provider list handed to InferenceSession for this device."""
-    name = provider_for_device(device)
-    if name == "CUDAExecutionProvider":
-        return apply_cuda_provider_options(["CUDAExecutionProvider", "CPUExecutionProvider"])
-    return [name]
-
-
-def bind_ort_session(tool: Any, onnx_path: Path, providers: list[Any]) -> Any:
-    """Create an ORT session with the given providers and attach it to a rtmlib tool."""
+def replace_cuda_session(tool: Any, onnx_path: Path, *, device_id: int = 0) -> Any:
+    """Replace a rtmlib tool session with one built from cuda_providers()."""
     import onnxruntime as ort
 
-    session = ort.InferenceSession(path_or_bytes=str(onnx_path), providers=providers)
+    session = ort.InferenceSession(
+        path_or_bytes=str(onnx_path),
+        providers=cuda_providers(device_id=device_id),
+    )
     tool.session = session
     return session
 
@@ -406,7 +391,9 @@ class RtmlibEstimator:
 
     def session_providers(self) -> list[Any]:
         """Provider list the app and pose_bench pass to ONNX Runtime."""
-        return session_providers_for_device(self.device_name)
+        if self.device_name == "cuda":
+            return cuda_providers()
+        return [self.provider]
 
     def _ensure(self) -> None:
         if self._det is not None and self._pose is not None:
@@ -414,27 +401,21 @@ class RtmlibEstimator:
         from rtmlib import YOLOX, RTMPose  # type: ignore[import-not-found, import-untyped]
 
         det_path, pose_path, spec = resolve_mode_paths(self.models_dir, self.mode)
-        # rtmlib 0.0.16 has no providers argument. Build bookkeeping on CPU
-        # when we need CUDA options, then hand those options to InferenceSession.
-        rtmlib_device = "cpu" if self.device_name == "cuda" else self.device_name
         self._det = YOLOX(
             onnx_model=str(det_path),
             model_input_size=spec["det_size"],
             backend="onnxruntime",
-            device=rtmlib_device,
+            device=self.device_name,
         )
         self._pose = RTMPose(
             onnx_model=str(pose_path),
             model_input_size=spec["pose_size"],
             backend="onnxruntime",
-            device=rtmlib_device,
+            device=self.device_name,
         )
         if self.device_name == "cuda":
-            providers = self.session_providers()
-            bind_ort_session(self._det, det_path, providers)
-            bind_ort_session(self._pose, pose_path, providers)
-            self._det.device = "cuda"
-            self._pose.device = "cuda"
+            replace_cuda_session(self._det, det_path)
+            replace_cuda_session(self._pose, pose_path)
         session = getattr(self._pose, "session", None)
         if session is not None:
             used = list(session.get_providers())
