@@ -287,3 +287,7 @@ An empty `RUNPOD_POD_ID` fails loudly and still reaches terminate.
 The entrypoint unsets `CC_IN_GPU_TESTS` before it execs `run_job.sh`.
 
 See `TROUBLESHOOTING_LOG.md`.
+
+## 2026-10-22 — coding_plan.md Ryan decisions
+
+`coding_plan.md` synced with Ryan's decisions: single put-object with a 150 MiB cap, a 1080p transcode pre-step before the golden-set sync, Phase 0 visual checks waived.
