@@ -577,7 +577,7 @@ def compare_keypoints(
 ) -> dict[str, Any]:
     """Compare CUDA and CPU keypoints. Gate on the all-keypoint mean."""
     import numpy as np
-    from app.core.halpe26 import NAMES, N_KEYPOINTS, SCORE_THR
+    from app.core.halpe26 import N_KEYPOINTS, NAMES, SCORE_THR
 
     totals: list[float] = []
     confident: list[float] = []
