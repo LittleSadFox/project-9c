@@ -10,6 +10,8 @@ from uuid import uuid4
 
 from app.errors import AppError
 
+VIDEO_EXTS = {".mp4", ".mov", ".m4v"}
+
 LIBRARY_SUBDIRS = (
     "originals",
     "proxies",
@@ -124,6 +126,15 @@ def safe_join(root: Path, *parts: str) -> Path:
     except ValueError as exc:
         raise AppError("bad_path", 400, "The path is not allowed.") from exc
     return candidate
+
+
+def safe_ext(path: Path, allowed: set[str] | None = None) -> Path:
+    """Refuse a path whose suffix is not in the allowed set."""
+    suffix = path.suffix.lower()
+    allowed_exts = allowed if allowed is not None else VIDEO_EXTS
+    if suffix not in allowed_exts:
+        raise AppError("bad_path", 400, "The file type is not allowed.")
+    return path
 
 
 def atomic_write(path: Path, data: bytes) -> None:

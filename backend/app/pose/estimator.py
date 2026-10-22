@@ -30,6 +30,7 @@ from app.core.halpe26 import (
     RIGHT_SHOULDER,
     RIGHT_WRIST,
 )
+from app.media.frames import normalize_frame
 
 ALLOWED_DEVICES = ("auto", "cuda", "mps", "cpu")
 POSE_MODES = ("lightweight", "balanced", "performance")
@@ -362,7 +363,7 @@ class RtmlibEstimator:
         if self._det is None:
             raise RuntimeError("YOLOX failed to load.")
         self.detect_calls += 1
-        image = np.asarray(frame)
+        image = normalize_frame(frame)
         boxes = self._det(image)
         return as_boxes(boxes)
 
@@ -375,7 +376,7 @@ class RtmlibEstimator:
         if self._pose is None:
             raise RuntimeError("RTMPose failed to load.")
         self.pose_calls += 1
-        image = np.asarray(frame)
+        image = normalize_frame(frame)
         keypoints, scores = self._pose(image, bboxes=box_array)
         kpts = np.asarray(keypoints, dtype=np.float32)
         sc = np.asarray(scores, dtype=np.float32)

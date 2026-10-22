@@ -8,16 +8,21 @@ Later phases add eval, train_events, tune_align, and finetune_pose.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from itertools import islice
 from pathlib import Path
 from typing import Any
+
+from app.errors import AppError
+from app.storage import VIDEO_EXTS, safe_ext, safe_join
 
 from ml.tiny_onnx import tiny_identity_bytes
 
@@ -220,30 +225,134 @@ def _synthetic_bench_frames(n_frames: int) -> list[Any]:
     return frames
 
 
-def _take_frames(source: Any, n_frames: int) -> list[Any]:
+def _empty_clip_meta(start_frame: int, *, name: str | None = None) -> dict[str, Any]:
+    return {
+        "name": name,
+        "size_bytes": 0,
+        "sha256": None,
+        "start_frame": start_frame,
+        "source_codec": None,
+        "source_pix_fmt": None,
+        "source_rotation_deg": 0,
+        "proxy_codec": None,
+        "proxy_pix_fmt": None,
+        "proxy_rotation_deg": 0,
+        "rotation_applied_deg": 0,
+    }
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _is_filename_only(name: str) -> bool:
+    if not name or name.strip() != name:
+        return False
+    if name in {".", ".."}:
+        return False
+    if any(sep in name for sep in ("/", "\\")):
+        return False
+    if Path(name).is_absolute():
+        return False
+    return Path(name).name == name
+
+
+def resolve_bench_clip(name: str, golden_dir: Path) -> Path:
+    """Resolve a golden-dir filename. Refuse paths and unknown suffixes."""
+    raw = (name or "").strip()
+    if not _is_filename_only(raw):
+        raise JobError("CC_BENCH_CLIP must be a filename, not a path.")
+    try:
+        joined = safe_join(Path(golden_dir), raw)
+        joined.relative_to(Path(golden_dir).resolve())
+        return safe_ext(joined, VIDEO_EXTS)
+    except AppError as exc:
+        raise JobError(str(exc.message)) from exc
+    except ValueError as exc:
+        raise JobError("The bench clip is not inside CC_GOLDEN_DIR.") from exc
+
+
+def _take_frames(source: Any, n_frames: int, start_frame: int = 0) -> list[Any]:
     """Read at most n_frames from a (index, frame) iterator, then stop."""
+    start = max(0, int(start_frame))
     frames: list[Any] = []
-    for item in islice(source, n_frames):
+    for item in islice(source, start, start + n_frames):
         frames.append(item[1] if isinstance(item, tuple) else item)
     return frames
 
 
-def _load_bench_frames(n_frames: int) -> list[Any]:
-    golden = Path(os.environ.get("CC_GOLDEN_DIR", "/workspace/videos"))
-    if golden.is_dir():
-        videos = sorted(
-            path
-            for path in golden.iterdir()
-            if path.is_file() and path.suffix.lower() in {".mp4", ".mov", ".m4v"}
-        )
-        if videos:
-            from app.media.frames import FrameReader
+def _load_bench_frames(
+    n_frames: int,
+    *,
+    clip_name: str | None = None,
+    start_frame: int | None = None,
+    proxy_dir: Path | None = None,
+) -> tuple[list[Any], dict[str, Any]]:
+    """Load an explicit golden clip through the upright 8-bit proxy."""
+    backend = os.environ.get("CC_POSE_BACKEND", "rtmlib").strip() or "rtmlib"
+    requested = clip_name if clip_name is not None else os.environ.get("CC_BENCH_CLIP", "")
+    requested = (requested or "").strip()
+    if start_frame is None:
+        raw_start = os.environ.get("CC_BENCH_START", "0").strip() or "0"
+        try:
+            start_frame = int(raw_start)
+        except ValueError as exc:
+            raise JobError("CC_BENCH_START must be an integer.") from exc
+    start_frame = max(0, int(start_frame))
+    if not requested:
+        if backend == "fixture":
+            return _synthetic_bench_frames(n_frames), _empty_clip_meta(start_frame, name="synthetic")
+        requested = "sample1.mp4"
 
-            with FrameReader(videos[0]) as reader:
-                frames = _take_frames(reader.iter_frames(), n_frames)
-            if frames:
-                return frames
-    return _synthetic_bench_frames(n_frames)
+    golden = Path(os.environ.get("CC_GOLDEN_DIR", "/workspace/videos"))
+    src = resolve_bench_clip(requested, golden)
+    if not src.is_file():
+        if backend == "fixture":
+            return _synthetic_bench_frames(n_frames), _empty_clip_meta(start_frame, name=requested)
+        raise JobError(f"Bench clip {requested} is not in CC_GOLDEN_DIR.")
+
+    from app.media.frames import (
+        FrameError,
+        FrameReader,
+        make_upright_u8_proxy,
+        probe_rotation_degrees,
+        probe_video_stream,
+    )
+
+    source_probe = probe_video_stream(src)
+    rotation = probe_rotation_degrees(src)
+    dest_dir = Path(proxy_dir) if proxy_dir is not None else Path(tempfile.mkdtemp(prefix="cc-bench-proxy-"))
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    digest = _file_sha256(src)
+    dest = dest_dir / f"{src.stem}.{digest[:12]}.u8.mp4"
+    try:
+        make_upright_u8_proxy(src, dest)
+    except FrameError as exc:
+        raise JobError(str(exc)) from exc
+    proxy_probe = probe_video_stream(dest)
+    proxy_rotation = probe_rotation_degrees(dest)
+    with FrameReader(dest) as reader:
+        frames = _take_frames(reader.iter_frames(), n_frames, start_frame)
+    if not frames:
+        raise JobError(f"Bench clip {requested} produced no frames.")
+    meta = {
+        "name": src.name,
+        "size_bytes": int(src.stat().st_size),
+        "sha256": digest,
+        "start_frame": start_frame,
+        "source_codec": source_probe.get("codec_name"),
+        "source_pix_fmt": source_probe.get("pix_fmt"),
+        "source_rotation_deg": rotation,
+        "proxy_codec": proxy_probe.get("codec_name"),
+        "proxy_pix_fmt": proxy_probe.get("pix_fmt"),
+        "proxy_rotation_deg": proxy_rotation,
+        "rotation_applied_deg": rotation,
+    }
+    return frames, meta
 
 
 def _has_detections(raw: Any) -> bool:
@@ -253,6 +362,122 @@ def _has_detections(raw: Any) -> bool:
     return array.size > 0
 
 
+def _as_people(raw: Any) -> Any:
+    import numpy as np
+
+    array = np.asarray(raw, dtype=np.float32)
+    if array.size == 0:
+        return np.zeros((0, 26, 2), dtype=np.float32)
+    if array.ndim == 2:
+        return array[None, ...]
+    return array
+
+
+def _boxes_from_keypoints(kpts: Any) -> Any:
+    import numpy as np
+
+    people = _as_people(kpts)
+    if people.shape[0] == 0:
+        return np.zeros((0, 4), dtype=np.float32)
+    xy = people[..., :2]
+    x1 = xy[..., 0].min(axis=1)
+    y1 = xy[..., 1].min(axis=1)
+    x2 = xy[..., 0].max(axis=1)
+    y2 = xy[..., 1].max(axis=1)
+    return np.stack([x1, y1, x2, y2], axis=1).astype(np.float32)
+
+
+def _as_boxes(raw: Any, kpts: Any) -> Any:
+    import numpy as np
+
+    if raw is None:
+        return _boxes_from_keypoints(kpts)
+    array = np.asarray(raw, dtype=np.float32)
+    if array.size == 0:
+        return _boxes_from_keypoints(kpts)
+    boxes = array.reshape(-1, 4)
+    people = _as_people(kpts)
+    if boxes.shape[0] != people.shape[0]:
+        return _boxes_from_keypoints(kpts)
+    return boxes
+
+
+def _box_iou(a: Any, b: Any) -> float:
+    x1 = max(float(a[0]), float(b[0]))
+    y1 = max(float(a[1]), float(b[1]))
+    x2 = min(float(a[2]), float(b[2]))
+    y2 = min(float(a[3]), float(b[3]))
+    inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    if inter <= 0.0:
+        return 0.0
+    area_a = max(0.0, float(a[2] - a[0])) * max(0.0, float(a[3] - a[1]))
+    area_b = max(0.0, float(b[2] - b[0])) * max(0.0, float(b[3] - b[1]))
+    denom = area_a + area_b - inter
+    return inter / denom if denom > 0.0 else 0.0
+
+
+def _centroid(box: Any) -> Any:
+    import numpy as np
+
+    return np.array(
+        [(float(box[0]) + float(box[2])) * 0.5, (float(box[1]) + float(box[3])) * 0.5],
+        dtype=np.float32,
+    )
+
+
+def pair_people(
+    cpu_kpts: Any,
+    cuda_kpts: Any,
+    cpu_boxes: Any = None,
+    cuda_boxes: Any = None,
+    *,
+    min_iou: float = 0.1,
+) -> list[tuple[int, int]]:
+    """Match people in one frame by box IoU, then by nearest centroid."""
+    import numpy as np
+
+    cpu = _as_people(cpu_kpts)
+    cuda = _as_people(cuda_kpts)
+    boxes_a = _as_boxes(cpu_boxes, cpu)
+    boxes_b = _as_boxes(cuda_boxes, cuda)
+    n_a = int(cpu.shape[0])
+    n_b = int(cuda.shape[0])
+    if n_a == 0 or n_b == 0:
+        return []
+    used_a: set[int] = set()
+    used_b: set[int] = set()
+    pairs: list[tuple[int, int]] = []
+    scores: list[tuple[float, int, int]] = []
+    for i in range(n_a):
+        for j in range(n_b):
+            scores.append((_box_iou(boxes_a[i], boxes_b[j]), i, j))
+    scores.sort(key=lambda item: item[0], reverse=True)
+    for score, i, j in scores:
+        if score < min_iou:
+            break
+        if i in used_a or j in used_b:
+            continue
+        used_a.add(i)
+        used_b.add(j)
+        pairs.append((i, j))
+    remain_a = [i for i in range(n_a) if i not in used_a]
+    remain_b = [j for j in range(n_b) if j not in used_b]
+    dists: list[tuple[float, int, int]] = []
+    for i in remain_a:
+        center_a = _centroid(boxes_a[i])
+        for j in remain_b:
+            center_b = _centroid(boxes_b[j])
+            dists.append((float(np.linalg.norm(center_a - center_b)), i, j))
+    dists.sort(key=lambda item: item[0])
+    for _, i, j in dists:
+        if i in used_a or j in used_b:
+            continue
+        used_a.add(i)
+        used_b.add(j)
+        pairs.append((i, j))
+    return pairs
+
+
 def compare_keypoints(
     cpu_kpts: Any,
     cuda_kpts: Any,
@@ -260,26 +485,39 @@ def compare_keypoints(
     frames_total: int,
     min_compared_frac: float = 0.9,
     limit_px: float = 1.0,
+    cpu_boxes: Any = None,
+    cuda_boxes: Any = None,
 ) -> dict[str, Any]:
-    """Compare CUDA and CPU keypoints. Fail when too few frames match."""
+    """Compare CUDA and CPU keypoints. Match people by frame index, then IoU."""
     import numpy as np
 
     totals: list[float] = []
     frames_compared = 0
     frames_cpu = 0
     frames_cuda = 0
-    for a_raw, b_raw in zip(cpu_kpts, cuda_kpts, strict=False):
-        a = np.asarray(a_raw, dtype=np.float32)
-        b = np.asarray(b_raw, dtype=np.float32)
+    n_frames = min(len(cpu_kpts), len(cuda_kpts))
+    for index in range(n_frames):
+        a = _as_people(cpu_kpts[index])
+        b = _as_people(cuda_kpts[index])
         if _has_detections(a):
             frames_cpu += 1
         if _has_detections(b):
             frames_cuda += 1
-        if a.size == 0 or b.size == 0 or a.shape != b.shape:
+        if a.size == 0 or b.size == 0:
+            continue
+        box_a = cpu_boxes[index] if cpu_boxes is not None and index < len(cpu_boxes) else None
+        box_b = cuda_boxes[index] if cuda_boxes is not None and index < len(cuda_boxes) else None
+        pairs = pair_people(a, b, box_a, box_b)
+        if not pairs:
             continue
         frames_compared += 1
-        delta = np.linalg.norm(a[..., :2] - b[..., :2], axis=-1)
-        totals.extend(float(v) for v in delta.ravel())
+        for ia, ib in pairs:
+            left = a[ia, ..., :2]
+            right = b[ib, ..., :2]
+            if left.shape != right.shape:
+                continue
+            delta = np.linalg.norm(left - right, axis=-1)
+            totals.extend(float(v) for v in delta.ravel())
     mean_abs: float | None
     if not totals:
         mean_abs = None
@@ -305,22 +543,25 @@ def compare_keypoints(
     }
 
 
-def _run_estimator(estimator: Any, frames: list[Any]) -> tuple[list[Any], float]:
+def _run_estimator(estimator: Any, frames: list[Any]) -> tuple[list[Any], list[Any], float]:
     import time
 
     import numpy as np
 
     keypoints: list[Any] = []
+    boxes_out: list[Any] = []
     started = time.perf_counter()
     for index, frame in enumerate(frames):
         boxes = np.asarray(estimator.detect(frame, frame_index=index))
         if boxes.size == 0:
             keypoints.append(np.zeros((0, 26, 2), dtype=np.float32))
+            boxes_out.append(np.zeros((0, 4), dtype=np.float32))
             continue
         result = estimator.pose(frame, boxes, frame_index=index)
         keypoints.append(np.asarray(result["keypoints"], dtype=np.float32))
+        boxes_out.append(np.asarray(result.get("boxes", boxes), dtype=np.float32))
     elapsed = max(time.perf_counter() - started, 1e-6)
-    return keypoints, len(frames) / elapsed
+    return keypoints, boxes_out, len(frames) / elapsed
 
 
 def _lock_dests_for_modes(modes: list[str]) -> set[str]:
@@ -374,6 +615,61 @@ def _selected_modes(requested: list[str] | None) -> list[str]:
     return requested
 
 
+def _debug_enabled(flag: bool | None = None) -> bool:
+    if flag is not None:
+        return bool(flag)
+    raw = os.environ.get("CC_POSE_BENCH_DEBUG", "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _frame_debug(frames: list[Any], clip: dict[str, Any]) -> dict[str, Any]:
+    import numpy as np
+
+    if not frames:
+        return {
+            "frame_shape": [],
+            "dtype": None,
+            "channel_order": "BGR",
+            "channel_mean": [],
+            "rotation_applied_deg": clip.get("rotation_applied_deg"),
+            "source_codec": clip.get("source_codec"),
+            "source_pix_fmt": clip.get("source_pix_fmt"),
+        }
+    frame = np.asarray(frames[0])
+    means = []
+    if frame.ndim == 3 and frame.shape[2] >= 3:
+        means = [round(float(frame[:, :, index].mean()), 4) for index in range(3)]
+    return {
+        "frame_shape": [int(v) for v in frame.shape],
+        "dtype": str(frame.dtype),
+        "channel_order": "BGR",
+        "channel_mean": means,
+        "rotation_applied_deg": clip.get("rotation_applied_deg"),
+        "source_codec": clip.get("source_codec"),
+        "source_pix_fmt": clip.get("source_pix_fmt"),
+    }
+
+
+def _boxes_debug(boxes_list: list[Any]) -> list[dict[str, Any]]:
+    import numpy as np
+
+    out: list[dict[str, Any]] = []
+    for index, raw in enumerate(boxes_list):
+        array = np.asarray(raw, dtype=np.float32)
+        if array.size == 0:
+            out.append({"frame_index": index, "count": 0, "boxes": []})
+            continue
+        boxes = array.reshape(-1, 4)
+        out.append(
+            {
+                "frame_index": index,
+                "count": int(boxes.shape[0]),
+                "boxes": [[round(float(v), 2) for v in row] for row in boxes],
+            }
+        )
+    return out
+
+
 def pose_bench(
     run_dir: Path,
     *,
@@ -382,6 +678,9 @@ def pose_bench(
     min_compared_frac: float = 0.9,
     modes: list[str] | None = None,
     limit_px: float = 1.0,
+    clip_name: str | None = None,
+    start_frame: int | None = None,
+    debug: bool | None = None,
 ) -> dict[str, Any]:
     """Measure pose fps per mode. Compare CUDA and CPU keypoints (mean ≤ 1 px)."""
     import numpy as np
@@ -403,8 +702,14 @@ def pose_bench(
     selected = _selected_modes(modes)
     if backend != "fixture":
         ensure_bench_weights(models_dir, selected)
-    frames = _load_bench_frames(n_frames)
+    frames, clip_meta = _load_bench_frames(
+        n_frames,
+        clip_name=clip_name,
+        start_frame=start_frame,
+        proxy_dir=run_dir / "artifacts",
+    )
     n_used = len(frames)
+    want_debug = _debug_enabled(debug)
     modes_out: dict[str, Any] = {}
     resolved = resolve_device(device_env)
     try:
@@ -435,20 +740,28 @@ def pose_bench(
             if have_cuda:
                 cuda_est = RtmlibEstimator(models_dir=models_dir, device="cuda", mode=mode)
 
-        cpu_kpts, cpu_fps = _run_estimator(cpu_est, frames)
+        cpu_kpts, cpu_boxes, cpu_fps = _run_estimator(cpu_est, frames)
         mode_metrics: dict[str, Any] = {
             "mode": mode,
             "estimator_mode": getattr(cpu_est, "mode", mode),
             "cpu": {"fps": round(cpu_fps, 3), "provider": getattr(cpu_est, "provider", "CPUExecutionProvider")},
         }
+        if want_debug:
+            mode_metrics["debug_detections"] = {
+                "cpu": _boxes_debug(cpu_boxes),
+            }
         if cuda_est is not None:
-            cuda_kpts, cuda_fps = _run_estimator(cuda_est, frames)
+            cuda_kpts, cuda_boxes, cuda_fps = _run_estimator(cuda_est, frames)
+            if want_debug:
+                mode_metrics["debug_detections"]["cuda"] = _boxes_debug(cuda_boxes)
             parity = compare_keypoints(
                 cpu_kpts,
                 cuda_kpts,
                 frames_total=n_used,
                 min_compared_frac=min_compared_frac,
                 limit_px=limit_px,
+                cpu_boxes=cpu_boxes,
+                cuda_boxes=cuda_boxes,
             )
             mean_abs = parity["mean_abs_px"]
             mode_metrics["cuda"] = {
@@ -502,7 +815,10 @@ def pose_bench(
         "frames_with_detections_cpu": first_cuda.get("frames_with_detections_cpu"),
         "frames_with_detections_cuda": first_cuda.get("frames_with_detections_cuda"),
         "frames_compared": first_cuda.get("frames_compared"),
+        "clip": clip_meta,
     }
+    if want_debug:
+        metrics["debug"] = _frame_debug(frames, clip_meta)
     _atomic_metrics(run_dir, metrics)
     with (run_dir / "log.txt").open("a", encoding="utf-8") as log:
         log.write(f"pose_bench status={status} backend={backend} n_frames={n_used}\n")
@@ -544,6 +860,22 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         help="Comma-separated pose modes. Default: every mode in MODE_FILES.",
     )
+    parser.add_argument(
+        "--clip",
+        default="",
+        help="Filename of the golden clip. Never a path. Default: CC_BENCH_CLIP or sample1.mp4.",
+    )
+    parser.add_argument(
+        "--start-frame",
+        type=int,
+        default=None,
+        help="First proxy frame to read. Default: CC_BENCH_START or 0.",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Write frame numbers and boxes to metrics.json. Do not save images.",
+    )
     args = parser.parse_args(argv)
     if args.job == "gpu_tests" and os.environ.get("CC_IN_GPU_TESTS") == "1":
         print(
@@ -559,6 +891,9 @@ def main(argv: list[str] | None = None) -> int:
                 n_frames=args.n_frames,
                 min_compared_frac=args.min_compared_frac,
                 modes=requested or None,
+                clip_name=args.clip or None,
+                start_frame=args.start_frame,
+                debug=True if args.debug else None,
             )
         else:
             JOBS[args.job](args.run_dir)

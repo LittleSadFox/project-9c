@@ -49,6 +49,13 @@ Copy this block for a new entry.
 - Fix: Use `transpose=1` for -90/270 and `transpose=2` for +90. Pass `-display_rotation 0` before `-i`. ffmpeg 7.1 ignores `-metadata:s:v rotate=0` for the display matrix.
 - Prevention: Assert a corner marker on -90 and +90 fixtures. Assert ffprobe reports no rotation on the proxy.
 
+### 2026-10-22 — pose_bench parity compared the wrong clip
+
+- Symptom: Pod `pose_bench` at `c5b5392` failed the 90% / 1 px gate. Lightweight and balanced compared 0 of 100 frames. Performance compared 21 of 100 with a 90.09 px mean.
+- Where it failed: pod (RTX 4090)
+- Cause: `_load_bench_frames` opened the first file in `/workspace/videos` (`mac-test2.mov`). OpenCV decoded the raw HEVC Main 10 Dolby Vision clip and ignored the rotation tag. `compare_keypoints` then zipped people by list order.
+- Fix: Name the clip (`CC_BENCH_CLIP=sample1.mp4`). Decode it through the upright 8-bit proxy. Match people by frame index, then box IoU or centroid. Keep the 90% and 1 px limits.
+- Prevention: Never pick the first file in the golden folder. Log clip name, size, sha256, codec, pixel format, and rotation in `metrics.json`.
 
 ### 2026-10-21 — GPU image build ran out of disk
 

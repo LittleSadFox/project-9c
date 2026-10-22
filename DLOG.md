@@ -456,3 +456,44 @@ A pose job that changes `pose_mode` builds a new estimator.
 Zip extract writes a unique sibling temp folder, then replaces the dest.
 A reused folder is checked against zip member sizes and re-extracted on a mismatch.
 Download temps include the pid and job id so two pods do not collide.
+
+## 2026-10-22 — p1-B pose_bench clip and pairing
+
+`pose_bench` no longer opens the first `.mp4`/`.mov` in `CC_GOLDEN_DIR`.
+It takes a filename in `CC_BENCH_CLIP` or `--clip`.
+The name goes through `safe_join` and `safe_ext` under `CC_GOLDEN_DIR`.
+A path, `..`, or a file outside that folder is refused.
+The default name is `sample1.mp4`.
+`CC_BENCH_START` / `--start-frame` sets the first proxy frame.
+
+The bench transcodes that clip with `make_upright_u8_proxy`.
+ffmpeg applies the rotation tag and writes 8-bit `yuv420p` H.264.
+OpenCV then reads the proxy, not the raw 10-bit `.mov`.
+
+`compare_keypoints` matches people in one frame by box IoU, then by nearest centroid.
+It does not zip people by list order.
+
+`--debug` / `CC_POSE_BENCH_DEBUG=1` writes numbers to `metrics.json`.
+It writes clip name, size, sha256, codecs, pixel formats, rotation, frame shape, dtype, BGR channel means, and boxes.
+It does not write a frame or a drawn image.
+
+`pod_up.sh` passes `CC_BENCH_CLIP` and `CC_BENCH_START` for `pose_bench`.
+The default is `sample1.mp4` and start frame `0`.
+
+The 90% compared-frame rule and the 1 px mean stay in place.
+
+A committed `testsrc` clip (`backend/tests/fixtures/pose/rotated_10bit_testsrc.mp4`) is HEVC Main 10 with a −90° display matrix.
+Tests that need ffmpeg use the `media` marker.
+
+Rerun on a pod:
+
+```text
+CC_GOLDEN_DIR=/workspace/videos \
+CC_BENCH_CLIP=sample1.mp4 \
+CC_BENCH_START=0 \
+CC_MODELS_DIR=/workspace/models \
+CC_POSE_BACKEND=rtmlib \
+CC_DEVICE=auto \
+CC_POSE_BENCH_DEBUG=1 \
+python -m ml.jobs pose_bench --run-dir "$RUN_DIR" --n-frames 100 --min-compared-frac 0.9 --clip sample1.mp4 --start-frame 0 --debug
+```

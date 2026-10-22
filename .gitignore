@@ -38,6 +38,7 @@ htmlcov/
 *.mp4
 *.mov
 *.m4v
+!backend/tests/fixtures/pose/rotated_10bit_testsrc.mp4
 *.avi
 *.mkv
 *.hevc
