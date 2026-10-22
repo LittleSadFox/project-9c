@@ -656,3 +656,13 @@ Vitest mocks `api/*` through `fetch` and XHR.
 Playwright Phase 1 e2e is written and skipped until A and B merge.
 
 Do not change `AGENTS.md`, `coding_plan.md`, `scripts/gpu/`, or `docker/`.
+
+## 2026-10-22 — p1-C review: flat create and unrated ratings
+
+Read the flat attempt object from `POST /api/videos/{id}/attempts`.
+A wrapped `{attempt, job_id}` is the proposal-accept shape.
+That wrapper is Phase 2.
+
+Send only changed rating fields on PATCH.
+Keep missing proximity and exertion as null.
+A notes-only edit must not mark the attempt as rated 0/0.

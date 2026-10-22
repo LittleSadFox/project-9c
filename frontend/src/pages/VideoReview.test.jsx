@@ -29,7 +29,7 @@ function installReviewApi(extra = []) {
       status: 201,
       body: (path, options) => {
         const body = JSON.parse(options.body);
-        return { attempt: { ...attemptFixture, ...body }, job_id: "cut-1" };
+        return { ...attemptFixture, ...body };
       },
     },
     { method: "GET", test: (path) => path === "/api/attempts/att-1", body: attemptFixture },
@@ -55,6 +55,21 @@ describe("VideoReviewPage", () => {
       expect(JSON.parse(post[1].body).end_frame).toBeGreaterThan(JSON.parse(post[1].body).start_frame);
     });
     expect(await screen.findByText("Rating")).toBeTruthy();
+  });
+
+  it("navigates from a flat POST body and posts only once", async () => {
+    const fetchMock = installReviewApi();
+    renderReview();
+    await screen.findByRole("button", { name: "Create attempt" });
+    fireEvent.click(screen.getByRole("button", { name: "Create attempt" }));
+    expect(await screen.findByText("Rating")).toBeTruthy();
+    const posts = fetchMock.mock.calls.filter(
+      (call) => String(call[0]).endsWith("/videos/vid-1/attempts") && call[1] && call[1].method === "POST",
+    );
+    expect(posts).toHaveLength(1);
+    const created = JSON.parse(posts[0][1].body);
+    expect(created.start_frame).toBeDefined();
+    expect(await screen.findByRole("heading", { name: "Attempt" })).toBeTruthy();
   });
 
   it("creates an attempt with Enter", async () => {

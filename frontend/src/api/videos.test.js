@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createAttempt, listVideos, uploadVideo, videoFrameUrl, videoProxyUrl, videoThumbUrl } from "./videos.js";
+import { createAttempt, createdAttemptId, listVideos, uploadVideo, videoFrameUrl, videoProxyUrl, videoThumbUrl } from "./videos.js";
 import { installFetch, installXhr, jsonResponse } from "../test/mockApi.js";
 import { videoFixture } from "../test/fixtures.js";
 
@@ -32,12 +32,20 @@ describe("videos api", () => {
   });
 
   it("creates a missed attempt on the video", async () => {
-    globalThis.fetch = vi.fn(async () => jsonResponse({ attempt: { id: "att-1" }, job_id: "job-2" }, 201));
+    globalThis.fetch = vi.fn(async () => jsonResponse({ id: "att-1", start_frame: 10, end_frame: 40, outcome: "fall" }, 201));
     const result = await createAttempt("vid-1", { start_frame: 10, end_frame: 40, outcome: "fall" });
-    expect(result.attempt.id).toBe("att-1");
+    expect(result.id).toBe("att-1");
+    expect(result.attempt).toBeUndefined();
     const [path, options] = globalThis.fetch.mock.calls[0];
     expect(path).toBe("/api/videos/vid-1/attempts");
     expect(JSON.parse(options.body)).toEqual({ start_frame: 10, end_frame: 40, outcome: "fall" });
+  });
+
+  it("reads a flat create-attempt id and rejects a wrapped payload", () => {
+    expect(createdAttemptId({ id: "att-1", start_frame: 10, outcome: "fall" })).toBe("att-1");
+    expect(() => createdAttemptId({ attempt: { id: "att-1" }, job_id: "cut-1" })).toThrow(
+      /flat attempt id/,
+    );
   });
 
   it("builds media URLs from the contract", () => {

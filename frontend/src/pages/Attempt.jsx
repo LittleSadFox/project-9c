@@ -15,15 +15,7 @@ import { usePlayback } from "../hooks/usePlayback.js";
 import { invalidate, useResource } from "../hooks/useResource.js";
 import { t } from "../i18n/index.js";
 import { HALPE26_EDGES } from "../lib/halpe26.js";
-
-function ratingsFrom(attempt) {
-  return {
-    outcome: attempt.outcome || "unknown",
-    proximity: attempt.proximity ?? 0,
-    exertion: attempt.exertion ?? 0,
-    notes: attempt.notes || "",
-  };
-}
+import { changedRatings, ratingsFrom } from "../lib/ratings.js";
 
 export function AttemptPage() {
   const { attemptId } = useParams();
@@ -78,18 +70,14 @@ export function AttemptPage() {
       if (!draft || !data) {
         return;
       }
-      const same =
-        draft.outcome === (data.outcome || "unknown") &&
-        draft.proximity === (data.proximity ?? 0) &&
-        draft.exertion === (data.exertion ?? 0) &&
-        (draft.notes || "") === (data.notes || "");
-      if (same) {
+      const patch = changedRatings(draft, data);
+      if (Object.keys(patch).length === 0) {
         return;
       }
       setSaving(true);
       setSaveError(null);
       try {
-        await patchAttempt(attemptId, draft);
+        await patchAttempt(attemptId, patch);
         invalidate(`attempt:${attemptId}`);
         invalidate("attempts");
         setSaved(true);

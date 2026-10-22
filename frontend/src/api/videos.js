@@ -50,6 +50,13 @@ export function createAttempt(videoId, body) {
   });
 }
 
+export function createdAttemptId(payload) {
+  if (payload && typeof payload.id === "string" && payload.id) {
+    return payload.id;
+  }
+  throw new Error("Create attempt did not return a flat attempt id.");
+}
+
 export function videoProxyUrl(id) {
   return `/api/videos/${encodeURIComponent(id)}/proxy`;
 }

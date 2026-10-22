@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router";
 
 import { getPose } from "../api/pose.js";
-import { createAttempt, getVideo, videoProxyUrl, videoThumbUrl } from "../api/videos.js";
+import { createAttempt, createdAttemptId, getVideo, videoProxyUrl, videoThumbUrl } from "../api/videos.js";
 import { Hint } from "../components/Hint.jsx";
 import { Notice } from "../components/Notice.jsx";
 import { PlaybackPane } from "../components/PlaybackPane.jsx";
@@ -97,9 +97,10 @@ export function VideoReviewPage() {
         end_frame: outFrame,
         outcome,
       });
+      const attemptId = createdAttemptId(result);
       invalidate("attempts");
       invalidate(`video:${videoId}`);
-      navigate(`/attempts/${result.attempt.id}`);
+      navigate(`/attempts/${attemptId}`);
     } catch (err) {
       setError(err.message || String(err));
       setBusy(false);

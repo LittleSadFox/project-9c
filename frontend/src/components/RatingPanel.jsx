@@ -4,7 +4,7 @@ import { Button, Slider } from "./glass.jsx";
 const OUTCOMES = ["send", "fall", "unknown"];
 
 export function RatingPanel({ value, onChange, saving = false, saved = false, error = null }) {
-  const current = value || { outcome: "unknown", proximity: 0, exertion: 0, notes: "" };
+  const current = value || { outcome: "unknown", proximity: null, exertion: null, notes: "" };
 
   function update(patch) {
     onChange({ ...current, ...patch });
