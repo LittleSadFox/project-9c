@@ -168,7 +168,7 @@ sequenceDiagram
 - Interactive debugging: `pod_up.sh --interactive`, then `ssh <pod>@ssh.runpod.io -i ~/.ssh/climbing_coach_ed25519` (Runpod's SSH proxy; it has no SCP, so files move through the volume), then `pod_down.sh`.
 
 ### 2.7 Data path between the Mac and the volume
-- `scripts/sync_volume.sh` (Mac) runs `export_labels.py`, then copies new golden videos and `labels.json` to `videos/` with `aws s3 cp --region <DC> --endpoint-url https://s3api-<dc>.runpod.io/ s3://<volume_id>/...`. It copies file by file and skips files already listed in `videos/manifest.json`, because `aws s3 sync` is unreliable on Runpod's S3 API for large trees. The AWS CLI uploads files over 500 MB in parts by itself.
+- `scripts/sync_volume.sh` (Mac) runs `export_labels.py`, then copies new golden videos and `labels.json` to `videos/` with `aws s3 cp --region <DC> --endpoint-url https://s3api-<dc>.runpod.io/ s3://<volume_id>/...`. It copies file by file and skips files already listed in `videos/manifest.json`, because `aws s3 sync` is unreliable on Runpod's S3 API for large trees. Each file goes up as one `put-object` call. Runpod's S3 API rejects a single upload above about 175–200 MB (HTTP 413, which the AWS CLI reports as "Connection was closed"), so `sync_volume.sh` refuses any file over 150 MiB before it calls S3. Multipart upload is not used. Before the golden-set sync, `sync_volume.sh` gains a pre-step (decided by you, 2026-10-22): a file over 150 MiB is transcoded to H.264 1080p with the same frame rate and the rotation applied (through `CC_FFMPEG_BIN` with an argument list, never a shell), and smaller files go up unchanged. The manifest records the sha256 of the original and of the uploaded file, so `labels.json` (keyed by the original's sha256) still resolves and the skip logic does not transcode again. A test proves that a proxy built from the 1080p file has the same `n_frames` and `proxy_fps` as one built from the original, ±1 frame. If a transcoded file is still over 150 MiB, the run fails before it uploads anything.
 - `scripts/export_dataset.sh` (Mac) builds a feedback dataset (Phase 4) or a COCO export (Phase 6) from your library and uploads it to `datasets/<name>/`.
 - `download_models.py --from-volume <run_id>` (Mac) copies a trained model and its `metrics.json` into your library as a new, inactive `model_versions` row.
 - Models from the volume are untrusted input. They are ONNX plus JSON only, never pickle or joblib. `download_models.py` refuses any other file type and checks each file's sha256 against `metrics.json`.
@@ -662,7 +662,7 @@ Each phase has three gates. "Bot and CI" must be green before anything goes to a
   - `pod_up.sh --job gpu_tests`: the image pulls with the registry credential; the repo clones at the commit; the suite runs with real ffmpeg; a tiny test ONNX model runs on `CUDAExecutionProvider` (checked with `session.get_providers()`, not only the list of available providers); `runs/<id>/metrics.json` appears; the webhook ping wakes the bot; and `pod_ls.sh` shows no pod afterwards.
   - An interactive pod started with `--ttl 10m` terminates itself after 10 minutes.
 - Mac pass
-  - On a clean clone, `setup_mac.sh` finishes and downloads the weights; `check.sh --all` is green; `run_mac.sh` opens the shell in Safari; the theme passes the visual checklist in dark and light mode, and with reduced transparency, increased contrast and reduced motion.
+  - On a clean clone, `setup_mac.sh` finishes and downloads the weights; `check.sh --all` is green; `run_mac.sh` opens the shell in Safari; the theme passes the visual checklist in dark and light mode, and with reduced transparency, increased contrast and reduced motion. (Phase 0: you waived the dark-mode and accessibility checks on 2026-10-22; light mode passed.)
   - `sync_volume.sh` uploads the first sample videos.
 
 ### Phase 1 — Library, import, pose, playback, manual cut, ratings
@@ -689,7 +689,7 @@ Each phase has three gates. "Bot and CI" must be green before anything goes to a
   - `pytest -m "model and macos"`: CoreML and CPU keypoints differ by ≤ 1 px on average over 100 frames. Frames per second for each pose mode are recorded in `DLOG.md`.
   - Overlay sync and manual cuts look right in Safari; a 1 GB upload raises server memory by less than 100 MB.
 
-Between Phase 1 and Phase 2, you build the golden set (section 11) with the Phase 1 tools and copy it to the volume.
+Between Phase 1 and Phase 2, you build the golden set (section 11) with the Phase 1 tools and copy it to the volume. The `sync_volume.sh` 1080p pre-step from section 2.7 must be merged before that copy.
 
 ### Phase 2 — Review tools: automatic start and fall, auto-cut, skeleton corrections
 - Build
