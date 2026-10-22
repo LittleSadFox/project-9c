@@ -366,3 +366,14 @@ The no-job-id watchdog test sets `CC_TERMINATE_NO_SLEEP=1` and a 200 curl stub.
 
 See `TROUBLESHOOTING_LOG.md`.
 
+## 2026-10-22 — p1-A backend media and library
+
+Add Phase 1 slice A: library CRUD, streaming upload, ingest, media endpoints, trash, manual attempts, and cut.
+
+- Routes except pose. `routes/__init__.py` mounts them. Slice B adds one pose line.
+- Services: `library`, `ingest`, `attempts`. Ingest enqueues pose by job kind.
+- `FfmpegTool` calls ffmpeg and ffprobe with argument lists. `FakeMediaTool` stays for API tests.
+- Upload writes chunks to `tmp/` and bounds memory. A fixture generator builds the frame-code video for cut tests.
+- No 0002 migration. Schema stays `0001_init.sql`.
+- Do not start a pod. Do not touch `scripts/gpu/`, `docker/`, `AGENTS.md`, or `coding_plan.md`.
+- Local checks (ffmpeg 7.1.5 static build): ruff clean, mypy clean, pytest `not model and not gpu and not macos and not golden and not slow` → 227 passed, 1 skipped, 1 deselected.

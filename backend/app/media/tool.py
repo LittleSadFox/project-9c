@@ -6,6 +6,15 @@ from pathlib import Path
 from typing import Protocol
 
 
+class MediaError(Exception):
+    """Raised when probe or ffmpeg work fails."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
 class MediaTool(Protocol):
     """ffmpeg work used by ingest, cut, and render jobs."""
 

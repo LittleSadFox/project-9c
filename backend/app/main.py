@@ -15,11 +15,13 @@ from app.config import Settings
 from app.db import apply_migrations, connect
 from app.errors import AppError, install_error_handlers
 from app.jobs.queue import JobQueue
+from app.media.ffmpeg import FfmpegTool
 from app.media.tool import MediaTool
 from app.pose.estimator import FixtureEstimator, PoseEstimator
-from app.routes import jobs as jobs_routes
-from app.routes import system as system_routes
+from app.routes import include_routers
 from app.security import HostAllowlistMiddleware
+from app.services.attempts import make_cut_handler
+from app.services.ingest import make_ingest_handler
 from app.storage import LibraryPaths, safe_join
 
 FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
@@ -43,12 +45,17 @@ def create_app(
 
     if estimator is None and settings.pose_backend == "fixture":
         estimator = FixtureEstimator()
+    if media is None:
+        media = FfmpegTool(settings.ffmpeg_bin, settings.ffprobe_bin)
+    resolved_media: MediaTool = media
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         conn = connect(paths.db)
         apply_migrations(conn)
         queue = JobQueue(paths.db)
+        queue.register("ingest", make_ingest_handler(paths, resolved_media, queue))
+        queue.register("cut", make_cut_handler(paths, resolved_media))
         recovered = queue.recover()
         if recovered:
             app.state.log_recovered = recovered
@@ -74,13 +81,12 @@ def create_app(
     )
     app.state.settings = settings
     app.state.paths = paths
-    app.state.media = media
+    app.state.media = resolved_media
     app.state.estimator = estimator
 
     app.add_middleware(HostAllowlistMiddleware, settings=settings)
     install_error_handlers(app)
-    app.include_router(system_routes.router)
-    app.include_router(jobs_routes.router)
+    include_routers(app)
     _install_spa(app)
     return app
 

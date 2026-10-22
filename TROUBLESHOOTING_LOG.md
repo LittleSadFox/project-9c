@@ -25,6 +25,23 @@ Copy this block for a new entry.
 
 ## Entries
 
+### 2026-10-22 — ffmpeg rejects `.mp4.tmp` as an output name
+
+- Symptom: Ingest failed with `Unable to choose an output format for '.../proxy.mp4.tmp'`.
+- Where it failed: bot computer (media tests)
+- Cause: `FfmpegTool` wrote the atomic temp next to `proxy.mp4` as `proxy.mp4.tmp`. ffmpeg does not treat that suffix as MP4.
+- Fix: Write the temp as `proxy.tmp.mp4` (`stem + ".tmp" + suffix`). Then `os.replace`.
+- Prevention: Keep the real media extension on ffmpeg outputs.
+
+### 2026-10-22 — display_rotation is an input option
+
+- Symptom: `ffmpeg ... -display_rotation 90 dest.mp4` failed. The proxy stayed landscape.
+- Where it failed: bot computer (media tests)
+- Cause: In ffmpeg 7, `-display_rotation` is an input option. A rotate metadata tag on encode did not write a display matrix.
+- Fix: Encode a base file. Remux with `-display_rotation 90 -i base -c copy dest`. Probe then sees `rotation=90`. `make_proxy` transposes, then scales.
+- Prevention: Do not put `-display_rotation` after `-i` when you write a file.
+
+
 ### 2026-10-21 — GPU image build ran out of disk
 
 - Symptom: `gpu-image.yml` failed at `importing to docker` with `no space left on device`.

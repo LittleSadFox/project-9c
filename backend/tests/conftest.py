@@ -138,6 +138,17 @@ def client(app: object) -> Iterator[TestClient]:
         yield test_client
 
 
+@pytest.fixture
+def auth_client(client: TestClient, tmp_settings: Settings) -> TestClient:
+    launch = client.get(
+        f"/auth/launch?token={tmp_settings.launch_token}",
+        headers=api_headers(),
+        follow_redirects=False,
+    )
+    assert launch.status_code == 303
+    return client
+
+
 def api_headers(extra: dict[str, str] | None = None) -> dict[str, str]:
     headers = {"Host": HOST}
     if extra:

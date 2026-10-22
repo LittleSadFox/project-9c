@@ -366,3 +366,17 @@ The Phase 0 skeleton is in the tree.
 - The frontend Vite app serves the Liquid Glass shell and empty pages.
 - Scripts: `setup_mac.sh`, `check.sh`, `dev.sh`, `build.sh`, `run_mac.sh`, `download_models.py`, `export_labels.py`, `sync_volume.sh`, and `scripts/gpu/`.
 - `ml/jobs.py` registers `gpu_tests`.
+
+## 15. Phase 1 library and media (slice A)
+
+Slice A owns the library API and the media lane.
+
+- `POST /api/videos/upload` streams the body to `tmp/` in chunks. It hashes sha256 while it writes. It does not load the whole file into memory.
+- `Content-Length` is required. A file over `CC_MAX_UPLOAD_GB` returns 413. A non-video returns 415 and the temp file is removed. A duplicate sha256 returns 409 with `existing_video_id`.
+- File names never come from the request. The original name lives only in `videos.original_name`. Paths come from UUID ids in the database.
+- ffmpeg and ffprobe run as argument lists. Bins come from `CC_FFMPEG_BIN` and `CC_FFPROBE_BIN`. There is no shell string.
+- The ingest job (media lane) writes a CFR H.264 proxy and thumbnails. It then enqueues a pose job on the compute lane. Slice B registers the pose handler.
+- Manual attempts enqueue a cut job. The cut re-encodes from the original. Audio stays. The file uses faststart. Clip URLs carry `?v=<clip_version>`.
+- `DELETE` on a video or an attempt moves files into `trash/<id>/`. `POST /api/trash/{id}/restore` moves them back. `DELETE /api/trash` removes the files.
+- `routes/__init__.py` mounts the Phase 1 routers. Slice B adds one `include_router` line for pose.
+- API tests use `FakeMediaTool`. Media tests use `FfmpegTool` and generated fixtures, including a frame-code video.
