@@ -54,6 +54,10 @@ def test_entrypoint_generates_host_keys_and_starts_sshd() -> None:
     assert "/usr/sbin/sshd" in text
     assert "cc_require_job_or_interactive" in text
     assert "cc_early_cleanup" in text
+    assert "unset CC_IN_GPU_TESTS" in text
+    assert text.index("unset CC_IN_GPU_TESTS") < text.index(
+        "exec /opt/cc/scripts/gpu/run_job.sh"
+    )
     job_exec = text.index("exec /opt/cc/scripts/gpu/run_job.sh")
     sshd = text.index("/usr/sbin/sshd")
     keys = text.index("ssh-keygen -A")

@@ -271,3 +271,19 @@ The ping log still writes only `status=` and `curl_rc=`.
 The run folder does not store the key.
 
 See `TROUBLESHOOTING_LOG.md`.
+
+## 2026-10-22 — p0-followups-2 S3 upload and stamp safety
+
+`sync_volume.sh` uploads with `aws s3api put-object`.
+It pins `s3.multipart_threshold` to 128MB in a temp AWS config.
+It does not use `aws s3 cp`.
+`cc_s3_object_exists` uses `head-object`.
+S3 error summaries redact AWS access-key patterns.
+Tests keep a default failing `aws` shim on PATH.
+The terminate stamp write refuses a symlink and uses `O_NOFOLLOW` / `O_EXCL`.
+`CC_TERMINATE_STAMP_DIR` must not point at the volume.
+An empty `RUNPOD_POD_ID` fails loudly and still reaches terminate.
+`$TMPDIR` at `/tmp/cc-src-*` is untrusted.
+The entrypoint unsets `CC_IN_GPU_TESTS` before it execs `run_job.sh`.
+
+See `TROUBLESHOOTING_LOG.md`.

@@ -635,8 +635,13 @@ def _fake_aws_get_object(
     metrics_file.write_text(metrics_body if metrics_body is not None else body, encoding="utf-8")
     aws.write_text(
         f"""#!/usr/bin/env bash
-[[ "$1" == "s3api" && "$2" == "get-object" ]] || {{
-  echo "expected s3api get-object" >&2
+[[ "$1" == "s3api" ]] || {{
+  echo "expected s3api" >&2
+  exit 1
+}}
+op="$2"
+[[ "$op" == "get-object" || "$op" == "head-object" ]] || {{
+  echo "expected s3api get-object or head-object" >&2
   exit 1
 }}
 shift 2
@@ -686,6 +691,9 @@ printf '%s' "$n" > "$state"
 if [[ "$n" -le {fail_first} ]]; then
   echo "{fail_msg}" >&2
   exit 1
+fi
+if [[ "$op" == "head-object" ]]; then
+  exit 0
 fi
 if [[ -z "$out" || "$out" == "-" ]]; then
   echo "missing get-object outfile" >&2
@@ -827,6 +835,7 @@ def test_s3_not_found_match_is_strict() -> None:
     exists_fn = text.split("cc_s3_object_exists()")[1].split("cc_s3_run_exists()")[0]
     assert "cc_s3_is_not_found" in cp_fn
     assert "cc_s3_is_not_found" in exists_fn
+    assert "s3api head-object" in exists_fn
     assert "NoSuchKey|Not Found|404" not in cp_fn
     assert "NoSuchKey|Not Found|404" not in exists_fn
 
@@ -903,6 +912,45 @@ def test_s3_cp_fails_closed_on_loose_404(tmp_path: Path, msg: str) -> None:
     assert "ERROR: S3 get-object" in result.stderr
 
 
+def test_s3_err_summary_redacts_aws_key_pattern(tmp_path: Path) -> None:
+    access = "A" + "KIA" + "TESTFAKEKEY12345"
+    err = tmp_path / "err.txt"
+    err.write_text(
+        "An error occurred (SignatureDoesNotMatch) when calling the PutObject "
+        f"operation: credential {access} aws_access_key_id={access}\n",
+        encoding="utf-8",
+    )
+    result = _run(
+        ["bash", "-c", f"source {LIB} && cc_s3_err_summary {err} videos/sample1.mp4"],
+    )
+    assert result.returncode == 0, result.stderr
+    combined = result.stdout + result.stderr
+    assert access not in combined
+    assert "REDACTED" in combined
+    assert "code=SignatureDoesNotMatch" in combined
+    assert "key=videos/sample1.mp4" in combined
+
+
+def test_default_aws_shim_blocks_real_bucket() -> None:
+    if _SHIM_LOG is not None and _SHIM_LOG.exists():
+        _SHIM_LOG.write_text("", encoding="utf-8")
+    result = _run(
+        [
+            "bash",
+            "-c",
+            f"source {LIB} && cc_s3_object_exists "
+            "s3://wguvx2347m/runs/job-shim/status EU-RO-1 "
+            "https://s3api-eu-ro-1.runpod.io",
+        ]
+    )
+    assert result.returncode != 0
+    assert "Could not check" in result.stderr or "blocked" in result.stderr
+    assert _SHIM_LOG is not None and _SHIM_LOG.is_file()
+    log = _SHIM_LOG.read_text(encoding="utf-8")
+    assert "aws " in log
+    assert "s3api" in log
+
+
 @pytest.mark.parametrize("msg", ["NoSuchKey", "404", "Not Found"])
 def test_s3_object_exists_fails_closed_on_loose_404(tmp_path: Path, msg: str) -> None:
     _fake_aws_err(tmp_path, msg)
@@ -923,7 +971,7 @@ def test_pod_up_fails_closed_on_loose_s3_404(tmp_path: Path) -> None:
     )
     assert result.returncode != 0
     assert "job_id=job-loose" not in result.stdout
-    assert "Could not check" in result.stderr or "S3 get-object" in result.stderr
+    assert "Could not check" in result.stderr or "S3 head-object" in result.stderr
 
 
 def test_parse_ttl_leading_zero_is_decimal() -> None:
@@ -1043,6 +1091,20 @@ def test_sync_volume_dry_run(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert not (golden / "labels" / "labels.json").exists()
     assert "s3api-eu-ro-1.runpod.io" in result.stdout
+
+
+def test_sync_volume_uses_s3api_and_pins_multipart() -> None:
+    text = SYNC.read_text(encoding="utf-8")
+    assert "s3api" in text
+    assert "put-object" in text
+    assert "cc_aws_export_multipart_config" in text
+    assert "aws s3 cp" not in text
+    assert "s3 cp -" not in text
+    lib = LIB.read_text(encoding="utf-8")
+    assert "multipart_threshold = 128MB" in lib
+    helper = lib.split("cc_aws_export_multipart_config()")[1].split("cc_setup_ssh()")[0]
+    assert "AWS_CONFIG_FILE" in helper
+    assert "~/.aws/config" not in helper or "Do not edit ~/.aws/config" in helper
 
 
 def test_run_job_uses_basic_git_auth() -> None:
@@ -1189,6 +1251,45 @@ def test_terminate_self_fails_without_pod_id() -> None:
     assert "RUNPOD_POD_ID is missing" in result.stderr
 
 
+def test_terminate_self_fails_on_empty_pod_id_and_still_runs(tmp_path: Path) -> None:
+    hits = tmp_path / "curl.hits"
+    _fake_curl(tmp_path, "200", '{"id":"pod"}')
+    curl = tmp_path / "curl"
+    original = curl.read_text(encoding="utf-8")
+    curl.write_text(
+        f'printf "%s\\n" curl >> "{hits}"\n' + original,
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+    result = _run(
+        [
+            "bash",
+            "-c",
+            f"source {LIB} && cc_terminate_self",
+        ],
+        env={
+            "RUNPOD_POD_ID": "",
+            "RUNPOD_API_KEY": "pod-scoped-key",
+        },
+        bin_dir=tmp_path,
+    )
+    assert result.returncode != 0
+    assert "RUNPOD_POD_ID is missing" in result.stderr
+    assert not hits.exists() or hits.read_text(encoding="utf-8").count("curl") == 0
+    trapped = _run(
+        [str(RUN_JOB)],
+        env={
+            "CC_VOLUME_DIR": str(tmp_path / "vol"),
+            "RUNPOD_POD_ID": "",
+            "RUNPOD_API_KEY": "pod-scoped-key",
+            **_job_dirs(tmp_path),
+        },
+        bin_dir=tmp_path,
+    )
+    assert trapped.returncode != 0
+    assert "RUNPOD_POD_ID is missing" in trapped.stderr
+
+
 def test_run_job_trap_reaches_terminate(tmp_path: Path) -> None:
     result = _run(
         [str(RUN_JOB)],
@@ -1268,6 +1369,29 @@ def test_run_job_sets_trap_before_mkdir() -> None:
     assert "set +e" in text.split("cleanup()")[1].split("cc_terminate_self")[0]
 
 
+def test_entrypoint_unsets_in_gpu_tests_before_exec() -> None:
+    text = ENTRYPOINT.read_text(encoding="utf-8")
+    assert "unset CC_IN_GPU_TESTS" in text
+    assert text.index("unset CC_IN_GPU_TESTS") < text.index(
+        "exec /opt/cc/scripts/gpu/run_job.sh"
+    )
+
+
+def test_refuse_nested_gpu_tests_clears_after_unset() -> None:
+    result = _run(
+        [
+            "bash",
+            "-c",
+            f"source {LIB} && unset CC_IN_GPU_TESTS && "
+            "CC_JOB=gpu_tests cc_refuse_nested_gpu_tests && echo cleared",
+        ],
+        env={"CC_IN_GPU_TESTS": "1", "CC_JOB": "gpu_tests"},
+    )
+    assert result.returncode == 0, result.stderr
+    assert "cleared" in result.stdout
+    assert "already set" not in result.stderr
+
+
 def test_entrypoint_requires_job_or_interactive() -> None:
     text = ENTRYPOINT.read_text(encoding="utf-8")
     assert "cc_require_job_or_interactive" in text
@@ -1300,6 +1424,18 @@ def test_pod_up_refuses_short_sha() -> None:
     )
     assert result.returncode != 0
     assert "40-character" in result.stderr
+
+
+def test_pod_up_accepts_uppercase_sha() -> None:
+    upper = SHA40.upper()
+    result = _run(
+        [str(POD_UP), "--job", "gpu_tests", "--ref", upper, "--dry-run"],
+    )
+    assert result.returncode == 0, result.stderr
+    payload = _payload(result.stdout)
+    env = payload["env"]
+    assert isinstance(env, dict)
+    assert env["CC_GIT_REF"] == upper
 
 
 def test_pod_up_refuses_untagged_image() -> None:
@@ -2558,6 +2694,65 @@ def test_terminate_stamp_other_pod_or_unset_job_does_not_suppress(
     assert "TTL 1s expired" in watchdog.stdout
 
 
+def test_terminate_refuses_symlink_stamp_and_still_terminates(tmp_path: Path) -> None:
+    hits = tmp_path / "curl.hits"
+    _fake_curl(tmp_path, "200", '{"id":"pod-link"}')
+    curl = tmp_path / "curl"
+    original = curl.read_text(encoding="utf-8")
+    curl.write_text(
+        f'printf "%s\\n" curl >> "{hits}"\n' + original,
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+    planted = tmp_path / "vol" / "planted-stamp"
+    planted.parent.mkdir(parents=True, exist_ok=True)
+    planted.write_text("ok\n", encoding="utf-8")
+    stamp = _stamp_path("pod-link")
+    stamp.symlink_to(planted)
+    result = _run(
+        ["bash", "-c", f"source {LIB} && cc_terminate_self"],
+        env={
+            "RUNPOD_POD_ID": "pod-link",
+            "RUNPOD_API_KEY": "ok-key",
+            "CC_VOLUME_DIR": str(tmp_path / "vol"),
+        },
+        bin_dir=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert hits.read_text(encoding="utf-8").count("curl") == 1
+    assert stamp.is_symlink()
+    assert planted.read_text(encoding="utf-8") == "ok\n"
+    assert "terminate ok" in result.stdout
+
+
+def test_terminate_stamp_dir_refuses_volume_path(tmp_path: Path) -> None:
+    volume = tmp_path / "vol"
+    volume.mkdir(parents=True, exist_ok=True)
+    hits = tmp_path / "curl.hits"
+    _fake_curl(tmp_path, "200", '{"id":"pod-vol"}')
+    curl = tmp_path / "curl"
+    original = curl.read_text(encoding="utf-8")
+    curl.write_text(
+        f'printf "%s\\n" curl >> "{hits}"\n' + original,
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+    result = _run(
+        ["bash", "-c", f"source {LIB} && cc_terminate_self"],
+        env={
+            "RUNPOD_POD_ID": "pod-vol",
+            "RUNPOD_API_KEY": "ok-key",
+            "CC_VOLUME_DIR": str(volume),
+            "CC_TERMINATE_STAMP_DIR": str(volume / "stamps"),
+        },
+        bin_dir=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert hits.read_text(encoding="utf-8").count("curl") == 1
+    assert not (volume / "stamps" / ".cc_terminated.pod-vol").exists()
+    assert "terminate ok" in result.stdout
+
+
 def test_unwritable_run_log_still_terminates(tmp_path: Path) -> None:
     if not Path("/dev/full").exists():
         pytest.skip("/dev/full is not available")
@@ -3053,6 +3248,19 @@ def test_safe_wipe_refuses_working_directory_cc_src(tmp_cc_src: Path, tmp_path: 
     assert (tmp_cc_src / "keep").is_file()
 
 
+def test_safe_wipe_refuses_tmpdir_sibling_cc_src_alt(tmp_path: Path) -> None:
+    # TMPDIR=/tmp/cc-src-alt is a sibling cc-src-* path. Distrust it.
+    # Do not create /tmp/cc-src-alt.
+    nest = Path("/tmp/cc-src-alt")
+    target = nest / "cc-src"
+    assert not nest.exists()
+    result = _wipe(tmp_path, str(target), env={"TMPDIR": str(nest)})
+    assert result.returncode != 0
+    assert "Parent must be /tmp" in result.stderr
+    assert not nest.exists()
+    assert not target.exists()
+
+
 def test_safe_wipe_refuses_tmpdir_under_tmp_cc_src(tmp_path: Path) -> None:
     # Parent is $TMPDIR, so a trusted TMPDIR would allow the wipe.
     # TMPDIR is under /tmp/cc-src, so the new rule must clear it.
@@ -3350,6 +3558,9 @@ def test_run_rejects_opt_cc_paths(tmp_path: Path) -> None:
 def test_s3_get_object_is_used_not_cp_stdout() -> None:
     text = LIB.read_text(encoding="utf-8")
     assert "s3api get-object" in text
+    exists_fn = text.split("cc_s3_object_exists()")[1].split("cc_s3_run_exists()")[0]
+    assert "s3api head-object" in exists_fn
+    assert "s3api get-object" not in exists_fn
     assert "aws s3 cp" not in text
 
 
@@ -3357,6 +3568,9 @@ def test_run_logged_fifo_uses_mktemp_dir() -> None:
     text = LIB.read_text(encoding="utf-8")
     assert 'fifo_dir="$(mktemp -d)"' in text
     assert "mktemp -u" not in text
+    logged = text.split("cc_run_logged()")[1].split("cc_run_timeout()")[0]
+    assert "cc_redact_stream <\"$fifo\" | tee -a" in logged
+    assert "wait \"$reader\"" in logged
     assert "cc_redact_oneline" in text
     assert "trap 'rm -f" not in text
     assert "jq -c" in WAIT_JOB.read_text(encoding="utf-8")
