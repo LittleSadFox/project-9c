@@ -73,7 +73,19 @@ def test_gpu_tests_job_writes_metrics(tmp_path: Path) -> None:
     assert f"ort_providers={providers} used_cuda={used}" in log
 
 
-def test_gpu_tests_writes_ort_providers_before_cuda_job_error(tmp_path: Path) -> None:
+def test_gpu_tests_writes_ort_providers_before_cuda_job_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _cpu_only(*, require_cuda: bool) -> dict[str, object]:
+        del require_cuda
+        return {
+            "available_providers": ["CPUExecutionProvider"],
+            "session_providers": ["CPUExecutionProvider"],
+            "used_cuda": False,
+            "output_shape": [1, 4],
+        }
+
+    monkeypatch.setattr("ml.jobs.check_cuda_session", _cpu_only)
     sample = tmp_path / "sample_test.py"
     sample.write_text("def test_ok() -> None:\n    assert True\n", encoding="utf-8")
     run_dir = tmp_path / "run"
@@ -84,8 +96,7 @@ def test_gpu_tests_writes_ort_providers_before_cuda_job_error(tmp_path: Path) ->
             require_cuda=True,
         )
     log = (run_dir / "log.txt").read_text(encoding="utf-8")
-    assert "ort_providers=" in log
-    assert "used_cuda=false" in log
+    assert "ort_providers=CPUExecutionProvider used_cuda=false" in log
 
 
 def test_gpu_tests_writes_ort_providers_on_cuda_check_exception(
