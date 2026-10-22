@@ -1182,8 +1182,8 @@ cc_watchdog_start() {
     if [[ -n "$run_dir" && -e "${run_dir}/started_at" ]]; then
       started="$(tr -d '[:space:]' <"${run_dir}/started_at" 2>/dev/null || true)"
     fi
-    # Only a short digit timestamp may enter $(( )). Other content is missing.
-    if [[ ! "$started" =~ ^[0-9]{1,12}$ ]]; then
+    # Only digits may enter $(( )). Other content is missing.
+    if [[ ! "$started" =~ ^[0-9]+$ ]]; then
       started="$(date +%s)"
       if [[ -n "$run_dir" ]]; then
         mkdir -p "$run_dir" || true
