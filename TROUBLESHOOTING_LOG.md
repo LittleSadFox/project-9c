@@ -134,7 +134,7 @@ Copy this block for a new entry.
 - Symptom: Runpod S3 `CreateMultipartUpload` returned `SignatureDoesNotMatch` on a ~40MiB golden video.
 - Where it failed: Mac / volume S3
 - Cause: AWS CLI `s3 cp` uses multipart above 8MB. Runpod S3 rejects that signing path. A single `PutObject` works.
-- Fix: `sync_volume.sh` uses `aws s3api put-object` and `get-object` only. It does not write a temp AWS config. It does not change `AWS_CONFIG_FILE`. It does not write `~/.aws/config`. It refuses files over 5GB before any upload.
+- Fix: `sync_volume.sh` uses `aws s3api put-object` and `get-object` only. It does not write a temp AWS config. It does not change `AWS_CONFIG_FILE`. It does not write `~/.aws/config`. It refuses files over 150MiB before any upload. Multipart is not supported yet. Runpod S3 EU-RO-1 rejects larger single PUTs.
 - Prevention: Do not use `aws s3 cp` against the Runpod S3 endpoint. Do not export `AWS_CONFIG_FILE` from `sync_volume.sh`.
 
 ### 2026-10-22 — terminate stamp symlink and volume override
@@ -147,19 +147,19 @@ Copy this block for a new entry.
 
 ### 2026-10-22 — hung nvidia-smi and crash-loop TTL
 
-- Symptom: A hung `nvidia-smi` could stall `run_job.sh`. A crash-looping hand-made pod without `CC_JOB_ID` reset `started_at` on every restart.
+- Symptom: A hung `nvidia-smi` could stall `run_job.sh`. A crash-looping hand-made pod without `CC_JOB_ID` reset `started_at` on every restart. An already-expired TTL still exec'd the job.
 - Where it failed: review
-- Cause: The name query had no timeout. The watchdog had no persisted clock without a job id.
-- Fix: Time out the name query and log `gpu_name=unknown`. Persist `started_at` under `runs/.ttl-<pod>`. Terminate in the foreground when the TTL is already expired.
+- Cause: The name query had no timeout. The watchdog had no persisted clock without a job id. The expired branch returned 0.
+- Fix: Time out the name query and log `gpu_name=unknown`. Persist `started_at` under `runs/.ttl-<pod>`. Terminate in the foreground when the TTL is already expired, then exit 1.
 - Prevention: Keep the TTL backstop. Do not reset `started_at` on a container restart.
 
-### 2026-10-22 — curl --config leftover and :latest image
+### 2026-10-22 — curl --config leftover, :latest image, and missing sha tag
 
-- Symptom: A failed webhook ping could leave the 0600 curl `--config` file. `pod_up` defaulted to `:latest`.
+- Symptom: A failed webhook ping could leave the 0600 curl `--config` file. `pod_up` defaulted to `:latest`. A later pin to `:sha` created pods when GHCR had no tag. Saving the caller's EXIT trap ran `cleanup` inside `$(cc_curl_post_json)`.
 - Where it failed: review
-- Cause: The config file used `rm` after curl only. `defaults.env` pinned `:latest`.
-- Fix: Add EXIT and RETURN traps around the config file. Derive a git-sha tag from `CC_GIT_REF`. Refuse `:latest` unless `CC_GPU_IMAGE_ALLOW_LATEST=1`.
-- Prevention: Do not put secrets on curl argv. Do not start a pod from `:latest` without an explicit override.
+- Cause: The config file used `rm` after curl only. `defaults.env` pinned `:latest`. Most shas have no image. `trap -p EXIT` in a command substitution prints the parent trap.
+- Fix: Run `cc_curl_post_json` as a subshell with its own EXIT `rm`. Derive a git-sha tag from `CC_GIT_REF`. Refuse `:latest` unless `CC_GPU_IMAGE_ALLOW_LATEST=1`. Check the GHCR manifest before `POST /pods`. Fail closed when the check cannot run.
+- Prevention: Do not put secrets on curl argv. Do not start a pod from `:latest` without an explicit override. Do not create a pod for a missing image tag.
 
 ### 2026-10-21 — Shared SSH host keys in the GPU image
 

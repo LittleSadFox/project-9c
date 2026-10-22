@@ -148,6 +148,7 @@ fi
 cc_require_registry_auth
 
 cc_require_bot_api_key
+cc_verify_gpu_image_exists
 cc_verify_registry_auth
 RESPONSE="$(cc_rest POST /pods "$PAYLOAD")"
 POD_ID="$(jq -r '.id // .podId // empty' <<<"$RESPONSE")"

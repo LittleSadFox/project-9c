@@ -290,7 +290,8 @@ See `TROUBLESHOOTING_LOG.md`.
 
 ## 2026-10-22 — p0-followups-3 curl trap, image pin, sync_volume
 
-The webhook curl `--config` file uses EXIT and RETURN traps.
+`cc_curl_post_json` is a subshell with `trap 'rm -f -- "$cfg"' EXIT`.
+It does not save or restore the caller's EXIT trap.
 The file stays mode 0600.
 A failure still removes it.
 The key stays off the log.
@@ -305,23 +306,34 @@ It must not start with a dot or a dash.
 
 A hand-made or interactive pod without `CC_JOB_ID` writes `started_at` under `runs/.ttl-<pod>`.
 A restart does not reset the TTL clock.
-An already-expired TTL terminates in the foreground.
+An already-expired TTL terminates in the foreground and exits 1.
+
+`wait_job` runs `pod_down` for the `--pod-id` value after a timeout.
+It does not look up a pod by name or job id.
+The default wait timeout stays `CC_TTL_S` plus 300 seconds.
 
 `pod_up` pins the GPU image to a git-sha tag or digest.
 It derives the tag from `CC_GIT_REF` when `CC_GPU_IMAGE` is unset.
 It refuses `:latest` unless `CC_GPU_IMAGE_ALLOW_LATEST=1`.
+A live create checks the GHCR manifest before `POST /pods`.
+It uses `docker manifest inspect`, or a registry HEAD with an existing token.
+A missing tag refuses the create.
+It never falls back to `:latest`.
+`defaults.env` does not pin a digest.
 The Runpod template is unchanged.
 
 `sync_volume.sh` no longer writes a temp AWS config.
 It does not change `AWS_CONFIG_FILE`.
 It does not write `~/.aws/config`.
-It refuses files over 5GB before any upload.
+It refuses files over 150MiB before any upload.
+Multipart is not supported yet.
 `--prefix` defaults to `videos`.
+It refuses `.` and empty path segments.
 A prefix other than `videos` does not write `videos/manifest.json`.
 
 The Library hint button has space under the card copy.
 `httpx.ASGITransport` in the pinned httpx 0.28.1 is async only.
-The Starlette TestClient warning is filtered in `pytest.ini`.
+The Starlette TestClient warning is filtered by message in `pytest.ini`.
 A move to `httpx2` would need a new pin, so it is skipped.
 The Playwright smoke test stubs `/health` and `/api/jobs`.
 

@@ -341,6 +341,88 @@ cc_require_image_tag() {
   fi
 }
 
+cc_ghcr_manifest_url() {
+  local image="${1:-}"
+  local rest name ref
+  [[ "$image" == ghcr.io/* ]] || return 1
+  rest="${image#ghcr.io/}"
+  if [[ "$rest" == *@sha256:* ]]; then
+    name="${rest%@sha256:*}"
+    ref="sha256:${rest##*@sha256:}"
+  elif [[ "$rest" == *:* ]]; then
+    name="${rest%:*}"
+    ref="${rest##*:}"
+  else
+    return 1
+  fi
+  [[ -n "$name" && -n "$ref" ]] || return 1
+  [[ "$name" != *:* && "$name" != *@* ]] || return 1
+  printf 'https://ghcr.io/v2/%s/manifests/%s' "$name" "$ref"
+}
+
+cc_ghcr_manifest_head() {
+  local image="${1:-}"
+  local url http
+  command -v curl >/dev/null 2>&1 || return 2
+  command -v python3 >/dev/null 2>&1 || return 2
+  url="$(cc_ghcr_manifest_url "$image")" || return 2
+  http="$(
+    # Subshell so the EXIT trap cannot run the caller's cleanup.
+    cfg="$(mktemp)"
+    trap 'rm -f -- "$cfg"' EXIT
+    # Token stays in this 0600 file. It does not go on curl argv.
+    python3 -c '
+import os
+import sys
+
+def esc(value):
+    return value.replace("\\", "\\\\").replace("\"", "\\\"")
+
+url = esc(sys.argv[1])
+sys.stdout.write("url = \"%s\"\n" % url)
+sys.stdout.write(
+    "header = \"Accept: application/vnd.oci.image.manifest.v1+json, "
+    "application/vnd.docker.distribution.manifest.v2+json\"\n"
+)
+token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
+if token:
+    sys.stdout.write("header = \"Authorization: Bearer %s\"\n" % esc(token))
+' "$url" >"$cfg"
+    chmod 600 "$cfg"
+    curl -sS --max-time 15 -o /dev/null -w '%{http_code}' -I --config "$cfg" 2>/dev/null || true
+    rm -f -- "$cfg"
+  )"
+  case "$http" in
+    2[0-9][0-9])
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+cc_verify_gpu_image_exists() {
+  # Fail closed before POST /pods. Do not create a pod for a missing tag.
+  local image="${CC_GPU_IMAGE:-}"
+  [[ -n "$image" ]] || cc_fail "CC_GPU_IMAGE is empty. Cannot verify the GPU image. No pod was created."
+
+  if command -v docker >/dev/null 2>&1; then
+    if docker manifest inspect "$image" >/dev/null 2>&1; then
+      return 0
+    fi
+    cc_fail "GPU image ${image} is not on GHCR. Push climbing-coach-gpu for this sha, or set CC_GPU_IMAGE to an existing tag or digest. No pod was created."
+  fi
+
+  local head_rc=0
+  cc_ghcr_manifest_head "$image" || head_rc=$?
+  if [[ "$head_rc" -eq 0 ]]; then
+    return 0
+  fi
+  if [[ "$head_rc" -eq 2 ]]; then
+    cc_fail "Cannot verify GPU image ${image}. Install docker or curl. No pod was created."
+  fi
+  cc_fail "GPU image ${image} is not on GHCR. Push climbing-coach-gpu for this sha, or set CC_GPU_IMAGE to an existing tag or digest. No pod was created."
+}
+
 cc_verify_registry_auth() {
   local id="${CC_RUNPOD_REGISTRY_AUTH_ID:-}"
   [[ -n "$id" ]] || cc_fail "CC_RUNPOD_REGISTRY_AUTH_ID is missing."
@@ -475,16 +557,6 @@ cc_resolve_gpu_image() {
     export CC_GPU_IMAGE
   fi
   printf '%s' "${CC_GPU_IMAGE:-}"
-}
-
-cc_run_exit_trap_text() {
-  local raw="${1:-}"
-  [[ -n "$raw" ]] || return 0
-  eval "set -- $raw"
-  shift 2
-  local cmd="${1:-}"
-  [[ -n "$cmd" ]] || return 0
-  eval "$cmd"
 }
 
 cc_require_optarg() {
@@ -628,10 +700,12 @@ sys.stdout.write(text[:400])
 '
 }
 
-cc_curl_post_json() {
+cc_curl_post_json() (
+  # Subshell so the EXIT trap cannot run the caller's cleanup.
+  # Callers already capture output with $(...).
   local url="$1"
   local body="$2"
-  local cfg http ec prev_exit
+  local cfg http ec
   http=""
   ec=0
   if ! command -v python3 >/dev/null 2>&1; then
@@ -640,13 +714,9 @@ cc_curl_post_json() {
     return 1
   fi
   cfg="$(mktemp)"
-  prev_exit="$(trap -p EXIT || true)"
   # Always remove the 0600 curl --config file. Do not log the path or the key.
-  # RETURN covers function return. EXIT covers set -e or a hard fail.
-  # shellcheck disable=SC2064
-  trap "rm -f -- $(printf '%q' "$cfg")" RETURN
-  # shellcheck disable=SC2064
-  trap "rm -f -- $(printf '%q' "$cfg"); cc_run_exit_trap_text $(printf '%q' "$prev_exit")" EXIT
+  # Do not save, chain, or restore the caller's EXIT trap.
+  trap 'rm -f -- "$cfg"' EXIT
   # URL and bearer stay in this 0600 file. They do not go on curl argv.
   python3 -c '
 import os
@@ -666,12 +736,6 @@ if key and "{{" not in key:
   http="$(curl -sS --max-time 15 -o /dev/null -w '%{http_code}' -X POST \
     -H "Content-Type: application/json" -d "$body" --config "$cfg" 2>/dev/null)" || ec=$?
   rm -f -- "$cfg"
-  if [[ -n "$prev_exit" ]]; then
-    eval "$prev_exit"
-  else
-    trap - EXIT
-  fi
-  trap - RETURN
   case "$http" in
     *[!0-9]*|"")
       http="0"
@@ -684,7 +748,7 @@ if key and "{{" not in key:
       ;;
   esac
   return 1
-}
+)
 
 cc_log_webhook_ping() {
   local raw="$1"
@@ -1413,6 +1477,7 @@ cc_watchdog_state_dir() {
     printf '%s' "${volume}/runs/.ttl-${pod}"
     return 0
   fi
+  # Last resort only. Runpod always sets RUNPOD_POD_ID, so pods do not share this path.
   printf '%s' "${volume}/runs/.ttl-interactive"
 }
 
@@ -1442,8 +1507,8 @@ cc_watchdog_start() {
     if [[ -n "$run_dir" && -z "${CC_RUN_LOG:-}" ]]; then
       printf '%s\n' "TTL ${CC_TTL_S}s expired. Terminate the pod." >>"${run_dir}/log.txt" || true
     fi
-    cc_terminate_self
-    return 0
+    cc_terminate_self || true
+    exit 1
   fi
   (
     sleep "$remain"

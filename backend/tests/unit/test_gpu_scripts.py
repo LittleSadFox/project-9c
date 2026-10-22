@@ -124,6 +124,20 @@ exit 1
         encoding="utf-8",
     )
     nvidia.chmod(0o755)
+    docker = _SHIM_DIR / "docker"
+    docker.write_text(
+        f"""#!/usr/bin/env bash
+printf '%s %s\\n' docker "$*" >> "{log}"
+if [[ "$1" == "manifest" && "$2" == "inspect" ]]; then
+  echo '{{"schemaVersion":2}}'
+  exit 0
+fi
+echo "ERROR: shim docker blocked network" >&2
+exit 1
+""",
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
     return _SHIM_DIR
 
 
@@ -1494,6 +1508,175 @@ def test_pod_up_accepts_image_digest() -> None:
     assert payload["imageName"] == digest
 
 
+def _docker_inspect(tmp_path: Path, *, ok: bool, log: Path | None = None) -> Path:
+    log = log or (tmp_path / "docker.log")
+    docker = tmp_path / "docker"
+    rc = "0" if ok else "1"
+    docker.write_text(
+        f"""#!/usr/bin/env bash
+printf 'argv=%s\\n' "$*" >> "{log}"
+if [[ "$1" == "manifest" && "$2" == "inspect" ]]; then
+  printf 'image=%s\\n' "${{3:-}}" >> "{log}"
+  exit {rc}
+fi
+echo "ERROR: unexpected docker command" >&2
+exit 1
+""",
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    return log
+
+
+def _pod_up_curl_log(tmp_path: Path, hits: Path) -> None:
+    curl = tmp_path / "curl"
+    curl.write_text(
+        f"""#!/usr/bin/env bash
+printf 'argv=%s\\n' "$*" >> "{hits}"
+method=GET
+out=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -X) method="$2"; shift 2 ;;
+    -o) out="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf 'method=%s\\n' "$method" >> "{hits}"
+if [[ -n "$out" && "$out" != "/dev/null" ]]; then
+  if [[ "$method" == "POST" ]]; then
+    printf '%s\\n' '{{"id":"pod-ok"}}' >"$out"
+  else
+    printf '%s\\n' '{{"id":"auth"}}' >"$out"
+  fi
+fi
+printf '200'
+exit 0
+""",
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+
+
+def test_pod_up_refuses_missing_ghcr_image(tmp_path: Path) -> None:
+    docker_log = _docker_inspect(tmp_path, ok=False)
+    hits = tmp_path / "runpod-curl.log"
+    _pod_up_curl_log(tmp_path, hits)
+    result = _run(
+        [str(POD_UP), "--job", "gpu_tests", "--ref", SHA40],
+        env={"RUNPOD_API_KEY": "broken-key"},
+        bin_dir=tmp_path,
+    )
+    assert result.returncode != 0
+    assert "not on GHCR" in result.stderr
+    assert "No pod was created" in result.stderr
+    assert "pod_id=" not in result.stdout
+    logged = hits.read_text(encoding="utf-8") if hits.is_file() else ""
+    assert "/pods" not in logged
+    assert "method=POST" not in logged
+    assert (
+        f"image=ghcr.io/littlesadfox/climbing-coach-gpu:{SHA40}"
+        in docker_log.read_text(encoding="utf-8")
+    )
+
+
+def test_pod_up_accepts_existing_ghcr_image(tmp_path: Path) -> None:
+    _docker_inspect(tmp_path, ok=True)
+    hits = tmp_path / "runpod-curl.log"
+    _pod_up_curl_log(tmp_path, hits)
+    result = _run(
+        [str(POD_UP), "--job", "gpu_tests", "--ref", SHA40],
+        env={"RUNPOD_API_KEY": "ok-key"},
+        bin_dir=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "pod_id=pod-ok" in result.stdout
+    logged = hits.read_text(encoding="utf-8")
+    assert "method=POST" in logged
+    assert "/pods" in logged
+
+
+def test_pod_up_preflight_checks_digest_and_refuses_missing(tmp_path: Path) -> None:
+    digest = (
+        "ghcr.io/littlesadfox/climbing-coach-gpu@"
+        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    )
+    docker_log = _docker_inspect(tmp_path, ok=False)
+    hits = tmp_path / "runpod-curl.log"
+    _pod_up_curl_log(tmp_path, hits)
+    result = _run(
+        [str(POD_UP), "--job", "gpu_tests", "--ref", SHA40],
+        env={"RUNPOD_API_KEY": "broken-key", "CC_GPU_IMAGE": digest},
+        bin_dir=tmp_path,
+    )
+    assert result.returncode != 0
+    assert "not on GHCR" in result.stderr
+    assert "pod_id=" not in result.stdout
+    logged = hits.read_text(encoding="utf-8") if hits.is_file() else ""
+    assert "/pods" not in logged
+    assert f"image={digest}" in docker_log.read_text(encoding="utf-8")
+
+
+def test_verify_gpu_image_head_refuses_missing_and_keeps_token_off_argv(
+    tmp_path: Path,
+) -> None:
+    hits = tmp_path / "ghcr-curl.log"
+    tmpdir = tmp_path / "ghcr-tmp"
+    tmpdir.mkdir()
+    token = "ghs_not_a_real_token"
+    curl = tmp_path / "curl"
+    curl.write_text(
+        f"""#!/usr/bin/env bash
+printf 'argv=%s\\n' "$*" >> "{hits}"
+cfg=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --config)
+      cfg="$2"
+      printf 'cfg=%s\\n' "$cfg" >> "{hits}"
+      if [[ -f "$cfg" ]]; then
+        stat -c 'mode=%a' "$cfg" >> "{hits}" 2>/dev/null \
+          || stat -f 'mode=%Lp' "$cfg" >> "{hits}"
+        if grep -q 'Authorization: Bearer' "$cfg"; then
+          printf 'auth=1\\n' >> "{hits}"
+        fi
+      fi
+      shift 2
+      ;;
+    *) shift ;;
+  esac
+done
+printf '404'
+exit 0
+""",
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+    result = _run(
+        [
+            "bash",
+            "-c",
+            f"source {LIB}; "
+            f'export PATH="{tmp_path}:/usr/bin:/bin"; '
+            f'cc_ghcr_manifest_head "ghcr.io/littlesadfox/climbing-coach-gpu:{SHA40}"; '
+            "echo head_rc=$?",
+        ],
+        env={"TMPDIR": str(tmpdir), "GITHUB_TOKEN": token},
+        bin_dir=tmp_path,
+    )
+    assert result.returncode != 0
+    leftover = [path for path in tmpdir.iterdir() if path.is_file()]
+    assert leftover == []
+    logged = hits.read_text(encoding="utf-8")
+    assert "mode=600" in logged
+    assert "auth=1" in logged
+    assert "--config" in logged
+    assert token not in logged
+    assert token not in result.stdout
+    assert token not in result.stderr
+    assert "Authorization" not in logged.split("argv=")[-1]
+
+
 def test_pod_up_keeps_caller_volume_id() -> None:
     result = _run(
         [str(POD_UP), "--job", "gpu_tests", "--ref", SHA40, "--dry-run"],
@@ -1514,6 +1697,71 @@ def test_pod_up_registry_get_refuses_on_401(tmp_path: Path) -> None:
     assert result.returncode != 0
     assert "containerregistryauth" in result.stderr
     assert "pod_id=" not in result.stdout
+
+
+def test_wait_job_timeout_runs_pod_down_for_pod_id_only(tmp_path: Path) -> None:
+    _fake_aws_get_object(
+        tmp_path,
+        body="running\n",
+        expected_bucket="vol-1",
+        expected_keys=("runs/job-1/status", "runs/job-1/metrics.json"),
+    )
+    hits = tmp_path / "pod_down.log"
+    down = tmp_path / "pod_down.sh"
+    down.write_text(
+        f"""#!/usr/bin/env bash
+printf 'argv=%s\\n' "$*" >> "{hits}"
+echo "terminated=$1"
+echo "pod_state=TERMINATED"
+exit 0
+""",
+        encoding="utf-8",
+    )
+    down.chmod(0o755)
+    key = "rp_not_a_real_key"
+    result = _run(
+        [str(WAIT_JOB), "job-1", "--pod-id", "pod-abc"],
+        env={
+            "CC_VOLUME_ID": "vol-1",
+            "CC_VOLUME_DC": "EU-RO-1",
+            "CC_TTL_S": "3600",
+            "CC_WAIT_TIMEOUT_S": "1",
+            "CC_WAIT_POLL_S": "1",
+            "CC_POD_DOWN": str(down),
+            "RUNPOD_API_KEY": key,
+        },
+        bin_dir=tmp_path,
+        timeout=10,
+    )
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "Timed out" in combined
+    assert "pod_down pod-abc" in result.stdout
+    assert hits.is_file()
+    logged = hits.read_text(encoding="utf-8")
+    assert logged.strip() == "argv=pod-abc"
+    assert "job-1" not in logged
+    assert "gpu_tests" not in logged
+    assert key not in combined
+    assert key not in logged
+    text = WAIT_JOB.read_text(encoding="utf-8")
+    finish = text.split("finish_wait()")[1].split("deadline=")[0]
+    assert "cc_valid_pod_id" in finish
+    assert '"$down" "$POD_ID"' in finish
+    assert "name=" not in finish
+    assert "JOB_ID" not in finish
+
+
+def test_wait_job_default_timeout_stays_ttl_plus_margin() -> None:
+    text = LIB.read_text(encoding="utf-8")
+    wait_fn = text.split("cc_wait_timeout_s()")[1].split("cc_early_cleanup()")[0]
+    assert "ttl + 300" in wait_fn
+    result = _run(
+        [str(WAIT_JOB), "job-1", "--dry-run"],
+        env={"CC_VOLUME_ID": "vol-1", "CC_VOLUME_DC": "EU-RO-1", "CC_TTL_S": "100"},
+    )
+    assert result.returncode == 0, result.stderr
+    assert "timeout_s=400" in result.stdout
 
 
 def test_wait_job_timeout_uses_ttl_plus_margin() -> None:
@@ -2734,7 +2982,7 @@ def test_terminate_stamp_other_pod_or_unset_job_does_not_suppress(
         bin_dir=tmp_path,
         timeout=5,
     )
-    assert watchdog.returncode == 0, watchdog.stderr
+    assert watchdog.returncode != 0
     assert _count_curl_hits(hits) >= 3
     assert _stamp_path("pod-wd").is_file()
     assert not Path("/tmp/.cc_terminated.pod-wd").exists()
@@ -3619,7 +3867,7 @@ def test_run_logged_fifo_uses_mktemp_dir() -> None:
     assert "cc_redact_stream <\"$fifo\" | tee -a" in logged
     assert "wait \"$reader\"" in logged
     assert "cc_redact_oneline" in text
-    assert "trap 'rm -f" not in text
+    assert "trap 'rm -f" not in logged
     assert "jq -c" in WAIT_JOB.read_text(encoding="utf-8")
     curl_fn = LIB.read_text(encoding="utf-8").split("cc_curl_post_json()")[1]
     curl_fn = curl_fn.split("cc_log_webhook_ping")[0]
@@ -3647,10 +3895,11 @@ def test_webhook_url_stays_off_curl_argv() -> None:
     curl_fn = text.split("cc_curl_post_json()")[1].split("cc_log_webhook_ping")[0]
     assert "--config" in curl_fn
     assert "chmod 600" in curl_fn
-    assert "trap" in curl_fn
-    assert "RETURN" in curl_fn
-    assert "EXIT" in curl_fn
-    assert "rm -f --" in curl_fn
+    assert "cc_curl_post_json() (" in text
+    assert "trap 'rm -f -- \"$cfg\"' EXIT" in curl_fn
+    assert "RETURN" not in curl_fn
+    assert "cc_run_exit_trap_text" not in text
+    assert "trap -p EXIT" not in curl_fn
 
 
 @pytest.mark.parametrize("job_id", [".hidden", "-dash", "has/slash", "has space"])
@@ -3825,6 +4074,127 @@ exit 0
     assert "Bearer" not in dumped
 
 
+def test_curl_post_json_parent_exit_trap_runs_once(tmp_path: Path) -> None:
+    marker = tmp_path / "parent-exit.marker"
+    tmpdir = tmp_path / "curl-tmp"
+    tmpdir.mkdir()
+    hits = tmp_path / "curl.log"
+    curl = tmp_path / "curl"
+    curl.write_text(
+        f"""#!/usr/bin/env bash
+printf 'argv=%s\\n' "$*" >> "{hits}"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --config)
+      printf 'cfg=%s\\n' "$2" >> "{hits}"
+      if [[ -f "$2" ]]; then
+        stat -c 'mode=%a' "$2" >> "{hits}" 2>/dev/null \
+          || stat -f 'mode=%Lp' "$2" >> "{hits}"
+      fi
+      shift 2
+      ;;
+    *) shift ;;
+  esac
+done
+printf '200'
+exit 0
+""",
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+    result = _run(
+        [
+            "bash",
+            "-c",
+            f"""
+set -euo pipefail
+source {LIB}
+trap 'printf "parent pid=%s\\n" "$$" >> "{marker}"' EXIT
+x="$(cc_curl_post_json "https://example.invalid/hook" '{{"ok":true}}')"
+printf 'ping=%s\\n' "$x"
+if [[ -f "{marker}" ]]; then
+  echo MARKER_DURING_PING
+fi
+leftover="$(find "{tmpdir}" -type f | wc -l | tr -d " ")"
+printf 'leftover=%s\\n' "$leftover"
+printf 'after_ping\\n'
+""",
+        ],
+        env={
+            "TMPDIR": str(tmpdir),
+            "CC_WEBHOOK_KEY": "whk_not_a_real_secret",
+        },
+        bin_dir=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "ping=status=200 curl_rc=0" in result.stdout
+    assert "MARKER_DURING_PING" not in result.stdout
+    assert "leftover=0" in result.stdout
+    assert "after_ping" in result.stdout
+    lines = marker.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    assert lines[0].startswith("parent pid=")
+    leftover = [path for path in tmpdir.iterdir() if path.is_file()]
+    assert leftover == []
+    logged = hits.read_text(encoding="utf-8")
+    assert "mode=600" in logged
+    assert "whk_not_a_real_secret" not in logged
+    assert "whk_not_a_real_secret" not in result.stdout
+    assert "whk_not_a_real_secret" not in result.stderr
+
+
+def test_curl_post_json_removes_config_on_curl_failure(tmp_path: Path) -> None:
+    tmpdir = tmp_path / "curl-tmp"
+    tmpdir.mkdir()
+    hits = tmp_path / "curl.log"
+    curl = tmp_path / "curl"
+    curl.write_text(
+        f"""#!/usr/bin/env bash
+printf 'argv=%s\\n' "$*" >> "{hits}"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --config)
+      printf 'cfg=%s\\n' "$2" >> "{hits}"
+      shift 2
+      ;;
+    *) shift ;;
+  esac
+done
+printf '000'
+exit 7
+""",
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+    result = _run(
+        [
+            "bash",
+            "-c",
+            f"""
+set -uo pipefail
+source {LIB}
+x="$(cc_curl_post_json "https://example.invalid/hook" '{{"ok":true}}')" || true
+printf 'ping=%s\\n' "$x"
+leftover="$(find "{tmpdir}" -type f | wc -l | tr -d " ")"
+printf 'leftover=%s\\n' "$leftover"
+""",
+        ],
+        env={
+            "TMPDIR": str(tmpdir),
+            "CC_WEBHOOK_KEY": "whk_not_a_real_secret",
+        },
+        bin_dir=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "ping=status=000 curl_rc=7" in result.stdout
+    assert "leftover=0" in result.stdout
+    leftover = [path for path in tmpdir.iterdir() if path.is_file()]
+    assert leftover == []
+    assert "whk_not_a_real_secret" not in result.stdout
+    assert "whk_not_a_real_secret" not in result.stderr
+    assert "whk_not_a_real_secret" not in hits.read_text(encoding="utf-8")
+
+
 def test_watchdog_without_job_id_persists_started_at(tmp_path: Path) -> None:
     vol = tmp_path / "vol"
     pod = "podttl1"
@@ -3876,8 +4246,8 @@ def test_expired_ttl_without_job_id_terminates_immediately(tmp_path: Path) -> No
         timeout=8,
     )
     assert time.monotonic() - started < 6
-    assert result.returncode == 0, result.stderr
-    assert "done" in result.stdout
+    assert result.returncode != 0
+    assert "done" not in result.stdout
     assert "TTL 1s expired" in result.stdout
     assert "terminate ok" in result.stdout
     assert (state / "started_at").read_text(encoding="utf-8") == before

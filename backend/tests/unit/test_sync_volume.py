@@ -6,11 +6,13 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[3]
 SYNC = ROOT / "scripts" / "sync_volume.sh"
 LIB = ROOT / "scripts" / "gpu" / "lib.sh"
 
-MAX_PUT = 5 * 1024 * 1024 * 1024
+MAX_PUT = 150 * 1024 * 1024
 S3_NOT_FOUND = (
     "An error occurred (NoSuchKey) when calling the GetObject operation: "
     "The specified key does not exist."
@@ -199,7 +201,7 @@ def test_sync_volume_prefix_scratch_never_touches_videos_manifest(
     )
 
 
-def test_sync_volume_refuses_file_over_5gb_before_upload(tmp_path: Path) -> None:
+def test_sync_volume_refuses_file_over_150mib_before_upload(tmp_path: Path) -> None:
     home, home_cfg, home_bytes = _home_aws_config(tmp_path)
     caller_cfg = tmp_path / "caller-aws-config"
     caller_cfg.write_text("[default]\nregion = us-east-1\n", encoding="utf-8")
@@ -217,12 +219,49 @@ def test_sync_volume_refuses_file_over_5gb_before_upload(tmp_path: Path) -> None
     assert result.returncode != 0
     combined = result.stdout + result.stderr
     assert "huge.mp4" in combined
-    assert "5GB" in combined
+    assert "150MiB" in combined
     assert str(MAX_PUT) in combined
+    assert "Multipart is not supported yet" in combined
     assert not log.exists() or "put-object" not in log.read_text(encoding="utf-8")
     assert (tmp_path / "s3-store" / "videos" / "manifest.json").read_bytes() == original
     assert home_cfg.read_bytes() == home_bytes
     assert caller_cfg.read_text(encoding="utf-8") == "[default]\nregion = us-east-1\n"
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    ["videos/.", "a//b", "..", "/abs", "trail/", ".", "videos/./x"],
+)
+def test_sync_volume_refuses_unsafe_prefix(tmp_path: Path, prefix: str) -> None:
+    home, home_cfg, home_bytes = _home_aws_config(tmp_path)
+    caller_cfg = tmp_path / "caller-aws-config"
+    caller_cfg.write_text("[default]\nregion = us-east-1\n", encoding="utf-8")
+    golden = tmp_path / "golden"
+    library = tmp_path / "library"
+    golden.mkdir()
+    library.mkdir()
+    _aws_stub(tmp_path)
+    env = _sync_env(tmp_path, home, golden, library, caller_cfg)
+    result = _run_sync([str(SYNC), "--prefix", prefix], env)
+    assert result.returncode != 0
+    assert "Invalid --prefix" in result.stderr
+    assert home_cfg.read_bytes() == home_bytes
+    assert caller_cfg.read_text(encoding="utf-8") == "[default]\nregion = us-east-1\n"
+
+
+def test_sync_volume_dry_run_prefix_scratch_prints_prefix(tmp_path: Path) -> None:
+    home, _home_cfg, _home_bytes = _home_aws_config(tmp_path)
+    caller_cfg = tmp_path / "caller-aws-config"
+    caller_cfg.write_text("[default]\nregion = us-east-1\n", encoding="utf-8")
+    golden = tmp_path / "golden"
+    library = tmp_path / "library"
+    golden.mkdir()
+    library.mkdir()
+    env = _sync_env(tmp_path, home, golden, library, caller_cfg)
+    result = _run_sync([str(SYNC), "--dry-run", "--prefix", "scratch"], env)
+    assert result.returncode == 0, result.stderr
+    assert "prefix=scratch" in result.stdout
+    assert "videos/manifest.json" not in result.stdout
 
 
 def test_sync_volume_script_never_assigns_aws_config_file() -> None:
@@ -235,7 +274,8 @@ def test_sync_volume_script_never_assigns_aws_config_file() -> None:
     assert "cc_aws_export_multipart_config" not in code
     assert "~/.aws/config" not in code
     assert "--prefix" in text
-    assert "5GB" in text
+    assert "150MiB" in text
+    assert "157286400" in text or "150 * 1024 * 1024" in text
     assert "BASH_SOURCE[0]" in text
     lib = LIB.read_text(encoding="utf-8")
     assert "cc_aws_export_multipart_config" not in lib

@@ -3,7 +3,7 @@
 # Copy file by file. Skip files already listed in <prefix>/manifest.json.
 # Do not invent credentials. Read ids and the S3 endpoint from the environment.
 # Do not change AWS_CONFIG_FILE. Do not write ~/.aws/config.
-# put-object is the only upload path. Refuse files over 5GB before any upload.
+# put-object is the only upload path. Refuse files over 150MiB before any upload.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -19,14 +19,17 @@ cc_valid_sync_prefix() {
   local prefix="$1"
   [[ -n "$prefix" ]] || return 1
   [[ "$prefix" != /* ]] || return 1
-  [[ "$prefix" != *..* ]] || return 1
   [[ "$prefix" != */ ]] || return 1
+  [[ "$prefix" != *..* ]] || return 1
+  [[ "$prefix" != *//* ]] || return 1
+  [[ "$prefix" != . && "$prefix" != */. ]] || return 1
+  [[ "$prefix" != */./* ]] || return 1
   [[ "$prefix" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,126}$ ]]
 }
 
 DRY_RUN=0
 PREFIX="videos"
-MAX_PUT_BYTES=$((5 * 1024 * 1024 * 1024))
+MAX_PUT_BYTES=$((150 * 1024 * 1024))
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -43,7 +46,7 @@ while [ $# -gt 0 ]; do
       echo "Usage: scripts/sync_volume.sh [--dry-run] [--prefix <path>]"
       echo "Default prefix is videos."
       echo "A prefix other than videos does not write videos/manifest.json."
-      echo "put-object refuses files over 5GB."
+      echo "put-object refuses files over 150MiB. Multipart is not supported yet."
       exit 0
       ;;
     *)
@@ -115,7 +118,7 @@ if golden.is_dir():
 if too_big:
     for rel, size in too_big:
         sys.stderr.write(
-            f"ERROR: {rel} is {size} bytes. put-object refuses files over 5GB ({max_put} bytes).\n"
+            f"ERROR: {rel} is {size} bytes. put-object refuses files over 150MiB ({max_put} bytes). Multipart is not supported yet.\n"
         )
     sys.exit(1)
 PY
@@ -196,7 +199,7 @@ for key, path in candidates:
     size = path.stat().st_size
     if size > max_put:
         print(
-            f"ERROR: {key} is {size} bytes. put-object refuses files over 5GB ({max_put} bytes).",
+            f"ERROR: {key} is {size} bytes. put-object refuses files over 150MiB ({max_put} bytes). Multipart is not supported yet.",
             file=sys.stderr,
         )
         sys.exit(1)
