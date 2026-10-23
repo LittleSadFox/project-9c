@@ -366,3 +366,33 @@ The no-job-id watchdog test sets `CC_TERMINATE_NO_SLEEP=1` and a 200 curl stub.
 
 See `TROUBLESHOOTING_LOG.md`.
 
+## 2026-10-22 — p1-A backend media and library
+
+Add Phase 1 slice A: library CRUD, streaming upload, ingest, media endpoints, trash, manual attempts, and cut.
+
+- Routes except pose. `routes/__init__.py` mounts them. Slice B adds one pose line.
+- Services: `library`, `ingest`, `attempts`. Ingest enqueues pose by job kind.
+- `FfmpegTool` calls ffmpeg and ffprobe with argument lists. `FakeMediaTool` stays for API tests.
+- Upload writes chunks to `tmp/` and bounds memory. A fixture generator builds the frame-code video for cut tests.
+- No 0002 migration. Schema stays `0001_init.sql`.
+- Do not start a pod. Do not touch `scripts/gpu/`, `docker/`, `AGENTS.md`, or `coding_plan.md`.
+- Local checks (ffmpeg 7.1.5 static build): ruff clean, mypy clean, pytest `not model and not gpu and not macos and not golden and not slow` → 227 passed, 1 skipped, 1 deselected.
+
+## 2026-10-22 — p1-A trash path and media skip
+
+`empty_trash` and `restore_trash` resolve the stored path with `safe_join(paths.trash, ...)`.
+A row whose path leaves `trash/` raises `bad_path` and deletes nothing.
+The `media` marker skips when `ffmpeg` or `ffprobe` is missing from PATH.
+
+## 2026-10-22 — p1-A rotation, restore, and trash root
+
+`make_proxy` maps display-matrix -90/270 to `transpose=1` and +90 to `transpose=2`.
+It writes `-display_rotation 0` as an input option so the proxy keeps no rotation metadata.
+A video restore brings back only the attempts stored in that trash payload.
+A stored trash path that resolves to `trash/` itself, or above it, raises `bad_path`.
+
+## 2026-10-23 — VFR fixture uses fps_mode
+
+`write_vfr_video` now uses `-fps_mode vfr`.
+Homebrew ffmpeg on macos-15 rejects `-vsync`.
+The pinned 7.1.5 static build accepts `-fps_mode` and still marks the clip as VFR.
