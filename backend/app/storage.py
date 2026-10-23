@@ -10,6 +10,8 @@ from uuid import uuid4
 
 from app.errors import AppError
 
+VIDEO_EXTS = {".mp4", ".mov", ".m4v"}
+
 LIBRARY_SUBDIRS = (
     "originals",
     "proxies",
@@ -97,7 +99,7 @@ class LibraryPaths:
                 child.unlink()
 
     def original_path(self, video_id: str, ext: str) -> Path:
-        return safe_join(self.originals, f"{video_id}.{safe_ext(ext)}")
+        return safe_join(self.originals, f"{video_id}.{sanitize_ext(ext)}")
 
     def proxy_path(self, video_id: str) -> Path:
         return safe_join(self.proxies, f"{video_id}.mp4")
@@ -126,6 +128,15 @@ def safe_join(root: Path, *parts: str) -> Path:
     return candidate
 
 
+def safe_ext(path: Path, allowed: set[str] | None = None) -> Path:
+    """Refuse a path whose suffix is not in the allowed set."""
+    suffix = path.suffix.lower()
+    allowed_exts = allowed if allowed is not None else VIDEO_EXTS
+    if suffix not in allowed_exts:
+        raise AppError("bad_path", 400, "The file type is not allowed.")
+    return path
+
+
 def atomic_write(path: Path, data: bytes) -> None:
     """Write to path.tmp and then replace the target."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -143,7 +154,7 @@ def move_to_trash(path: Path, trash_dir: Path) -> Path:
     return dest
 
 
-def safe_ext(ext: str) -> str:
+def sanitize_ext(ext: str) -> str:
     """Keep only a short alphanumeric extension."""
     cleaned = ext.lstrip(".").lower()
     if not cleaned or len(cleaned) > 8 or not cleaned.isalnum():

@@ -396,3 +396,228 @@ A stored trash path that resolves to `trash/` itself, or above it, raises `bad_p
 `write_vfr_video` now uses `-fps_mode vfr`.
 Homebrew ffmpeg on macos-15 rejects `-vsync`.
 The pinned 7.1.5 static build accepts `-fps_mode` and still marks the clip as VFR.
+
+## 2026-10-22 — p1-B pose
+
+Add the Phase 1 pose slice.
+
+- `core/halpe26.py`, `core/tracking.py`, `core/climber.py`, and `core/smoothing.py` stay numpy-only.
+- `RtmlibEstimator` calls rtmlib `YOLOX` and `RTMPose` from local ONNX files. It does not use `PoseTracker`.
+- `FixtureEstimator` feeds prepared boxes to tests. `CC_POSE_BACKEND=fixture` selects it.
+- Skip the pose call when the detector returns no boxes.
+- The detector runs every `det_every` frames. In-between frames use keypoint boxes.
+- Store tracks as `pose/<video_id>/<run_id>.npz`. The effective cache key is an edits hash.
+- `media/frames.py` is the OpenCV `FrameReader` over the proxy.
+- The pose job runs on the compute lane. A's ingest enqueues it.
+- Phase 1 routes: `GET /pose`, `GET /pose/keypoints` (gzip), and `GET /pose/persons`.
+- Scene edits, `PUT /pose/climber`, and the review queue stay in Phase 2.
+- `ml/jobs.py` registers `pose_bench`. It measures fps per mode and CUDA vs CPU mean error.
+- ONNX weights come from `download_models.py` into `CC_MODELS_DIR`. Do not commit them. On a pod that path is `/workspace/models`. Fetch the weights once before the first `pose_bench`.
+
+Out of scope:
+
+- Pod `pose_bench` run (Runpod bot, after merge)
+- 1080p transcode
+- Slice A media and library routes
+
+## 2026-10-22 — p1-B stream pose frames
+
+`handle_pose_job` no longer calls `list(reader.iter_frames())`.
+`process_frames` walks the iterator once.
+The frame count comes from the video row.
+A 2-minute 1280 proxy no longer sits in RAM as one list.
+
+`RtmlibEstimator` ignores `import-not-found` and `import-untyped` for rtmlib.
+`models.lock.json` pins YOLOX tiny/m/x and RTMPose s/m/x Halpe26 zip sha256 values.
+`download_models.py` checks the digest on the temp file before it replaces dest.
+A mismatch deletes the file and exits 1.
+A null digest is refused unless `--allow-unpinned` is set.
+
+A failed pose job rolls back the run transaction.
+No track rows stay.
+The run is written again as `failed`.
+Partial NPZ and `.tmp` files are removed.
+`GET /pose` serves only a `done` run.
+
+`pose_bench` loops `lightweight`, `balanced`, and `performance`.
+It passes `mode` into the estimator.
+Before a real bench it runs `download_models.py` into `CC_MODELS_DIR`.
+A present file with a matching sha256 is skipped.
+A mismatch deletes the file and fails the job.
+It stops reading the golden clip after `n_frames`.
+Parity fails when fewer than 90% of frames compare, or when the mean is above 1 px.
+`metrics.json` records `frames_total`, detection counts, and `frames_compared`.
+The next pod command is `python -m ml.jobs pose_bench --run-dir "$RUN_DIR"`.
+
+`current_estimator` keys the cache on mode.
+A pose job that changes `pose_mode` builds a new estimator.
+`pose_bench` does not use that cache. It builds one estimator per mode.
+
+Zip extract writes a unique sibling temp folder, then replaces the dest.
+A reused folder is checked against zip member sizes and re-extracted on a mismatch.
+Download temps include the pid and job id so two pods do not collide.
+
+## 2026-10-22 — p1-B pose_bench clip and pairing
+
+`pose_bench` no longer opens the first `.mp4`/`.mov` in `CC_GOLDEN_DIR`.
+It takes a filename in `CC_BENCH_CLIP` or `--clip`.
+The name goes through `safe_join` and `safe_ext` under `CC_GOLDEN_DIR`.
+A path, `..`, or a file outside that folder is refused.
+The default name is `sample1.mp4`.
+`CC_BENCH_START` / `--start-frame` sets the first proxy frame.
+
+The bench transcodes that clip with `make_upright_u8_proxy`.
+ffmpeg applies the rotation tag and writes 8-bit `yuv420p` H.264.
+OpenCV then reads the proxy, not the raw 10-bit `.mov`.
+
+`compare_keypoints` matches people in one frame by box IoU, then by nearest centroid.
+It does not zip people by list order.
+
+Debug numbers are on by default.
+`--no-debug` or `CC_POSE_BENCH_DEBUG=0` turns them off.
+The debug block writes clip name, size, sha256, codecs, pixel formats, rotation, frame shape, dtype, BGR channel means, and boxes.
+It does not write a frame or a drawn image.
+
+The upright 8-bit proxy is written to a pod-local temp folder.
+`pose_bench` does not pass `run_dir/artifacts`.
+A `finally` block deletes the proxy after the frames are in memory.
+
+`pod_up.sh` passes `CC_BENCH_CLIP` and `CC_BENCH_START` for `pose_bench`.
+The default is `sample1.mp4` and start frame `0`.
+
+The 90% compared-frame rule and the 1 px mean stay in place.
+
+A committed `testsrc` clip (`backend/tests/fixtures/pose/rotated_10bit_testsrc.mp4`) is HEVC Main 10 with a −90° display matrix.
+Tests that need ffmpeg use the `media` marker.
+
+The code default is `sample1.mp4` and start frame `0`.
+Env and args only override those defaults.
+The default name still goes through `safe_join` and `safe_ext`.
+`python -m ml.jobs pose_bench --run-dir "$RUN_DIR"` with no extra flags uses `sample1.mp4`, start frame 0, 100 frames, `min-compared-frac` 0.9, and debug on.
+
+Ubuntu CI sets `CC_REQUIRE_MEDIA=1`.
+A skipped `media` test then fails when ffmpeg is missing or too old.
+The macOS CI job and `pod-layout` leave that flag unset.
+
+Rerun on a pod launched from main's `pod_up.sh`:
+
+```text
+python -m ml.jobs pose_bench --run-dir "$RUN_DIR"
+```
+
+## 2026-10-22 — pose_bench diagnostics and TF32 off
+
+The parity gate stays the all-keypoint mean.
+`parity_ok` is true only when that mean is ≤ 1.0 px and at least 90% of frames compare.
+The gate does not filter by score.
+The gate does not use a kept-fraction floor.
+
+Each CUDA mode block in `metrics.json` now also records numbers only:
+
+- per-frame error: median, p95, max, and the five worst frames
+- each of the 26 Halpe names: mean error, mean CPU score, mean CUDA score
+- `mean_abs_px_confident` over keypoints with score ≥ `SCORE_THR` (0.3) on both devices
+- `keypoints_kept` and `keypoints_dropped`
+
+`pose_bench` CUDA sessions set `use_tf32=0`.
+The CPU and CUDA rtmlib paths match except the ONNX Runtime provider.
+Both use the same pose size, ImageNet BGR mean/std, float32 input, and `simcc_split_ratio=2.0`.
+rtmlib creates `InferenceSession(..., providers=[name])` with no session options.
+Ampere TF32 can move the SIMCC argmax on rtmpose-s by about 1 px.
+
+## 2026-10-22 — shared CUDA provider options
+
+`cuda_providers()` returns
+`[("CUDAExecutionProvider", {device_id: 0, use_tf32: 0}), "CPUExecutionProvider"]`.
+`RtmlibEstimator` and `pose_bench` both call that helper.
+rtmlib 0.0.16 builds the provider list from `device` alone.
+The estimator builds YOLOX and RTMPose as usual, then on CUDA replaces
+`tool.session` with `InferenceSession(onnx_path, providers=cuda_providers())`.
+CPU sessions stay as rtmlib built them.
+It does not swap `ort.InferenceSession`.
+`pose_bench` reads `use_tf32` from the live det and pose sessions.
+It writes those values under `cuda_provider_options`.
+`tf32_off_confirmed` is true only when both sessions report `"0"`.
+A mismatch writes a WARNING line. It does not change the parity gate.
+`pose_bench` fails a mode when det or pose `get_providers()[0]` is not
+`CUDAExecutionProvider`. That stops a silent CPU fallback from passing parity.
+
+The plain command is unchanged:
+
+```text
+python -m ml.jobs pose_bench --run-dir "$RUN_DIR"
+```
+
+It still uses `sample1.mp4`, start frame 0, 100 frames, `min-compared-frac` 0.9, and debug on.
+
+## 2026-10-22 — pose_bench live gate
+
+The live `pose_bench` job ran on 2026-10-22 (Asia/Shanghai).
+The job id is `cc-pose_bench-2c82036e-20261022T170415Z`.
+The ref that ran is `2c82036`.
+The live run was at `2c82036`.
+Approvals were at `16c2908`.
+This DLOG commit is documentation only.
+It has no code change.
+A confirming rerun at `16c2908` was skipped.
+CUDA was already confirmed on `2c82036`.
+
+The job ran `pose_bench` on `sample1.mp4` on an RTX 4090.
+The pod self-terminated.
+The webhook returned 200.
+Terminate ran once.
+Zero pods remain.
+There were 0 secret hits.
+
+Cost was about $0.12.
+The job ran about 8.3 min on an RTX 4090 at $0.89/hr.
+That cost is under the $10 escalate line.
+
+The gate is a mean of 1 px or less over all keypoints.
+At least 90% of frames must compare.
+Every mode passed.
+
+CUDA was confirmed on every mode.
+The provider is `CUDAExecutionProvider`.
+`tf32_off_confirmed` is true.
+Det and pose both report `use_tf32=0`.
+
+| mode | mean_abs_px | mean_abs_px_confident | compared | CUDA fps | CPU fps |
+| --- | --- | --- | --- | --- | --- |
+| lightweight | 0.0071 | 0.0068 | 100/100 | 59.7 | 3.11 |
+| balanced | 0.0376 | 0.0379 | 100/100 | 52.9 | 0.95 |
+| performance | 0.0149 | 0.0149 | 100/100 | 33.7 | 0.35 |
+
+Lightweight was 1.053 px at `9466729` before TF32 was turned off.
+With `use_tf32=0` it is 0.0071 px.
+
+Per-frame and worst-keypoint numbers are diagnostic only.
+The gate uses the mean only.
+
+- lightweight: median 0, p95 0.043, max 0.100. Worst keypoints: right_ear 0.042, right_eye 0.022, left_wrist 0.020, left_small_toe 0.018, left_elbow 0.017. Confident kept 2408 / dropped 192.
+- balanced: median 0, p95 0.063, max 2.234 on frame 87. Worst keypoints: left_elbow 0.606, right_eye 0.041, left_ear 0.037, left_hip 0.031, right_hip 0.028. Kept 2578 / dropped 22. The frame-87 max is diagnostic only. The mean stayed 0.038.
+- performance: median 0.0001, p95 0.045, max 0.120. Worst keypoints: left_wrist 0.077, left_small_toe 0.037, nose 0.031, left_eye 0.029, right_wrist 0.028. Kept 2599 / dropped 1.
+
+The app wrote no WARNING lines.
+ORT node-assignment `[W]` and cudnn_frontend `[E]` lines are normal CUDA load.
+They are not a CPU fallback.
+
+The run artifacts are text and metrics only.
+The run folder holds no footage.
+
+Merge of pull request #20 still waits on Actions billing and Ryan's CI decision.
+
+## 2026-10-23 — rebase safe_ext name clash
+
+`storage.py` had two `safe_ext` functions after the rebase onto #19.
+The Path suffix guard keeps the name `safe_ext`.
+The string cleaner is now `sanitize_ext`.
+Ingest and `original_path` call `sanitize_ext`.
+`pose_bench` still calls `safe_ext(path, VIDEO_EXTS)`.
+
+## 2026-10-23 — watchdog now stamp is one read
+
+`cc_watchdog_start` reads `now` once before it checks `started_at`.
+A non-numeric stamp is rewritten to that same `now`.
+`remain` then equals `CC_TTL_S`.
+A clock tick no longer sends a fresh stamp down the expired foreground path.

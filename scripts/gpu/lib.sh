@@ -242,6 +242,17 @@ cc_build_pod_env_json() {
   else
     env="$(jq --arg job "$job" '. + {CC_JOB: $job}' <<<"$env")"
   fi
+  if [[ "$job" == "pose_bench" || "$interactive" == "1" ]]; then
+    env="$(
+      jq --arg clip "${CC_BENCH_CLIP:-sample1.mp4}" --arg start "${CC_BENCH_START:-0}" \
+        '. + {CC_BENCH_CLIP: $clip, CC_BENCH_START: $start}' <<<"$env"
+    )"
+    if [[ -n "${CC_POSE_BENCH_DEBUG:-}" ]]; then
+      env="$(
+        jq --arg dbg "$CC_POSE_BENCH_DEBUG" '. + {CC_POSE_BENCH_DEBUG: $dbg}' <<<"$env"
+      )"
+    fi
+  fi
   cc_assert_no_account_key "$env"
   printf '%s\n' "$env"
 }
@@ -1543,19 +1554,19 @@ cc_watchdog_start() {
   run_dir="$(cc_watchdog_state_dir "${1:-}")"
   cc_require_ttl
   local started now remain
+  now="$(date +%s)"
   started=""
   if [[ -n "$run_dir" && -e "${run_dir}/started_at" ]]; then
     started="$(tr -d '[:space:]' <"${run_dir}/started_at" 2>/dev/null || true)"
   fi
   # Only a non-octal digit timestamp may enter $(( )). Other content is missing.
   if [[ ! "$started" =~ ^[1-9][0-9]*$ ]]; then
-    started="$(date +%s)"
+    started="$now"
     if [[ -n "$run_dir" ]]; then
       mkdir -p "$run_dir" || true
       printf '%s\n' "$started" >"${run_dir}/started_at" || true
     fi
   fi
-  now="$(date +%s)"
   (( 10#$started <= now )) || started="$now"
   remain=$((CC_TTL_S - (now - 10#$started)))
   (( remain <= CC_TTL_S )) || remain=$CC_TTL_S

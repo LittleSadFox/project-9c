@@ -777,6 +777,38 @@ def test_pod_up_dry_run_sets_ttl_and_secret_refs() -> None:
     assert "NVIDIA GeForce RTX 5090" not in gpus
 
 
+def test_pod_up_pose_bench_passes_bench_clip() -> None:
+    result = _run(
+        [str(POD_UP), "--job", "pose_bench", "--ref", SHA40, "--dry-run"],
+        env={"RUNPOD_API_KEY": "test-key-do-not-inject"},
+    )
+    assert result.returncode == 0, result.stderr
+    env = _payload(result.stdout)["env"]
+    assert isinstance(env, dict)
+    assert env["CC_JOB"] == "pose_bench"
+    assert env["CC_BENCH_CLIP"] == "sample1.mp4"
+    assert env["CC_BENCH_START"] == "0"
+    assert "CC_POSE_BENCH_DEBUG" not in env
+
+
+def test_pod_up_pose_bench_passes_caller_clip() -> None:
+    result = _run(
+        [str(POD_UP), "--job", "pose_bench", "--ref", SHA40, "--dry-run"],
+        env={
+            "RUNPOD_API_KEY": "test-key-do-not-inject",
+            "CC_BENCH_CLIP": "sample2.mp4",
+            "CC_BENCH_START": "30",
+            "CC_POSE_BENCH_DEBUG": "1",
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    env = _payload(result.stdout)["env"]
+    assert isinstance(env, dict)
+    assert env["CC_BENCH_CLIP"] == "sample2.mp4"
+    assert env["CC_BENCH_START"] == "30"
+    assert env["CC_POSE_BENCH_DEBUG"] == "1"
+
+
 def test_pod_up_ttl_flag_overrides_default() -> None:
     result = _run(
         [str(POD_UP), "--interactive", "--ref", SHA40, "--ttl", "10m", "--dry-run"],

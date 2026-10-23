@@ -19,6 +19,14 @@ def handle_noop(ctx: JobContext) -> None:
         time.sleep(0.02)
 
 
+def handle_pose(ctx: JobContext) -> None:
+    """Compute-lane pose job. Registered here so A's ingest can enqueue it."""
+    from app.services.pose_service import handle_pose_job
+
+    handle_pose_job(ctx)
+
+
 HANDLERS: dict[str, JobHandler] = {
     "noop": handle_noop,
+    "pose": handle_pose,
 }

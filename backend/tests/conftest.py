@@ -34,9 +34,16 @@ def _required() -> set[str]:
     return {part.strip() for part in raw.split(",") if part.strip()}
 
 
+def _require_media() -> bool:
+    raw = os.environ.get("CC_REQUIRE_MEDIA", "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def _skip_or_fail(name: str, reason: str) -> None:
     if name in _required():
         pytest.fail(f"CC_REQUIRE includes {name}, but the need is missing: {reason}")
+    if name == "media" and _require_media():
+        pytest.fail(f"CC_REQUIRE_MEDIA=1, but the need is missing: {reason}")
     pytest.skip(reason)
 
 

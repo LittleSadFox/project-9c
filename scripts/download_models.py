@@ -11,6 +11,7 @@ import shutil
 import sys
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 REFUSED_SUFFIXES = (".pkl", ".pickle", ".joblib")
@@ -47,11 +48,43 @@ def dest_root() -> Path:
     return Path.home() / "Library" / "Application Support" / "ClimbingCoach" / "models"
 
 
-def download_one(entry: dict[str, object], models_dir: Path) -> Path:
+def expected_sha256(entry: dict[str, object], *, allow_unpinned: bool) -> str | None:
+    name = str(entry["name"])
+    raw = entry.get("sha256")
+    if raw is None or raw == "":
+        if not allow_unpinned:
+            raise DownloadError(
+                f"{name}: sha256 is null. Pass --allow-unpinned to fetch an unpinned model."
+            )
+        return None
+    return str(raw)
+
+
+def _delete_if_exists(path: Path) -> None:
+    if path.exists():
+        path.unlink()
+
+
+def download_temp_path(
+    dest: Path, *, pid: int | None = None, job: str | None = None, token: str | None = None
+) -> Path:
+    """Unique sibling temp name so two pods on one volume do not collide."""
+    process = os.getpid() if pid is None else pid
+    job_id = job if job is not None else os.environ.get("CC_JOB_ID") or os.environ.get("CC_JOB") or "local"
+    stamp = token if token is not None else uuid.uuid4().hex[:8]
+    return dest.with_name(f"{dest.name}.{process}.{job_id}.{stamp}.tmp")
+
+
+def download_one(
+    entry: dict[str, object],
+    models_dir: Path,
+    *,
+    allow_unpinned: bool = False,
+) -> Path:
     name = str(entry["name"])
     url = str(entry["url"])
     dest = models_dir / str(entry["dest"])
-    expected = entry.get("sha256")
+    expected = expected_sha256(entry, allow_unpinned=allow_unpinned)
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists() and expected:
         actual = sha256_file(dest)
@@ -60,21 +93,24 @@ def download_one(entry: dict[str, object], models_dir: Path) -> Path:
             raise DownloadError(f"{name} sha256 is {actual}, expected {expected}.")
         print(f"{name}: already present")
         return dest
-    tmp = dest.with_name(dest.name + ".tmp")
+    if dest.exists() and expected is None:
+        print(f"{name}: already present (unpinned)")
+        return dest
+    tmp = download_temp_path(dest)
     print(f"{name}: download {url}")
     try:
         with urllib.request.urlopen(url, timeout=120) as response, tmp.open("wb") as handle:
             shutil.copyfileobj(response, handle)
     except urllib.error.URLError as exc:
-        if tmp.exists():
-            tmp.unlink()
+        _delete_if_exists(tmp)
         raise DownloadError(f"{name}: download failed: {exc}") from exc
-    os.replace(tmp, dest)
-    actual = sha256_file(dest)
+    actual = sha256_file(tmp)
     if expected and actual != expected:
-        dest.unlink()
+        _delete_if_exists(tmp)
+        _delete_if_exists(dest)
         raise DownloadError(f"{name} sha256 is {actual}, expected {expected}.")
-    if not expected:
+    os.replace(tmp, dest)
+    if expected is None:
         print(f"{name}: sha256 {actual} (add this digest to models.lock.json)")
     else:
         print(f"{name}: ok")
@@ -128,6 +164,11 @@ def main(argv: list[str] | None = None) -> int:
         metavar="RUN_ID",
         help="Import a pod-trained model from the network volume.",
     )
+    parser.add_argument(
+        "--allow-unpinned",
+        action="store_true",
+        help="Allow a lock entry with a null sha256.",
+    )
     args = parser.parse_args(argv)
     models_dir = dest_root()
     models_dir.mkdir(parents=True, exist_ok=True)
@@ -136,7 +177,7 @@ def main(argv: list[str] | None = None) -> int:
             import_from_volume(args.from_volume, models_dir)
         else:
             for entry in load_lock():
-                download_one(entry, models_dir)
+                download_one(entry, models_dir, allow_unpinned=args.allow_unpinned)
     except DownloadError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

@@ -117,6 +117,10 @@ jobs:
           mypy backend/app
           mypy --ignore-missing-imports ml
 
+      - name: Require media on Ubuntu
+        if: matrix.os == 'ubuntu-24.04'
+        run: echo "CC_REQUIRE_MEDIA=1" >> "$GITHUB_ENV"
+
       - name: Pytest unmarked and media
         if: hashFiles('backend/tests/**/*.py') != ''
         run: >
