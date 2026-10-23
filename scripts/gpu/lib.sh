@@ -1554,19 +1554,19 @@ cc_watchdog_start() {
   run_dir="$(cc_watchdog_state_dir "${1:-}")"
   cc_require_ttl
   local started now remain
+  now="$(date +%s)"
   started=""
   if [[ -n "$run_dir" && -e "${run_dir}/started_at" ]]; then
     started="$(tr -d '[:space:]' <"${run_dir}/started_at" 2>/dev/null || true)"
   fi
   # Only a non-octal digit timestamp may enter $(( )). Other content is missing.
   if [[ ! "$started" =~ ^[1-9][0-9]*$ ]]; then
-    started="$(date +%s)"
+    started="$now"
     if [[ -n "$run_dir" ]]; then
       mkdir -p "$run_dir" || true
       printf '%s\n' "$started" >"${run_dir}/started_at" || true
     fi
   fi
-  now="$(date +%s)"
   (( 10#$started <= now )) || started="$now"
   remain=$((CC_TTL_S - (now - 10#$started)))
   (( remain <= CC_TTL_S )) || remain=$CC_TTL_S

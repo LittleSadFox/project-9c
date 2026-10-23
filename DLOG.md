@@ -614,3 +614,10 @@ The Path suffix guard keeps the name `safe_ext`.
 The string cleaner is now `sanitize_ext`.
 Ingest and `original_path` call `sanitize_ext`.
 `pose_bench` still calls `safe_ext(path, VIDEO_EXTS)`.
+
+## 2026-10-23 — watchdog now stamp is one read
+
+`cc_watchdog_start` reads `now` once before it checks `started_at`.
+A non-numeric stamp is rewritten to that same `now`.
+`remain` then equals `CC_TTL_S`.
+A clock tick no longer sends a fresh stamp down the expired foreground path.

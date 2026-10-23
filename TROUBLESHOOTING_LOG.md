@@ -25,6 +25,14 @@ Copy this block for a new entry.
 
 ## Entries
 
+### 2026-10-23 — invalid started_at hit expired TTL on a clock tick
+
+- Symptom: Ubuntu CI failed `test_started_at_injection_does_not_run`. `cc_watchdog_start` exited 1 after `terminate ok`.
+- Where it failed: CI ubuntu-24.04
+- Cause: A non-numeric `started_at` was rewritten with `date +%s`, then `now` was read again. A 1s tick made `remain` 0 when `CC_TTL_S=1`.
+- Fix: Read `now` once first. Rewrite an invalid stamp to that same `now` so `remain` is `CC_TTL_S`. A truly expired stamp still terminates in the foreground.
+- Prevention: Do not take a second wall-clock read after rewriting `started`.
+
 ### 2026-10-22 — ffmpeg rejects `.mp4.tmp` as an output name
 
 - Symptom: Ingest failed with `Unable to choose an output format for '.../proxy.mp4.tmp'`.
