@@ -44,11 +44,11 @@ export function IconButton({ label, onClick, children }) {
   );
 }
 
-export function Button({ variant = "glass", type = "button", onClick, children }) {
+export function Button({ variant = "glass", type = "button", onClick, children, disabled = false }) {
   const extra =
     variant === "primary" ? "lg-button-primary" : variant === "danger" ? "lg-button-danger" : "";
   return (
-    <button type={type} className={`lg-button ${extra}`.trim()} onClick={onClick}>
+    <button type={type} className={`lg-button ${extra}`.trim()} onClick={onClick} disabled={disabled}>
       {children}
     </button>
   );

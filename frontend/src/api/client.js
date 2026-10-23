@@ -8,6 +8,18 @@ export class ApiError extends Error {
   }
 }
 
+export function toQuery(params = {}) {
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === null || value === "") {
+      continue;
+    }
+    search.set(key, String(value));
+  }
+  const text = search.toString();
+  return text ? `?${text}` : "";
+}
+
 export async function request(path, options = {}) {
   const response = await fetch(path, {
     credentials: "same-origin",
@@ -48,6 +60,7 @@ export function uploadFile(path, file, onProgress) {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", path);
     xhr.withCredentials = true;
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable && onProgress) {
         onProgress(event.loaded / event.total);
