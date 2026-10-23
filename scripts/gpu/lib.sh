@@ -319,10 +319,138 @@ cc_require_registry_auth() {
 }
 
 cc_require_image_tag() {
-  local image="${CC_GPU_IMAGE:-}"
-  if [[ -n "$image" && "$image" != *:* ]]; then
-    cc_fail "CC_GPU_IMAGE must include a tag. Use a sha tag after the GHCR push."
+  local ref="${1:-${CC_GIT_REF:-}}"
+  local image
+  # Call in this shell so the derived CC_GPU_IMAGE export survives.
+  cc_resolve_gpu_image "$ref" >/dev/null
+  image="${CC_GPU_IMAGE:-}"
+  if [[ -z "$image" ]]; then
+    return 0
   fi
+  if [[ "$image" == *@sha256:[0-9a-fA-F]* ]]; then
+    return 0
+  fi
+  if [[ "$image" != *:* ]]; then
+    cc_fail "CC_GPU_IMAGE must include a tag or digest. Use a git-sha tag after the GHCR push."
+  fi
+  if [[ "$image" == *:latest || "$image" == *:latest@* ]]; then
+    if [[ "${CC_GPU_IMAGE_ALLOW_LATEST:-}" == "1" ]]; then
+      return 0
+    fi
+    cc_fail "CC_GPU_IMAGE must not use :latest. Set a git-sha tag or digest, or set CC_GPU_IMAGE_ALLOW_LATEST=1."
+  fi
+}
+
+cc_ghcr_manifest_url() {
+  local image="${1:-}"
+  local rest name ref
+  [[ "$image" == ghcr.io/* ]] || return 1
+  rest="${image#ghcr.io/}"
+  if [[ "$rest" == *@sha256:* ]]; then
+    name="${rest%@sha256:*}"
+    ref="sha256:${rest##*@sha256:}"
+  elif [[ "$rest" == *:* ]]; then
+    name="${rest%:*}"
+    ref="${rest##*:}"
+  else
+    return 1
+  fi
+  [[ -n "$name" && -n "$ref" ]] || return 1
+  [[ "$name" != *:* && "$name" != *@* ]] || return 1
+  printf 'https://ghcr.io/v2/%s/manifests/%s' "$name" "$ref"
+}
+
+cc_ghcr_manifest_head() {
+  local image="${1:-}"
+  local url
+  command -v curl >/dev/null 2>&1 || return 2
+  command -v python3 >/dev/null 2>&1 || return 2
+  url="$(cc_ghcr_manifest_url "$image")" || return 2
+  # Subshell so the EXIT trap cannot run the caller's cleanup.
+  (
+    cfg="$(mktemp)"
+    trap 'rm -f -- "$cfg"' EXIT
+    # Token stays in this 0600 file. It does not go on curl argv or in logs.
+    if ! python3 -c '
+import base64
+import os
+import sys
+
+def esc(value):
+    return value.replace("\\", "\\\\").replace("\"", "\\\"")
+
+url = esc(sys.argv[1])
+sys.stdout.write("url = \"%s\"\n" % url)
+sys.stdout.write(
+    "header = \"Accept: application/vnd.oci.image.index.v1+json, "
+    "application/vnd.docker.distribution.manifest.list.v2+json, "
+    "application/vnd.oci.image.manifest.v1+json, "
+    "application/vnd.docker.distribution.manifest.v2+json\"\n"
+)
+token = (
+    os.environ.get("CC_GHCR_TOKEN")
+    or os.environ.get("GITHUB_TOKEN")
+    or os.environ.get("GH_TOKEN")
+    or ""
+)
+if token:
+    for ch in ("\n", "\r", "\"", "\\"):
+        if ch in token:
+            sys.stderr.write("ERROR: GHCR token contains an invalid character.\n")
+            sys.exit(1)
+    encoded = base64.b64encode(token.encode("ascii")).decode("ascii")
+    sys.stdout.write("header = \"Authorization: Bearer %s\"\n" % encoded)
+' "$url" >"$cfg"; then
+      exit 1
+    fi
+    chmod 600 "$cfg"
+    http="$(curl -sS --max-time 15 -o /dev/null -w '%{http_code}' -I --config "$cfg" 2>/dev/null)" || true
+    rm -f -- "$cfg"
+    case "$http" in
+      200)
+        exit 0
+        ;;
+      404)
+        echo "ERROR: image not on GHCR (${image})." >&2
+        exit 1
+        ;;
+      401|403)
+        echo "ERROR: GHCR auth failed." >&2
+        exit 1
+        ;;
+      000|"")
+        echo "ERROR: GHCR unreachable." >&2
+        exit 1
+        ;;
+      *)
+        echo "ERROR: GHCR returned HTTP ${http}." >&2
+        exit 1
+        ;;
+    esac
+  )
+}
+
+cc_verify_gpu_image_exists() {
+  # Fail closed before POST /pods. Do not create a pod for a missing tag.
+  local image="${CC_GPU_IMAGE:-}"
+  [[ -n "$image" ]] || cc_fail "CC_GPU_IMAGE is empty. Cannot verify the GPU image. No pod was created."
+
+  if command -v docker >/dev/null 2>&1; then
+    if docker manifest inspect "$image" >/dev/null 2>&1; then
+      return 0
+    fi
+    cc_fail "GPU image ${image} is not on GHCR. Push climbing-coach-gpu for this sha, or set CC_GPU_IMAGE to an existing tag or digest. No pod was created."
+  fi
+
+  local head_rc=0
+  cc_ghcr_manifest_head "$image" || head_rc=$?
+  if [[ "$head_rc" -eq 0 ]]; then
+    return 0
+  fi
+  if [[ "$head_rc" -eq 2 ]]; then
+    cc_fail "Cannot verify GPU image ${image}. Install docker or curl. No pod was created."
+  fi
+  cc_fail "No pod was created."
 }
 
 cc_verify_registry_auth() {
@@ -428,6 +556,37 @@ PY
 cc_valid_pod_id() {
   local id="$1"
   [[ "$id" =~ ^[A-Za-z0-9_-]{4,64}$ ]]
+}
+
+cc_valid_job_id() {
+  local id="${1:-}"
+  [[ -n "$id" ]] || return 1
+  [[ "${#id}" -ge 1 && "${#id}" -le 64 ]] || return 1
+  [[ "$id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]
+}
+
+cc_require_job_id() {
+  local id="${1:-}"
+  [[ -n "$id" ]] || cc_fail "Job id is empty."
+  if ! cc_valid_job_id "$id"; then
+    cc_fail "Invalid job id. Use [A-Za-z0-9._-], 1-64 characters, no leading dot or dash."
+  fi
+}
+
+cc_gpu_image_repo() {
+  printf '%s' "ghcr.io/littlesadfox/climbing-coach-gpu"
+}
+
+cc_resolve_gpu_image() {
+  # Set CC_GPU_IMAGE in the current shell. Do not call this in a subshell.
+  local ref="${1:-${CC_GIT_REF:-}}"
+  local image="${CC_GPU_IMAGE:-}"
+  if [[ -z "$image" && "$ref" =~ ^[0-9a-fA-F]{40}$ ]]; then
+    image="$(cc_gpu_image_repo):${ref}"
+    CC_GPU_IMAGE="$image"
+    export CC_GPU_IMAGE
+  fi
+  printf '%s' "${CC_GPU_IMAGE:-}"
 }
 
 cc_require_optarg() {
@@ -571,7 +730,9 @@ sys.stdout.write(text[:400])
 '
 }
 
-cc_curl_post_json() {
+cc_curl_post_json() (
+  # Subshell so the EXIT trap cannot run the caller's cleanup.
+  # Callers already capture output with $(...).
   local url="$1"
   local body="$2"
   local cfg http ec
@@ -583,6 +744,9 @@ cc_curl_post_json() {
     return 1
   fi
   cfg="$(mktemp)"
+  # Always remove the 0600 curl --config file. Do not log the path or the key.
+  # Do not save, chain, or restore the caller's EXIT trap.
+  trap 'rm -f -- "$cfg"' EXIT
   # URL and bearer stay in this 0600 file. They do not go on curl argv.
   python3 -c '
 import os
@@ -601,7 +765,7 @@ if key and "{{" not in key:
   # Keep curl stderr off the log. -S can print the host or the full URL.
   http="$(curl -sS --max-time 15 -o /dev/null -w '%{http_code}' -X POST \
     -H "Content-Type: application/json" -d "$body" --config "$cfg" 2>/dev/null)" || ec=$?
-  rm -f "$cfg"
+  rm -f -- "$cfg"
   case "$http" in
     *[!0-9]*|"")
       http="0"
@@ -614,7 +778,7 @@ if key and "{{" not in key:
       ;;
   esac
   return 1
-}
+)
 
 cc_log_webhook_ping() {
   local raw="$1"
@@ -860,14 +1024,61 @@ cc_run_logged() {
   return "$ec"
 }
 
+cc_proc_pgid() {
+  local pid="$1"
+  ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]' || true
+}
+
 cc_run_timeout() {
   local secs="$1"
   shift
-  if command -v timeout >/dev/null 2>&1; then
+  if [[ ! "$secs" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: timeout seconds must be a positive integer." >&2
+    return 2
+  fi
+  if [[ "${CC_TIMEOUT_FALLBACK:-0}" != "1" ]] && command -v timeout >/dev/null 2>&1; then
     timeout --signal=KILL "$secs" "$@"
     return $?
   fi
-  "$@"
+  if [[ "${CC_TIMEOUT_FALLBACK:-0}" != "1" ]] && command -v gtimeout >/dev/null 2>&1; then
+    gtimeout --signal=KILL "$secs" "$@"
+    return $?
+  fi
+  # Non-interactive bash does not give `cmd &` its own process group.
+  # macOS has no setsid. Start the child in a new group first.
+  # Group-kill only when that group is not this shell's group.
+  local pid waited=0 child_pgid caller_pgid caller_pid=$$
+  caller_pgid="$(cc_proc_pgid "$caller_pid")"
+  if command -v perl >/dev/null 2>&1; then
+    perl -e 'setpgrp; exec @ARGV' -- "$@" &
+    pid=$!
+  elif set -m; then
+    "$@" &
+    pid=$!
+    set +m
+  else
+    "$@" &
+    pid=$!
+  fi
+  while kill -0 "$pid" 2>/dev/null; do
+    if (( waited >= secs )); then
+      child_pgid="$(cc_proc_pgid "$pid")"
+      if [[ "$child_pgid" =~ ^[1-9][0-9]*$ ]] \
+        && [[ "$caller_pgid" =~ ^[1-9][0-9]*$ ]] \
+        && [[ "$child_pgid" != "$caller_pgid" ]] \
+        && [[ "$child_pgid" != "$caller_pid" ]]; then
+        kill -KILL -- "-$child_pgid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+      else
+        # Child shares this shell's group. Never kill the caller group.
+        kill -KILL "$pid" 2>/dev/null || true
+      fi
+      wait "$pid" 2>/dev/null || true
+      return 124
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  wait "$pid"
   return $?
 }
 
@@ -1058,7 +1269,7 @@ cc_refuse_existing_run() {
   local job_id="$1"
   local caller="${2:-}"
   local vol="${CC_VOLUME_DIR:-}"
-  [[ -n "$job_id" ]] || cc_fail "Job id is empty."
+  cc_require_job_id "$job_id"
   if [[ -n "$vol" && -e "${vol}/runs/${job_id}" ]]; then
     cc_fail "Refuse to reuse job id ${job_id}. runs/${job_id} already exists on the volume."
   fi
@@ -1088,27 +1299,6 @@ cc_aws_args() {
   if [[ -n "${CC_AWS_PROFILE:-}" ]]; then
     printf '%s\n' --profile "$CC_AWS_PROFILE"
   fi
-}
-
-cc_aws_export_multipart_config() {
-  # Pin multipart_threshold so Runpod S3 uses PutObject, not CreateMultipartUpload.
-  # Write a temp config only. Do not edit ~/.aws/config.
-  local dest="${CC_AWS_CONFIG_FILE:-}"
-  if [[ -z "$dest" ]]; then
-    dest="$(mktemp)"
-  fi
-  local header="[default]"
-  if [[ -n "${CC_AWS_PROFILE:-}" ]]; then
-    header="[profile ${CC_AWS_PROFILE}]"
-  fi
-  cat >"$dest" <<EOF
-${header}
-s3 =
-    multipart_threshold = 128MB
-    multipart_chunksize = 128MB
-EOF
-  export AWS_CONFIG_FILE="$dest"
-  printf '%s\n' "$dest"
 }
 
 cc_setup_ssh() {
@@ -1328,30 +1518,56 @@ cc_terminate_self() {
   return 1
 }
 
+cc_watchdog_state_dir() {
+  local given="${1:-}"
+  if [[ -n "$given" ]]; then
+    printf '%s' "$given"
+    return 0
+  fi
+  local volume="${CC_VOLUME_DIR:-/workspace}"
+  if [[ -n "${CC_JOB_ID:-}" ]]; then
+    printf '%s' "${volume}/runs/${CC_JOB_ID}"
+    return 0
+  fi
+  local pod="${RUNPOD_POD_ID:-}"
+  if [[ -n "$pod" ]] && cc_valid_pod_id "$pod"; then
+    printf '%s' "${volume}/runs/.ttl-${pod}"
+    return 0
+  fi
+  # Last resort only. Runpod always sets RUNPOD_POD_ID, so pods do not share this path.
+  printf '%s' "${volume}/runs/.ttl-interactive"
+}
+
 cc_watchdog_start() {
-  local run_dir="${1:-}"
+  local run_dir
+  run_dir="$(cc_watchdog_state_dir "${1:-}")"
   cc_require_ttl
+  local started now remain
+  started=""
+  if [[ -n "$run_dir" && -e "${run_dir}/started_at" ]]; then
+    started="$(tr -d '[:space:]' <"${run_dir}/started_at" 2>/dev/null || true)"
+  fi
+  # Only a non-octal digit timestamp may enter $(( )). Other content is missing.
+  if [[ ! "$started" =~ ^[1-9][0-9]*$ ]]; then
+    started="$(date +%s)"
+    if [[ -n "$run_dir" ]]; then
+      mkdir -p "$run_dir" || true
+      printf '%s\n' "$started" >"${run_dir}/started_at" || true
+    fi
+  fi
+  now="$(date +%s)"
+  (( 10#$started <= now )) || started="$now"
+  remain=$((CC_TTL_S - (now - 10#$started)))
+  (( remain <= CC_TTL_S )) || remain=$CC_TTL_S
+  if (( remain < 1 )); then
+    echo "TTL ${CC_TTL_S}s expired. Terminate the pod." || true
+    if [[ -n "$run_dir" && -z "${CC_RUN_LOG:-}" ]]; then
+      printf '%s\n' "TTL ${CC_TTL_S}s expired. Terminate the pod." >>"${run_dir}/log.txt" || true
+    fi
+    cc_terminate_self || true
+    exit 1
+  fi
   (
-    local started now remain
-    started=""
-    if [[ -n "$run_dir" && -e "${run_dir}/started_at" ]]; then
-      started="$(tr -d '[:space:]' <"${run_dir}/started_at" 2>/dev/null || true)"
-    fi
-    # Only a non-octal digit timestamp may enter $(( )). Other content is missing.
-    if [[ ! "$started" =~ ^[1-9][0-9]*$ ]]; then
-      started="$(date +%s)"
-      if [[ -n "$run_dir" ]]; then
-        mkdir -p "$run_dir" || true
-        printf '%s\n' "$started" >"${run_dir}/started_at" || true
-      fi
-    fi
-    now="$(date +%s)"
-    (( 10#$started <= now )) || started="$now"
-    remain=$((CC_TTL_S - (now - 10#$started)))
-    (( remain <= CC_TTL_S )) || remain=$CC_TTL_S
-    if (( remain < 1 )); then
-      remain=1
-    fi
     sleep "$remain"
     echo "TTL ${CC_TTL_S}s expired. Terminate the pod." || true
     if [[ -n "$run_dir" && -z "${CC_RUN_LOG:-}" ]]; then

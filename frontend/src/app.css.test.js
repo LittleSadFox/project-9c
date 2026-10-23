@@ -15,4 +15,8 @@ describe("app.css tokens", () => {
     expect(css).not.toMatch(/border-radius\s*:\s*[0-9]/);
     expect(css).not.toMatch(/cubic-bezier\s*\(/);
   });
+
+  it("keeps space between Library copy and the hint button", () => {
+    expect(css).toMatch(/\.page-copy \+ \.hint\s*\{[^}]*margin-top:\s*var\(--lg-space-4\)/s);
+  });
 });

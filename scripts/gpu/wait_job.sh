@@ -42,6 +42,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$JOB_ID" ]] || cc_fail "Pass a job id."
+cc_require_job_id "$JOB_ID"
 if [[ -n "$POD_ID" ]] && ! cc_valid_pod_id "$POD_ID"; then
   cc_fail "Invalid pod id ${POD_ID}."
 fi
@@ -138,9 +139,13 @@ pod_gone() {
 
 finish_wait() {
   local ec="$1"
+  # Terminate only the --pod-id value. Do not look up a pod by name or job id.
   if [[ -n "$POD_ID" ]]; then
-    if ! "$ROOT/scripts/gpu/pod_down.sh" "$POD_ID"; then
-      echo "ERROR: pod ${POD_ID} still exists after pod_down." >&2
+    cc_valid_pod_id "$POD_ID" || cc_fail "Invalid pod id ${POD_ID}."
+    local down="${CC_POD_DOWN:-$ROOT/scripts/gpu/pod_down.sh}"
+    echo "pod_down ${POD_ID}"
+    if ! "$down" "$POD_ID"; then
+      echo "ERROR: pod_down failed for ${POD_ID}." >&2
       if (( ec == 0 )); then
         ec=1
       fi

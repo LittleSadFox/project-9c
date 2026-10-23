@@ -33,10 +33,12 @@ if [[ "$ssh_dir" == "/etc/ssh" ]]; then
 fi
 
 if [[ -n "${CC_JOB_ID:-}" ]]; then
+  cc_require_job_id "$CC_JOB_ID"
   mkdir -p "${CC_VOLUME_DIR:-/workspace}/runs/${CC_JOB_ID}"
   export CC_RUN_LOG="${CC_VOLUME_DIR:-/workspace}/runs/${CC_JOB_ID}/log.txt"
   cc_watchdog_start "${CC_VOLUME_DIR:-/workspace}/runs/${CC_JOB_ID}"
 else
+  # Persist started_at on the volume so a crash loop cannot reset the TTL clock.
   cc_watchdog_start
 fi
 

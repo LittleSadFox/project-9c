@@ -134,8 +134,8 @@ Copy this block for a new entry.
 - Symptom: Runpod S3 `CreateMultipartUpload` returned `SignatureDoesNotMatch` on a ~40MiB golden video.
 - Where it failed: Mac / volume S3
 - Cause: AWS CLI `s3 cp` uses multipart above 8MB. Runpod S3 rejects that signing path. A single `PutObject` works.
-- Fix: `sync_volume.sh` uses `aws s3api put-object` and `get-object`. It writes a temp AWS config with `s3.multipart_threshold = 128MB`. It does not edit `~/.aws/config`.
-- Prevention: Do not use `aws s3 cp` against the Runpod S3 endpoint. Keep the 128MB pin.
+- Fix: `sync_volume.sh` uses `aws s3api put-object` and `get-object` only. It does not write a temp AWS config. It does not change `AWS_CONFIG_FILE`. It does not write `~/.aws/config`. It refuses files over 150MiB before any upload. Multipart is not supported yet. Runpod S3 EU-RO-1 rejects larger single PUTs.
+- Prevention: Do not use `aws s3 cp` against the Runpod S3 endpoint. Do not export `AWS_CONFIG_FILE` from `sync_volume.sh`.
 
 ### 2026-10-22 — terminate stamp symlink and volume override
 
@@ -144,6 +144,38 @@ Copy this block for a new entry.
 - Cause: `printf >stamp` follows a symlink. The stamp dir hook had no volume guard.
 - Fix: Write the stamp with `O_NOFOLLOW` and `O_EXCL`. Refuse a symlink stamp. Allow the hook only under `/tmp` or a trusted `$TMPDIR`, never on the volume.
 - Prevention: Keep stamps off the volume. Test a planted symlink and a volume stamp dir.
+
+### 2026-10-22 — hung nvidia-smi and crash-loop TTL
+
+- Symptom: A hung `nvidia-smi` could stall `run_job.sh`. A crash-looping hand-made pod without `CC_JOB_ID` reset `started_at` on every restart. An already-expired TTL still exec'd the job.
+- Where it failed: review
+- Cause: The name query had no timeout. The watchdog had no persisted clock without a job id. The expired branch returned 0.
+- Fix: Time out the name query and log `gpu_name=unknown`. Persist `started_at` under `runs/.ttl-<pod>`. Terminate in the foreground when the TTL is already expired, then exit 1.
+- Prevention: Keep the TTL backstop. Do not reset `started_at` on a container restart.
+
+### 2026-10-22 — curl --config leftover, :latest image, and missing sha tag
+
+- Symptom: A failed webhook ping could leave the 0600 curl `--config` file. `pod_up` defaulted to `:latest`. A later pin to `:sha` created pods when GHCR had no tag. Saving the caller's EXIT trap ran `cleanup` inside `$(cc_curl_post_json)`.
+- Where it failed: review
+- Cause: The config file used `rm` after curl only. `defaults.env` pinned `:latest`. Most shas have no image. `trap -p EXIT` in a command substitution prints the parent trap.
+- Fix: Run `cc_curl_post_json` as a subshell with its own EXIT `rm`. Derive a git-sha tag from `CC_GIT_REF`. Refuse `:latest` unless `CC_GPU_IMAGE_ALLOW_LATEST=1`. Check the GHCR manifest before `POST /pods`. Fail closed when the check cannot run.
+- Prevention: Do not put secrets on curl argv. Do not start a pod from `:latest` without an explicit override. Do not create a pod for a missing image tag.
+
+### 2026-10-22 — timeout fallback group-kill
+
+- Symptom: `kill -- -$pid` in the `cc_run_timeout` fallback could fail on macOS, or it could kill `run_job` or the watchdog.
+- Where it failed: review
+- Cause: Non-interactive bash does not put `cmd &` in a new process group. macOS has no `setsid`.
+- Fix: Start the child with `perl setpgrp` or `set -m`. Read both pgids. Group-kill only when they differ. Kill only the child pid when they match.
+- Prevention: Test that a grandchild `sleep` dies and the parent still logs after the timeout.
+
+### 2026-10-22 — macOS nvidia-smi and watchdog test hangs
+
+- Symptom: `test_run_job_nvidia_smi_timeout_logs_unknown` and `test_watchdog_without_job_id_persists_started_at` hit `_run` timeouts on macos-15.
+- Where it failed: CI macos-15
+- Cause: The runner has no `timeout` or `gtimeout`. The old fallback killed only the nvidia-smi pid, so `sleep 30` kept the `$(… | head)` pipe open. The watchdog then retried terminate with 2/4/6/8s sleeps and held stdout.
+- Fix: Group-kill the timeout child after a pgid check. Force `CC_TIMEOUT_FALLBACK=1` in the nvidia-smi test. Set `CC_TERMINATE_NO_SLEEP=1` and a 200 curl stub in the watchdog persist test.
+- Prevention: Keep the fallback group-kill. Do not let a disowned watchdog retry-sleep on a captured stdout pipe.
 
 ### 2026-10-21 — Shared SSH host keys in the GPU image
 
