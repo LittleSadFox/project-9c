@@ -25,7 +25,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: gpu-image-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:

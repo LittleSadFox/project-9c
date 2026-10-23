@@ -291,3 +291,18 @@ See `TROUBLESHOOTING_LOG.md`.
 ## 2026-10-22 — coding_plan.md Ryan decisions
 
 `coding_plan.md` synced with Ryan's decisions: single put-object with a 150 MiB cap, a 1080p transcode pre-step before the golden-set sync, Phase 0 visual checks waived.
+
+## 2026-10-22 — CI push on main only
+
+A pull-request push ran CI twice: once for `push` and once for `pull_request`.
+macOS minutes count 10x on this private repo.
+
+Limit the `push` trigger in `.github/workflows/ci.yml` to `main`.
+Keep the `pull_request` trigger unchanged.
+Pull requests still run `ubuntu-24.04`, `macos-15`, and `pod-layout` once.
+Direct pushes to `main` still run the full matrix.
+
+Both `ci.yml` and `gpu-image.yml` use this concurrency group:
+`ci-${{ github.workflow }}-${{ github.ref }}`.
+Cancel in-progress runs only on `pull_request`.
+Do not cancel a run on `main`.
