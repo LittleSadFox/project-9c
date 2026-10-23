@@ -606,3 +606,11 @@ The run artifacts are text and metrics only.
 The run folder holds no footage.
 
 Merge of pull request #20 still waits on Actions billing and Ryan's CI decision.
+
+## 2026-10-23 — rebase safe_ext name clash
+
+`storage.py` had two `safe_ext` functions after the rebase onto #19.
+The Path suffix guard keeps the name `safe_ext`.
+The string cleaner is now `sanitize_ext`.
+Ingest and `original_path` call `sanitize_ext`.
+`pose_bench` still calls `safe_ext(path, VIDEO_EXTS)`.

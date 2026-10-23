@@ -99,7 +99,7 @@ class LibraryPaths:
                 child.unlink()
 
     def original_path(self, video_id: str, ext: str) -> Path:
-        return safe_join(self.originals, f"{video_id}.{safe_ext(ext)}")
+        return safe_join(self.originals, f"{video_id}.{sanitize_ext(ext)}")
 
     def proxy_path(self, video_id: str) -> Path:
         return safe_join(self.proxies, f"{video_id}.mp4")
@@ -154,7 +154,7 @@ def move_to_trash(path: Path, trash_dir: Path) -> Path:
     return dest
 
 
-def safe_ext(ext: str) -> str:
+def sanitize_ext(ext: str) -> str:
     """Keep only a short alphanumeric extension."""
     cleaned = ext.lstrip(".").lower()
     if not cleaned or len(cleaned) > 8 or not cleaned.isalnum():

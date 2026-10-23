@@ -20,7 +20,7 @@ from app.repo import boulders as boulders_repo
 from app.repo import sessions as sessions_repo
 from app.repo import settings as settings_repo
 from app.repo import videos as videos_repo
-from app.storage import LibraryPaths, move_into, safe_ext
+from app.storage import LibraryPaths, move_into, sanitize_ext
 
 STAGE_JOB = {"proxy": "ingest", "pose": "pose", "detect": "detect"}
 
@@ -81,7 +81,7 @@ def parse_filename(filename: str) -> tuple[str, str]:
     if not name or name in {".", ".."}:
         raise AppError("bad_filename", 400, "The filename is missing.")
     suffix = Path(name).suffix
-    ext = safe_ext(suffix) if suffix else "mp4"
+    ext = sanitize_ext(suffix) if suffix else "mp4"
     return name, ext
 
 
