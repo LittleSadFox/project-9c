@@ -191,7 +191,7 @@ def write_vfr_video(dest: Path) -> Path:
         "lavfi",
         "-i",
         "testsrc=size=320x240:rate=30:duration=2",
-        "-vsync",
+        "-fps_mode",
         "vfr",
         "-vf",
         "setpts=N*N*0.0008+0.04*N/TB",

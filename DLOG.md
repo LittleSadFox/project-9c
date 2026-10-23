@@ -390,3 +390,9 @@ The `media` marker skips when `ffmpeg` or `ffprobe` is missing from PATH.
 It writes `-display_rotation 0` as an input option so the proxy keeps no rotation metadata.
 A video restore brings back only the attempts stored in that trash payload.
 A stored trash path that resolves to `trash/` itself, or above it, raises `bad_path`.
+
+## 2026-10-23 — VFR fixture uses fps_mode
+
+`write_vfr_video` now uses `-fps_mode vfr`.
+Homebrew ffmpeg on macos-15 rejects `-vsync`.
+The pinned 7.1.5 static build accepts `-fps_mode` and still marks the clip as VFR.
