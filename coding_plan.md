@@ -16,13 +16,13 @@ todos:
     status: pending
   - id: p1-ingest
     content: "Library CRUD, streaming upload, MediaTool protocol (FfmpegTool, FakeMediaTool), ingest job (ffprobe, CFR H.264 proxy, thumbnails), media endpoints with byte ranges, exact-frame JPEG, trash; media fixture generator and tests"
-    status: pending
+    status: completed
   - id: p1-pose
     content: "RtmlibEstimator (YOLOX + RTMPose; CUDA, CoreML or CPU), core tracking, climber selection, smoothing, NPZ store, pose job and endpoints, FixtureEstimator; CUDA/CPU parity and pose_bench on a pod; CoreML/CPU parity and throughput in the Mac pass"
-    status: pending
+    status: completed
   - id: p1-ui
     content: "Library page, VideoStage, SkeletonCanvas, TransportBar, Timeline, manual attempt + cut job, Attempt page with RatingPanel; Phase 1 end-to-end tests"
-    status: pending
+    status: completed
   - id: golden-set
     content: "After Phase 1: record at least 10 real videos (at least 30 attempts), label them as manual attempts in the app, export labels.json with export_labels.py, keep them in the golden folder outside the repo, and copy them to the Runpod volume with sync_volume.sh; never commit them"
     status: pending
@@ -666,6 +666,12 @@ Each phase has three gates. "Bot and CI" must be green before anything goes to a
   - `sync_volume.sh` uploads the first sample videos.
 
 ### Phase 1 — Library, import, pose, playback, manual cut, ratings
+The Phase 1 build is on main (2026-10-23).
+p1-A is #19 (`52bdb274`).
+p1-B is #20 (`b1e5dfed`).
+p1-C is #18 (`6692b663`).
+The Ryan Mac pass is still open.
+
 - Build (backend)
   - CRUD for boulders, sessions and videos; streaming upload into `tmp/` with sha256 and the size limit; ffprobe validation; one session per recording day.
   - `MediaTool` with `FfmpegTool`. Ingest job: the proxy (section 5.4) and thumbnails; the media endpoints; the exact-frame JPEG; trash.
@@ -692,6 +698,9 @@ Each phase has three gates. "Bot and CI" must be green before anything goes to a
 Between Phase 1 and Phase 2, you build the golden set (section 11) with the Phase 1 tools and copy it to the volume. The `sync_volume.sh` 1080p pre-step from section 2.7 must be merged before that copy.
 
 ### Phase 2 — Review tools: automatic start and fall, auto-cut, skeleton corrections
+Phase 2 is planned as three slices: p2-A scene and detect, p2-B skeleton edits, and p2-C review UI.
+This phase stays review-only until the Ryan Mac pass.
+
 - Build
   - The automatic floor line; `SceneMarksEditor` (floor line, top zone, start holds, reference points; copy from another video).
   - `core/events.py` and `core/cuts.py`; a detect job after pose and after any scene or climber edit; the proposals API.
