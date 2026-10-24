@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 
-import { interpretHotkey } from "../lib/hotkeys.js";
+import { interpretHotkey, isModalOpen } from "../lib/hotkeys.js";
 
 export function useHotkeys(handlers, enabled = true) {
   useEffect(() => {
@@ -8,6 +8,9 @@ export function useHotkeys(handlers, enabled = true) {
       return undefined;
     }
     function onKeyDown(event) {
+      if (isModalOpen()) {
+        return;
+      }
       const action = interpretHotkey(event);
       if (!action) {
         return;

@@ -747,3 +747,34 @@ A live `handle_pose` fails at once when ffmpeg is missing.
 
 The 409 check still uses `_pose_job_active`.
 The test no longer needs a live pose handle to stay busy.
+
+## 2026-10-24 — p2-C Phase 2 review UI
+
+Add the Phase 2 frontend under `frontend/`.
+
+Review page:
+
+- `ProposalList` with timeline in and out handles
+- Accept, adjust (drag or I/O), reject, batch accept, add a missed attempt
+- "Finish review" is the one blue primary action
+- `SceneMarksEditor` for floor line, top zone, start holds, and ref points
+- Copy scene marks from another video on the same boulder
+- `KeypointEditor` on the exact-frame JPEG
+- Drag, L/R swap over a range, invalid, confirm, click person to set the climber
+- Skeleton review-queue panel
+- `useUndo` for scene saves and pose edits (Cmd+Z / Shift+Cmd+Z)
+
+Hotkey safety:
+
+- Skip buttons, links, `role=button`, inputs, textareas, and contenteditable
+- Turn all hotkeys off while a confirm sheet is open
+- Tests cover a focused button, a focused link, and an open sheet
+
+API modules follow coding_plan §9 for scene, proposals, pose persons, climber, review-queue, and edits.
+Vitest mocks `api/*` through `fetch`.
+Playwright has a mocked keyboard-only review spec that always runs.
+A real D+E backend spec is written and skipped until `CC_E2E_BACKEND=1`.
+
+This rebase sits on main after p2-B (`f74166c4`).
+Keep the p2-A and p2-B backend already on main.
+Do not change `AGENTS.md`, `coding_plan.md`, `scripts/gpu/`, or `docker/`.
