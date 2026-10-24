@@ -25,6 +25,38 @@ Copy this block for a new entry.
 
 ## Entries
 
+### 2026-10-24 — stale effective track after a pose re-run
+
+- Symptom: An edit still showed the old climber after a new pose job.
+- Where it failed: bot computer (design check)
+- Cause: A cache keyed only by the edits hash can sit next to a replaced NPZ.
+- Fix: Key the cache with the raw NPZ sha256 plus the edits hash. Store it next to the run file. A new run id writes a new path.
+- Prevention: Never serve `*.effective.npz` when the raw file hash does not match.
+
+### 2026-10-24 — two pose runs in the same second
+
+- Symptom: A pose re-run in the same second still served the old run.
+- Where it failed: bot computer
+- Cause: `created_at` has one-second resolution. `ORDER BY created_at DESC` is not stable.
+- Fix: Order by `created_at DESC, rowid DESC`.
+- Prevention: Do not pick the latest row by a second-resolution stamp alone.
+
+### 2026-10-24 — multi-track keypoint index used the filtered row
+
+- Symptom: `GET /pose/keypoints` and POST edit `frames` showed zeros for the climber when a second person was present.
+- Where it failed: bot computer
+- Cause: The code enumerated `frame[mask]` and then read `keypoints[index]` from the full array.
+- Fix: Zip `frame[mask]` with `keypoints[mask]`.
+- Prevention: Do not mix a filtered index with an unfiltered pose array.
+
+### 2026-10-24 — edit write during a live pose job
+
+- Symptom: A POST edit can race a pose job and leave a partial row.
+- Where it failed: bot computer (design check)
+- Cause: A pre-read of `jobs` and a later INSERT are two transactions.
+- Fix: Use `BEGIN IMMEDIATE`, then the busy SELECT, then the edit and feedback writes, then COMMIT.
+- Prevention: Do not check the pose job in a separate read before the write.
+
 ### 2026-10-24 — floor sign flipped when a standing toe sat below the line
 
 - Symptom: `leave_ground` on a clean synthetic clip was about 75 frames late.

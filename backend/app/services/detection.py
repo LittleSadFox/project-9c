@@ -16,7 +16,6 @@ from app.db import immediate
 from app.errors import AppError
 from app.jobs.context import JobContext
 from app.jobs.queue import JobQueue
-from app.pose.store import pose_path, read_pose
 from app.repo import events as events_repo
 from app.repo import jobs as jobs_repo
 from app.repo import models as models_repo
@@ -80,13 +79,15 @@ def load_raw_climber_track(
     paths: LibraryPaths,
     video: dict[str, Any],
 ) -> tuple[dict[str, Any], np.ndarray, np.ndarray]:
-    """Read the Phase 1 B raw climber track. E later switches this to get_effective_track."""
+    """Read the climber track with Phase 2 E edits applied."""
+    from app.services.pose_service import get_effective_track
+
     video_id = str(video["id"])
     run = conn.execute(
         """
         SELECT * FROM pose_runs
         WHERE video_id = ? AND status = 'done'
-        ORDER BY created_at DESC
+        ORDER BY created_at DESC, rowid DESC
         LIMIT 1
         """,
         (video_id,),
@@ -95,28 +96,19 @@ def load_raw_climber_track(
         raise AppError("pose_pending", 409, "Wait for pose to finish.")
     run_d = dict(run)
     climber_id = run_d.get("climber_track_id")
+    n = int(video.get("n_frames") or 0)
     if climber_id is None:
-        n = int(video.get("n_frames") or 0)
         empty_k = np.zeros((n, N_KEYPOINTS, 2), dtype=np.float32)
         empty_s = np.zeros((n, N_KEYPOINTS), dtype=np.float32)
         return run_d, empty_k, empty_s
-    track = conn.execute(
-        "SELECT track_id FROM pose_tracks WHERE run_id = ? AND track_id = ?",
-        (run_d["id"], int(climber_id)),
-    ).fetchone()
-    if track is None:
-        raise AppError("not_found", 404, "The climber track is not here.")
-    dest = pose_path(paths.pose, video_id, str(run_d["id"]))
-    if not dest.is_file():
-        raise AppError("not_found", 404, "The pose file is not here.")
-    arrays = read_pose(dest)
+    arrays = get_effective_track(conn, paths, video_id)
     n_frames = int(video.get("n_frames") or arrays.get("n_frames") or 0)
     keypoints = np.zeros((n_frames, N_KEYPOINTS, 2), dtype=np.float32)
     scores = np.zeros((n_frames, N_KEYPOINTS), dtype=np.float32)
     mask = arrays["track_id"] == int(climber_id)
     frames = arrays["frame"][mask]
     rows = arrays["keypoints"][mask]
-    for frame, row in zip(frames, rows, strict=False):
+    for frame, row in zip(frames, rows, strict=True):
         index = int(frame)
         if 0 <= index < n_frames:
             keypoints[index] = row[:, :2]

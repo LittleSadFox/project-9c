@@ -21,9 +21,52 @@ def effective_path(raw_path: Path) -> Path:
     return raw_path.with_name(raw_path.stem + ".effective.npz")
 
 
+def _hashable_edits(edits: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    payload: list[dict[str, Any]] = []
+    for edit in edits:
+        item: dict[str, Any] = {
+            "id": edit.get("id"),
+            "kind": edit.get("kind"),
+            "frame": edit.get("frame"),
+            "kpt": edit.get("kpt"),
+            "x": edit.get("x"),
+            "y": edit.get("y"),
+            "range_start": edit.get("range_start"),
+            "range_end": edit.get("range_end"),
+        }
+        points = edit.get("points")
+        if points:
+            item["points"] = [
+                {"kpt": point.get("kpt"), "x": point.get("x"), "y": point.get("y")}
+                for point in points
+            ]
+        payload.append(item)
+    return payload
+
+
 def edits_hash(edits: list[dict[str, Any]] | None = None) -> str:
-    payload = json.dumps(edits or [], sort_keys=True, separators=(",", ":"))
+    payload = json.dumps(_hashable_edits(edits or []), sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def raw_version(raw_path: Path) -> str:
+    """Identity of one raw NPZ. A pose re-run writes a new file and a new hash."""
+    digest = hashlib.sha256()
+    with raw_path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def effective_cache_key(
+    raw_path: Path,
+    edits: list[dict[str, Any]] | None = None,
+    *,
+    climber_track_id: int | None = None,
+) -> str:
+    """Cache key = raw track version + edits hash (+ current climber)."""
+    body = f"{raw_version(raw_path)}:{edits_hash(edits)}:{climber_track_id}"
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
 def write_pose(

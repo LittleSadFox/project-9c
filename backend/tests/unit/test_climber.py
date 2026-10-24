@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import numpy as np
 
-from app.core.climber import coverage, person_at_point, select_climber, vertical_travel
+from app.core.climber import (
+    coverage,
+    person_at_point,
+    person_at_xy,
+    select_climber,
+    vertical_travel,
+)
 from app.core.halpe26 import HIP, N_KEYPOINTS
 from app.core.tracking import Track
 from app.pose.estimator import stick_figure
@@ -43,4 +49,9 @@ def test_person_at_point_picks_smallest_box() -> None:
     assert person_at_point([outer, inner], 3, 45.0, 50.0) == 2
     assert person_at_point([outer, inner], 3, 5.0, 5.0) == 1
     assert person_at_point([outer, inner], 9, 45.0, 50.0) is None
+    frames = np.array([3, 3], dtype=np.int32)
+    track_ids = np.array([1, 2], dtype=np.int32)
+    boxes = np.stack([outer.boxes[0], inner.boxes[0]])
+    assert person_at_xy(frames, track_ids, boxes, 3, 45.0, 50.0) == 2
+    assert person_at_xy(frames, track_ids, boxes, 3, 5.0, 5.0) == 1
     assert N_KEYPOINTS == 26

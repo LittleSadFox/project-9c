@@ -7,7 +7,14 @@ from pathlib import Path
 import numpy as np
 
 from app.core.halpe26 import N_KEYPOINTS
-from app.pose.store import edits_hash, read_effective, read_pose, write_effective, write_pose
+from app.pose.store import (
+    edits_hash,
+    effective_cache_key,
+    read_effective,
+    read_pose,
+    write_effective,
+    write_pose,
+)
 
 
 def test_pose_npz_roundtrip(tmp_path: Path) -> None:
@@ -62,3 +69,16 @@ def test_effective_cache_keyed_by_edits_hash(tmp_path: Path) -> None:
     write_effective(raw, data, hash_value=empty)
     assert read_effective(raw, empty) is not None
     assert read_effective(raw, edits_hash([{"kind": "move"}])) is None
+    first = effective_cache_key(raw, [])
+    moved = tmp_path / "run-b.npz"
+    write_pose(
+        moved,
+        frame=frame,
+        track_id=track_id,
+        keypoints=keypoints + 1.0,
+        bbox=bbox,
+        meta={"n_frames": 1, "fps": 30.0, "run_id": "run-3", "climber_track_id": 1},
+    )
+    second = effective_cache_key(moved, [])
+    assert first != second
+    assert effective_cache_key(raw, [{"kind": "move", "frame": 0}]) != first

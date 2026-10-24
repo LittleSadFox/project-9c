@@ -9,6 +9,7 @@ import pytest
 
 from app.config import Settings
 from app.core.climber import coverage as real_coverage
+from app.core.halpe26 import LEFT_WRIST
 from app.db import apply_migrations, connect
 from app.errors import AppError
 from app.jobs.context import JobContext
@@ -16,7 +17,10 @@ from app.pose.estimator import FixtureEstimator
 from app.repo import jobs as jobs_repo
 from app.services.pose_service import (
     bind_pose_runtime,
+    create_edit,
     current_estimator,
+    get_effective_track,
+    get_keypoints,
     get_pose_summary,
     handle_pose_job,
     process_frames,
@@ -280,4 +284,65 @@ def test_pose_job_rebuilds_estimator_when_mode_changes(tmp_path: Path) -> None:
     ).fetchone()
     assert mode_a["mode"] == "balanced"
     assert mode_b["mode"] == "lightweight"
+    conn.close()
+
+
+def test_edits_survive_pose_rerun_on_fixture_tracks(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    paths = LibraryPaths(settings.library_dir)
+    paths.ensure()
+    conn = connect(paths.db)
+    apply_migrations(conn)
+    video_id = "66666666-6666-6666-6666-666666666666"
+    _insert_video(conn, video_id, n_frames=6)
+    detections = {
+        index: np.array([[10.0, 10.0 + index, 50.0, 80.0 + index]], dtype=np.float32)
+        for index in range(6)
+    }
+    estimator = FixtureEstimator(detections=detections)
+    bind_pose_runtime(settings=settings, paths=paths, estimator=estimator)
+    frames = [(index, np.zeros((8, 8, 3), dtype=np.uint8)) for index in range(6)]
+    first = jobs_repo.insert_job(
+        conn,
+        job_id="pose-job-edit-1",
+        kind="pose",
+        lane="compute",
+        entity_type="video",
+        entity_id=video_id,
+    )
+    handle_pose_job(JobContext(conn, str(first["id"])), frames=frames)
+    jobs_repo.finish_job(conn, str(first["id"]), status="done")
+    raw_before = get_keypoints(conn, paths, video_id, start=2, end=2, effective=False)
+    created = create_edit(
+        conn,
+        paths,
+        video_id,
+        {
+            "kind": "move",
+            "frame": 2,
+            "range": [2, 2],
+            "points": [{"kpt": LEFT_WRIST, "x": 333.0, "y": 44.0}],
+        },
+    )
+    assert created["frames"][0] is not None
+    assert abs(created["frames"][0][LEFT_WRIST][0] - 333.0) < 1e-2
+    second = jobs_repo.insert_job(
+        conn,
+        job_id="pose-job-edit-2",
+        kind="pose",
+        lane="compute",
+        entity_type="video",
+        entity_id=video_id,
+    )
+    handle_pose_job(JobContext(conn, str(second["id"])), frames=frames)
+    effective = get_effective_track(conn, paths, video_id)
+    climber = effective["climber_track_id"]
+    mask = (effective["track_id"] == climber) & (effective["frame"] == 2)
+    assert np.any(mask)
+    assert abs(float(effective["keypoints"][mask][0, LEFT_WRIST, 0]) - 333.0) < 1e-2
+    raw_after = get_keypoints(conn, paths, video_id, start=2, end=2, effective=False)
+    assert raw_after["run_id"] != raw_before["run_id"]
+    assert get_keypoints(conn, paths, video_id, start=2, end=2, effective=True)["frames"][0][
+        LEFT_WRIST
+    ][0] == pytest.approx(333.0, abs=1e-2)
     conn.close()

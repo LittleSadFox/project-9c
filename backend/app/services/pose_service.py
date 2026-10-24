@@ -14,8 +14,10 @@ import numpy as np
 
 from app.clock import utc_now
 from app.config import Settings
-from app.core.climber import coverage, select_climber, vertical_travel
+from app.core.climber import coverage, person_at_xy, select_climber, vertical_travel
+from app.core.edits import apply_edits_to_arrays, confirmed_frames
 from app.core.halpe26 import EDGES, N_KEYPOINTS, NAMES
+from app.core.pose_checks import flag_frames
 from app.core.smoothing import smooth_track
 from app.core.tracking import (
     Track,
@@ -27,17 +29,24 @@ from app.core.tracking import (
 )
 from app.errors import AppError
 from app.jobs.context import JobContext
+from app.jobs.queue import JobQueue
+from app.learning.feedback import log_feedback
 from app.media.frames import FrameReader
 from app.pose.estimator import PoseEstimator, make_estimator
 from app.pose.store import (
     edits_hash,
+    effective_cache_key,
+    effective_path,
     pose_path,
     read_effective,
     read_pose,
     tracks_to_arrays,
+    write_effective,
     write_pose,
 )
 from app.repo import jobs as jobs_repo
+from app.repo import models as models_repo
+from app.repo import pose_edits as pose_edits_repo
 from app.storage import LibraryPaths
 
 
@@ -378,7 +387,7 @@ def _latest_run(conn: sqlite3.Connection, video_id: str) -> dict[str, Any]:
         """
         SELECT * FROM pose_runs
         WHERE video_id = ? AND status = 'done'
-        ORDER BY created_at DESC
+        ORDER BY created_at DESC, rowid DESC
         LIMIT 1
         """,
         (video_id,),
@@ -401,17 +410,83 @@ def _track_rows(conn: sqlite3.Connection, run_id: str) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
-def _load_run_arrays(
-    paths: LibraryPaths, video_id: str, run: dict[str, Any], *, effective: bool
-) -> dict[str, Any]:
+def _load_raw_arrays(paths: LibraryPaths, video_id: str, run: dict[str, Any]) -> dict[str, Any]:
     raw = pose_path(paths.pose, video_id, str(run["id"]))
     if not raw.is_file():
         raise AppError("not_found", 404, "The pose file is not here.")
-    if effective:
-        cached = read_effective(raw, edits_hash([]))
-        if cached is not None:
-            return cached
     return read_pose(raw)
+
+
+def _require_track(conn: sqlite3.Connection, run_id: str, track_id: int) -> None:
+    row = conn.execute(
+        "SELECT track_id FROM pose_tracks WHERE run_id = ? AND track_id = ?",
+        (run_id, int(track_id)),
+    ).fetchone()
+    if row is None:
+        raise AppError("not_found", 404, "The track is not here.")
+
+
+def _pose_job_active(conn: sqlite3.Connection, video_id: str) -> bool:
+    row = conn.execute(
+        """
+        SELECT 1 FROM jobs
+        WHERE entity_id = ? AND kind = 'pose' AND status IN ('queued', 'running')
+        LIMIT 1
+        """,
+        (video_id,),
+    ).fetchone()
+    return row is not None
+
+
+def _begin_pose_edit_tx(conn: sqlite3.Connection, video_id: str) -> None:
+    """Lock and check the pose job in the same transaction as the write."""
+    conn.execute("BEGIN IMMEDIATE")
+    if _pose_job_active(conn, video_id):
+        conn.rollback()
+        raise AppError("pose_busy", 409, "A pose job is running.")
+
+
+def _enqueue_detect(conn: sqlite3.Connection, queue: JobQueue | None, video_id: str) -> str | None:
+    """Re-queue detection after a climber change. D owns the detect job."""
+    from app.services.detection import enqueue_detect
+
+    job = enqueue_detect(conn, video_id, queue)
+    if job is None:
+        return None
+    job_id = job.get("id") or job.get("job_id")
+    return None if job_id is None else str(job_id)
+
+
+def _drop_effective(paths: LibraryPaths, video_id: str, run_id: str) -> None:
+    dest = effective_path(pose_path(paths.pose, video_id, run_id))
+    dest.unlink(missing_ok=True)
+
+
+def get_effective_track(
+    conn: sqlite3.Connection,
+    paths: LibraryPaths,
+    video_id: str,
+) -> dict[str, Any]:
+    """Return pose arrays with climber edits applied.
+
+    Cache key is raw track version + edits hash. A pose re-run writes a new
+    NPZ, so this never serves a stale track.
+    """
+    _video(conn, video_id)
+    run = _latest_run(conn, video_id)
+    climber_id = run.get("climber_track_id")
+    raw = pose_path(paths.pose, video_id, str(run["id"]))
+    if not raw.is_file():
+        raise AppError("not_found", 404, "The pose file is not here.")
+    edits = pose_edits_repo.list_active(conn, video_id)
+    key = effective_cache_key(raw, edits, climber_track_id=climber_id)
+    cached = read_effective(raw, key)
+    if cached is not None:
+        cached["climber_track_id"] = climber_id
+        return cached
+    data = apply_edits_to_arrays(read_pose(raw), edits, climber_id=climber_id)
+    write_effective(raw, data, hash_value=key)
+    return data
 
 
 def get_pose_summary(
@@ -420,7 +495,7 @@ def get_pose_summary(
     video = _video(conn, video_id)
     run = _latest_run(conn, video_id)
     tracks = _track_rows(conn, str(run["id"]))
-    arrays = _load_run_arrays(paths, video_id, run, effective=False)
+    arrays = _load_raw_arrays(paths, video_id, run)
     fps = float(video.get("proxy_fps") or arrays.get("fps") or 0.0)
     n_frames = int(video.get("n_frames") or arrays.get("n_frames") or 0)
     return {
@@ -464,7 +539,10 @@ def get_keypoints(
 ) -> dict[str, Any]:
     video = _video(conn, video_id)
     run = _latest_run(conn, video_id)
-    arrays = _load_run_arrays(paths, video_id, run, effective=effective)
+    if effective:
+        arrays = get_effective_track(conn, paths, video_id)
+    else:
+        arrays = _load_raw_arrays(paths, video_id, run)
     fps = float(video.get("proxy_fps") or arrays.get("fps") or 0.0)
     n_frames = int(video.get("n_frames") or arrays.get("n_frames") or 0)
     climber_id = run.get("climber_track_id")
@@ -485,8 +563,8 @@ def get_keypoints(
     else:
         mask = arrays["track_id"] == int(track_id)
         by_frame = {
-            int(frame): arrays["keypoints"][index]
-            for index, frame in enumerate(arrays["frame"][mask])
+            int(frame): kpt
+            for frame, kpt in zip(arrays["frame"][mask], arrays["keypoints"][mask], strict=True)
         }
         for frame in range(start_i, end_i + 1):
             row = by_frame.get(frame)
@@ -506,10 +584,12 @@ def get_persons(
     video_id: str,
     *,
     frame: int,
+    x: float | None = None,
+    y: float | None = None,
 ) -> dict[str, Any]:
     _video(conn, video_id)
-    run = _latest_run(conn, video_id)
-    arrays = _load_run_arrays(paths, video_id, run, effective=True)
+    _latest_run(conn, video_id)
+    arrays = get_effective_track(conn, paths, video_id)
     persons: list[dict[str, Any]] = []
     for index, stored_frame in enumerate(arrays["frame"]):
         if int(stored_frame) != int(frame):
@@ -521,67 +601,108 @@ def get_persons(
                 "keypoints": _triplet(arrays["keypoints"][index]),
             }
         )
-    return {"frame": int(frame), "persons": persons}
+    hit_track_id = None
+    if x is not None and y is not None:
+        hit_track_id = person_at_xy(
+            arrays["frame"],
+            arrays["track_id"],
+            arrays["bbox"],
+            int(frame),
+            float(x),
+            float(y),
+        )
+    return {"frame": int(frame), "persons": persons, "hit_track_id": hit_track_id}
+
+
+def _climber_values(
+    arrays: dict[str, Any],
+    *,
+    track_id: int | None,
+    frame: int,
+    points: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if track_id is None:
+        return []
+    mask = arrays["track_id"] == int(track_id)
+    by_frame = {
+        int(frame_i): kpt
+        for frame_i, kpt in zip(arrays["frame"][mask], arrays["keypoints"][mask], strict=True)
+    }
+    row = by_frame.get(int(frame))
+    if row is None:
+        return []
+    wanted = {int(point["kpt"]) for point in points} if points else set(range(N_KEYPOINTS))
+    values: list[dict[str, Any]] = []
+    for kpt in sorted(wanted):
+        if kpt < 0 or kpt >= N_KEYPOINTS:
+            continue
+        values.append(
+            {
+                "kpt": kpt,
+                "x": round(float(row[kpt, 0]), 3),
+                "y": round(float(row[kpt, 1]), 3),
+                "score": round(float(row[kpt, 2]), 4),
+            }
+        )
+    return values
+
+
+def _range_frames(
+    arrays: dict[str, Any],
+    *,
+    track_id: int | None,
+    start: int,
+    end: int,
+) -> list[list[list[float]] | None]:
+    frames_out: list[list[list[float]] | None] = []
+    if track_id is None:
+        return [None] * (end - start + 1)
+    mask = arrays["track_id"] == int(track_id)
+    by_frame = {
+        int(frame_i): kpt
+        for frame_i, kpt in zip(arrays["frame"][mask], arrays["keypoints"][mask], strict=True)
+    }
+    for frame in range(start, end + 1):
+        row = by_frame.get(frame)
+        frames_out.append(None if row is None else _triplet(row))
+    return frames_out
 
 
 def set_climber(
     conn: sqlite3.Connection,
     paths: LibraryPaths,
+    queue: JobQueue | None,
     video_id: str,
     data: dict[str, Any],
-    queue: Any | None = None,
 ) -> dict[str, Any]:
     """Reassign the climber track. Logs climber.reassign and enqueues detect."""
-    from app.core.climber import person_at_point
-    from app.core.tracking import Track
-    from app.db import immediate
-    from app.learning.feedback import log_feedback
-    from app.repo import models as models_repo
-    from app.services.detection import enqueue_detect
-
-    video = _video(conn, video_id)
+    _video(conn, video_id)
     run = _latest_run(conn, video_id)
-    before_id = run.get("climber_track_id")
+    old_id = run.get("climber_track_id")
     track_id = data.get("track_id")
-    if track_id is None:
-        frame = data.get("frame")
-        x = data.get("x")
-        y = data.get("y")
-        if frame is None or x is None or y is None:
-            raise AppError("bad_climber", 400, "Give track_id or frame, x, and y.")
-        arrays = _load_run_arrays(paths, video_id, run, effective=False)
-        tracks: list[Track] = []
-        by_id: dict[int, Track] = {}
-        for index, stored in enumerate(arrays["frame"]):
-            tid = int(arrays["track_id"][index])
-            track = by_id.get(tid)
-            if track is None:
-                track = Track(track_id=tid)
-                by_id[tid] = track
-                tracks.append(track)
-            kpt = arrays["keypoints"][index]
-            track.frames.append(int(stored))
-            track.boxes.append(arrays["bbox"][index])
-            track.keypoints.append(kpt[:, :2])
-            if kpt.shape[-1] >= 3:
-                track.scores.append(kpt[:, 2])
-            else:
-                track.scores.append(np.ones((N_KEYPOINTS,), dtype=np.float32))
-        picked = person_at_point(tracks, int(frame), float(x), float(y))
-        if picked is None:
+    if track_id is not None:
+        new_id = int(track_id)
+        _require_track(conn, str(run["id"]), new_id)
+    elif data.get("frame") is not None and data.get("x") is not None and data.get("y") is not None:
+        arrays = get_effective_track(conn, paths, video_id)
+        hit = person_at_xy(
+            arrays["frame"],
+            arrays["track_id"],
+            arrays["bbox"],
+            int(data["frame"]),
+            float(data["x"]),
+            float(data["y"]),
+        )
+        if hit is None:
             raise AppError("not_found", 404, "No person is at that point.")
-        track_id = picked
-    track_id = int(track_id)
-    exists = conn.execute(
-        "SELECT track_id FROM pose_tracks WHERE run_id = ? AND track_id = ?",
-        (run["id"], track_id),
-    ).fetchone()
-    if exists is None:
-        raise AppError("not_found", 404, "The track is not here.")
-    with immediate(conn):
+        new_id = int(hit)
+    else:
+        raise AppError("bad_climber", 400, "Send track_id or frame, x, and y.")
+    _begin_pose_edit_tx(conn, video_id)
+    try:
         conn.execute(
             "UPDATE pose_runs SET climber_track_id = ? WHERE id = ?",
-            (track_id, run["id"]),
+            (new_id, str(run["id"])),
         )
         conn.execute(
             """
@@ -589,7 +710,7 @@ def set_climber(
             SET is_climber = CASE WHEN track_id = ? THEN 1 ELSE 0 END
             WHERE run_id = ?
             """,
-            (track_id, run["id"]),
+            (new_id, str(run["id"])),
         )
         log_feedback(
             conn,
@@ -597,13 +718,174 @@ def set_climber(
             entity_type="video",
             entity_id=video_id,
             video_id=video_id,
-            before={"climber_track_id": before_id},
-            after={"climber_track_id": track_id},
+            before={"climber_track_id": old_id},
+            after={"climber_track_id": new_id},
             model_version_id=models_repo.active_event_id(conn),
         )
-    del video
-    job = enqueue_detect(conn, video_id, queue)
+        conn.commit()
+    except Exception:
+        _rollback_quiet(conn)
+        raise
+    _drop_effective(paths, video_id, str(run["id"]))
+    job_id = _enqueue_detect(conn, queue, video_id)
+    return {"climber_track_id": new_id, "job_id": job_id}
+
+
+def list_edits(
+    conn: sqlite3.Connection,
+    video_id: str,
+    *,
+    start: int | None = None,
+    end: int | None = None,
+) -> dict[str, Any]:
+    _video(conn, video_id)
+    _latest_run(conn, video_id)
+    items = pose_edits_repo.list_active(conn, video_id, start=start, end=end)
     return {
-        "climber_track_id": track_id,
-        "job_id": None if job is None else job.get("id"),
+        "items": [
+            {
+                "id": str(item["id"]),
+                "kind": str(item["kind"]),
+                "frame": int(item["frame"]),
+                "range_start": item.get("range_start"),
+                "range_end": item.get("range_end"),
+                "points": item.get("points") or [],
+                "created_at": item.get("created_at"),
+            }
+            for item in items
+        ],
+        "total": len(items),
     }
+
+
+def create_edit(
+    conn: sqlite3.Connection,
+    paths: LibraryPaths,
+    video_id: str,
+    data: dict[str, Any],
+) -> dict[str, Any]:
+    video = _video(conn, video_id)
+    run = _latest_run(conn, video_id)
+    kind = str(data["kind"])
+    frame = int(data["frame"])
+    n_frames = int(video.get("n_frames") or 0)
+    raw_range = data.get("range")
+    if raw_range is None:
+        start, end = frame, frame
+    else:
+        if len(raw_range) != 2:
+            raise AppError("bad_range", 400, "range must be [start, end].")
+        start, end = int(raw_range[0]), int(raw_range[1])
+    if end < start:
+        raise AppError("bad_range", 400, "end must be greater than or equal to start.")
+    if start < 0 or (n_frames and end >= n_frames):
+        raise AppError("bad_range", 400, "The range is outside the proxy frames.")
+    if frame < start or frame > end:
+        raise AppError("bad_range", 400, "frame must lie inside the range.")
+    points = list(data.get("points") or [])
+    if kind == "move" and not points:
+        raise AppError("bad_edit", 400, "A move edit needs points.")
+    before_arrays = get_effective_track(conn, paths, video_id)
+    before_values = _climber_values(
+        before_arrays,
+        track_id=run.get("climber_track_id"),
+        frame=frame,
+        points=points,
+    )
+    _begin_pose_edit_tx(conn, video_id)
+    try:
+        row = pose_edits_repo.insert_edit(
+            conn,
+            video_id=video_id,
+            kind=kind,
+            frame=frame,
+            range_start=start,
+            range_end=end,
+            points=points,
+        )
+        feedback_kind = "pose.confirm" if kind == "confirm" else "pose.edit"
+        after: dict[str, Any] = {
+            "edit_id": str(row["id"]),
+            "kind": kind,
+            "frame": frame,
+            "range_start": start,
+            "range_end": end,
+            "points": [
+                {
+                    "kpt": int(point["kpt"]),
+                    "x": None if point.get("x") is None else float(point["x"]),
+                    "y": None if point.get("y") is None else float(point["y"]),
+                }
+                for point in points
+            ],
+        }
+        log_feedback(
+            conn,
+            kind=feedback_kind,
+            entity_type="pose_edit",
+            entity_id=str(row["id"]),
+            video_id=video_id,
+            before={"frame": frame, "values": before_values},
+            after=after,
+            model_version_id=run.get("model_version_id"),
+        )
+        conn.commit()
+    except Exception:
+        _rollback_quiet(conn)
+        raise
+    _drop_effective(paths, video_id, str(run["id"]))
+    arrays = get_effective_track(conn, paths, video_id)
+    return {
+        "edit_id": str(row["id"]),
+        "start": start,
+        "end": end,
+        "frames": _range_frames(
+            arrays,
+            track_id=run.get("climber_track_id"),
+            start=start,
+            end=end,
+        ),
+    }
+
+
+def delete_edit(
+    conn: sqlite3.Connection,
+    paths: LibraryPaths,
+    video_id: str,
+    edit_id: str,
+) -> None:
+    _video(conn, video_id)
+    run = _latest_run(conn, video_id)
+    _begin_pose_edit_tx(conn, video_id)
+    try:
+        row = pose_edits_repo.get_edit(conn, video_id, edit_id)
+        if row is None or row.get("undone_at") is not None:
+            conn.rollback()
+            raise AppError("not_found", 404, "The edit is not here.")
+        pose_edits_repo.undo_edit(conn, video_id, edit_id)
+        conn.commit()
+    except AppError:
+        raise
+    except Exception:
+        _rollback_quiet(conn)
+        raise
+    _drop_effective(paths, video_id, str(run["id"]))
+    get_effective_track(conn, paths, video_id)
+
+
+def review_queue(conn: sqlite3.Connection, paths: LibraryPaths, video_id: str) -> dict[str, Any]:
+    _video(conn, video_id)
+    run = _latest_run(conn, video_id)
+    arrays = get_effective_track(conn, paths, video_id)
+    climber_id = run.get("climber_track_id")
+    edits = pose_edits_repo.list_active(conn, video_id)
+    confirmed = confirmed_frames(edits)
+    if climber_id is None:
+        return {"items": [], "total": 0}
+    mask = arrays["track_id"] == int(climber_id)
+    flags = flag_frames(
+        arrays["frame"][mask],
+        arrays["keypoints"][mask],
+        confirmed=confirmed,
+    )
+    return {"items": flags, "total": len(flags)}
