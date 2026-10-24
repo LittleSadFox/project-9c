@@ -16,6 +16,7 @@ export function PlaybackPane({
   edges,
   srcWidth,
   srcHeight,
+  children,
 }) {
   return (
     <VideoStage src={src} poster={poster} videoRef={playback.videoRef} hideVideo={mode === "skeleton"}>
@@ -28,6 +29,7 @@ export function PlaybackPane({
         srcWidth={srcWidth}
         srcHeight={srcHeight}
       />
+      {children}
       <div className="video-stage-transport">
         <TransportBar
           playing={playback.playing}

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { interpretHotkey, isEditableTarget, stepDelta } from "./hotkeys.js";
+import { interpretHotkey, isBlockedHotkeyTarget, isEditableTarget, stepDelta } from "./hotkeys.js";
 
 function key(value, extra = {}) {
   return { key: value, target: { tagName: "BODY" }, ...extra };
@@ -32,6 +32,25 @@ describe("interpretHotkey", () => {
   it("ignores keys in an editable field", () => {
     expect(isEditableTarget({ tagName: "INPUT" })).toBe(true);
     expect(interpretHotkey(key(" ", { target: { tagName: "TEXTAREA" } }))).toBeNull();
+  });
+
+  it("ignores a focused button", () => {
+    const target = { tagName: "BUTTON" };
+    expect(isBlockedHotkeyTarget(target)).toBe(true);
+    expect(interpretHotkey(key("Enter", { target }))).toBeNull();
+    expect(interpretHotkey(key("Delete", { target }))).toBeNull();
+  });
+
+  it("ignores a focused link", () => {
+    const target = { tagName: "A" };
+    expect(isBlockedHotkeyTarget(target)).toBe(true);
+    expect(interpretHotkey(key("Enter", { target }))).toBeNull();
+  });
+
+  it("ignores role=button", () => {
+    const target = { tagName: "DIV", getAttribute: (name) => (name === "role" ? "button" : null) };
+    expect(isBlockedHotkeyTarget(target)).toBe(true);
+    expect(interpretHotkey(key("Enter", { target }))).toBeNull();
   });
 
   it("returns step deltas", () => {

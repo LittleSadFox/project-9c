@@ -77,3 +77,64 @@ export const keypointsFixture = {
   end: 120,
   frames: Array.from({ length: 120 }, () => dummyFrame()),
 };
+
+export const sceneFixture = {
+  floor_line: [
+    [100, 980],
+    [1800, 990],
+  ],
+  top_zone: [
+    [700, 40],
+    [1200, 40],
+    [1200, 180],
+    [700, 180],
+  ],
+  start_holds: [[900, 420]],
+  ref_points: [{ name: "arete", x: 200, y: 300 }],
+  source: "auto",
+};
+
+export const proposalFixture = {
+  id: "prop-1",
+  start_frame: 10,
+  end_frame: 40,
+  outcome_guess: "fall",
+  confidence: 0.82,
+  model_version: "event/rule-v1",
+  status: "pending",
+  attempt_id: null,
+};
+
+export const proposalTwoFixture = {
+  id: "prop-2",
+  start_frame: 60,
+  end_frame: 90,
+  outcome_guess: "send",
+  confidence: 0.74,
+  model_version: "event/rule-v1",
+  status: "pending",
+  attempt_id: null,
+};
+
+export const reviewQueueFixture = [
+  { frame: 12, kind: "lr_flip", score: 0.21 },
+  { frame: 40, kind: "low_score", score: 0.18 },
+];
+
+export const personsFixture = [
+  {
+    track_id: 1,
+    bbox: [80, 100, 120, 240],
+    keypoints: dummyFrame(),
+  },
+  {
+    track_id: 2,
+    bbox: [400, 160, 90, 200],
+    keypoints: dummyFrame(0.4),
+  },
+];
+
+export const poseEditFixture = {
+  edit_id: "ed-1",
+  frames: [12],
+};

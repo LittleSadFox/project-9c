@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 
-import { frameFromClientX, scalePoint, videoContentRect } from "./geometry.js";
+import {
+  clampPoint,
+  clientToSource,
+  frameFromClientX,
+  pointInBBox,
+  scalePoint,
+  unscalePoint,
+  videoContentRect,
+} from "./geometry.js";
 
 describe("geometry", () => {
   it("scales proxy pixels into the canvas", () => {
@@ -21,5 +29,15 @@ describe("geometry", () => {
 
   it("maps a click to a frame", () => {
     expect(frameFromClientX(50, { left: 0, width: 100 }, 11)).toBe(5);
+  });
+
+  it("maps a click back to source pixels", () => {
+    expect(unscalePoint(200, 100, 200, 100, 400, 200)).toEqual([100, 50]);
+    expect(clientToSource(50, 25, { left: 0, top: 0, width: 100, height: 50 }, 200, 100)).toEqual([
+      100, 50,
+    ]);
+    expect(clampPoint(-4, 2000, 1920, 1080)).toEqual([0, 1079]);
+    expect(pointInBBox(120, 140, [100, 100, 50, 80])).toBe(true);
+    expect(pointInBBox(10, 10, [100, 100, 50, 80])).toBe(false);
   });
 });

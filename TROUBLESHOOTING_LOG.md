@@ -25,6 +25,22 @@ Copy this block for a new entry.
 
 ## Entries
 
+### 2026-10-24 — review hotkeys behind a focused control or sheet
+
+- Symptom: Enter accepted a proposal while a button, a link, or a confirm sheet had focus. Delete rejected behind a sheet.
+- Where it failed: bot computer (Vitest)
+- Cause: Hotkeys only skipped inputs, textareas, and contenteditable. They still read keys from buttons, links, and `role=button`. An open dialog did not disable the map.
+- Fix: Treat button, link, and `role=button` as blocked targets. Skip every hotkey while `[role=dialog][aria-modal=true]` is open. The review page also passes `enabled=!sheet`.
+- Prevention: Keep a test for a focused button, a focused link, and an open sheet.
+
+### 2026-10-24 — Phase 2 e2e waits for D and E
+
+- Symptom: A keyboard review against the live API 404s on `/proposals`, `/scene`, and pose edit routes until slices D and E merge.
+- Where it failed: bot computer (Playwright)
+- Cause: This slice ships in parallel with mocked `api/*` clients. The detect and skeleton backends are now on main after p2-A and p2-B.
+- Fix: Run `e2e/phase2.keyboard.spec.js` against page-route mocks. Keep `e2e/phase2.spec.js` skipped unless `CC_E2E_BACKEND=1` and `CC_POSE_BACKEND=fixture`.
+- Prevention: This rebase sits on main after p2-B (`f74166c4`). Run the backend e2e when those flags are set.
+
 ### 2026-10-24 — stale effective track after a pose re-run
 
 - Symptom: An edit still showed the old climber after a new pose job.
