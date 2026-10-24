@@ -670,7 +670,7 @@ The Phase 1 build is on main (2026-10-23).
 p1-A is #19 (`52bdb274`).
 p1-B is #20 (`b1e5dfed`).
 p1-C is #18 (`6692b663`).
-The Ryan Mac pass is still open.
+The Ryan Mac pass is complete (2026-10-24).
 
 - Build (backend)
   - CRUD for boulders, sessions and videos; streaming upload into `tmp/` with sha256 and the size limit; ffprobe validation; one session per recording day.
@@ -699,7 +699,9 @@ Between Phase 1 and Phase 2, you build the golden set (section 11) with the Phas
 
 ### Phase 2 — Review tools: automatic start and fall, auto-cut, skeleton corrections
 Phase 2 is planned as three slices: p2-A scene and detect, p2-B skeleton edits, and p2-C review UI.
-This phase stays review-only until the Ryan Mac pass.
+Phase 2 merges are OK under the usual gate (Coder + Inspector + Runpod APPROVE + CI green).
+Merge order is D → E → F / A → B → C.
+Do not start an eval pod until the golden-set and the 1080p `sync_volume.sh` pre-step (Planner).
 
 - Build
   - The automatic floor line; `SceneMarksEditor` (floor line, top zone, start holds, reference points; copy from another video).
