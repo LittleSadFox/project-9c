@@ -293,6 +293,10 @@ def test_pose_edit_conflict_while_pose_job_runs(
     )
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "pose_busy"
+    busy = client.app.state.db_conn.execute(
+        "SELECT status FROM jobs WHERE id = 'pose-busy-1'"
+    ).fetchone()
+    assert busy["status"] == "running"
     edits = client.app.state.db_conn.execute(
         "SELECT COUNT(*) AS n FROM pose_edits WHERE video_id = ?",
         (video_id,),

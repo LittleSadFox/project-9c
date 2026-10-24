@@ -736,3 +736,14 @@ A successful pose job also calls `enqueue_detect`.
 Detection reads `get_effective_track`, not the raw climber track.
 
 Do not change `AGENTS.md`, `coding_plan.md`, `scripts/gpu/`, `docker/`, `ARCHITECTURE.md`, or the frontend.
+
+## 2026-10-24 — stabilize pose-busy edit conflict test
+
+`test_pose_edit_conflict_while_pose_job_runs` seeds a stuck `running` jobs row.
+
+Do not insert that row as `queued`.
+The test queue claims a queued pose job.
+A live `handle_pose` fails at once when ffmpeg is missing.
+
+The 409 check still uses `_pose_job_active`.
+The test no longer needs a live pose handle to stay busy.
