@@ -1,6 +1,17 @@
 import { request } from "./client.js";
 import { emptyScene } from "../lib/lists.js";
 
+const SCENE_WRITE_KEYS = ["floor_line", "top_zone", "start_holds", "ref_points"];
+
+export function sceneWriteBody(scene) {
+  const src = scene || {};
+  const body = {};
+  for (const key of SCENE_WRITE_KEYS) {
+    body[key] = src[key] === undefined ? null : src[key];
+  }
+  return body;
+}
+
 export function getScene(videoId) {
   return request(`/api/videos/${encodeURIComponent(videoId)}/scene`);
 }
@@ -8,7 +19,7 @@ export function getScene(videoId) {
 export function putScene(videoId, body) {
   return request(`/api/videos/${encodeURIComponent(videoId)}/scene`, {
     method: "PUT",
-    body: JSON.stringify(body),
+    body: JSON.stringify(sceneWriteBody(body)),
   });
 }
 

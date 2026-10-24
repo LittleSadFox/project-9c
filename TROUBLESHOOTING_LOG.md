@@ -25,6 +25,14 @@ Copy this block for a new entry.
 
 ## Entries
 
+### 2026-10-24 — scene save and undo returned 422
+
+- Symptom: Save marks and Cmd+Z undo failed with HTTP 422.
+- Where it failed: review UI after p2-C (`091ac9ac`)
+- Cause: `putScene` sent the GET scene object. That object includes `source`. Backend `ScenePut` uses `extra="forbid"` and does not accept `source`.
+- Fix: Strip the PUT body to `floor_line`, `top_zone`, `start_holds`, and `ref_points`.
+- Prevention: Keep a Vitest check that fails if `source` is in the PUT body.
+
 ### 2026-10-24 — review hotkeys behind a focused control or sheet
 
 - Symptom: Enter accepted a proposal while a button, a link, or a confirm sheet had focus. Delete rejected behind a sheet.
