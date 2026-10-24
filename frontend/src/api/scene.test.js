@@ -33,13 +33,22 @@ describe("scene api", () => {
     );
   });
 
-  it("strips source and other extras from the PUT body", async () => {
-    globalThis.fetch = vi.fn().mockResolvedValueOnce(jsonResponse({ scene: sceneFixture, job_id: "detect-1" }));
-    const getShaped = { ...sceneFixture, extra: "nope", updated_at: "2026-10-24T00:00:00Z" };
-    expect(sceneWriteBody(getShaped)).not.toHaveProperty("source");
-    await putScene("vid-1", getShaped);
-    const body = JSON.parse(globalThis.fetch.mock.calls[0][1].body);
-    assertWritableSceneBody(body);
-    expect(Object.keys(body).sort()).toEqual(["floor_line", "ref_points", "start_holds", "top_zone"]);
+  it("strips source and other extras from save and undo PUT bodies", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ scene: { ...sceneFixture, source: "user" }, job_id: "detect-1" }))
+      .mockResolvedValueOnce(jsonResponse({ scene: sceneFixture, job_id: "detect-1" }));
+    const saveDraft = { ...sceneFixture, source: "user", extra: "nope" };
+    const undoPrevious = { ...sceneFixture, extra: "nope", updated_at: "2026-10-24T00:00:00Z" };
+    expect(sceneWriteBody(saveDraft)).not.toHaveProperty("source");
+    expect(sceneWriteBody(undoPrevious)).not.toHaveProperty("source");
+    await putScene("vid-1", saveDraft);
+    await putScene("vid-1", undoPrevious);
+    expect(globalThis.fetch.mock.calls).toHaveLength(2);
+    for (const call of globalThis.fetch.mock.calls) {
+      const body = JSON.parse(call[1].body);
+      assertWritableSceneBody(body);
+      expect(Object.keys(body).sort()).toEqual(["floor_line", "ref_points", "start_holds", "top_zone"]);
+    }
   });
 });

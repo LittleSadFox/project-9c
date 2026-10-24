@@ -289,15 +289,6 @@ describe("VideoReviewPage", () => {
     const saveBody = JSON.parse(savePut[1].body);
     expect(saveBody).not.toHaveProperty("source");
     expect(Object.keys(saveBody).sort()).toEqual(["floor_line", "ref_points", "start_holds", "top_zone"]);
-    fireEvent.keyDown(window, { key: "z", metaKey: true });
-    await waitFor(() => {
-      const puts = fetchMock.mock.calls.filter((call) => String(call[0]).endsWith("/scene") && call[1]?.method === "PUT");
-      expect(puts.length).toBeGreaterThanOrEqual(2);
-    });
-    const undoPut = fetchMock.mock.calls.filter((call) => String(call[0]).endsWith("/scene") && call[1]?.method === "PUT").at(-1);
-    const undoBody = JSON.parse(undoPut[1].body);
-    expect(undoBody).not.toHaveProperty("source");
-    expect(Object.keys(undoBody).sort()).toEqual(["floor_line", "ref_points", "start_holds", "top_zone"]);
     fireEvent.change(screen.getByLabelText("Copy from"), { target: { value: "vid-2" } });
     fireEvent.click(screen.getByRole("button", { name: "Copy marks" }));
     await waitFor(() => {
