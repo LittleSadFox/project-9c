@@ -10,7 +10,6 @@ from fastapi.testclient import TestClient
 from app.config import Settings
 from app.core.halpe26 import LEFT, LEFT_WRIST, N_KEYPOINTS, RIGHT, swap_left_right
 from app.pose.store import write_pose
-from app.repo import jobs as jobs_repo
 from tests.conftest import api_headers
 
 
@@ -273,13 +272,18 @@ def test_pose_edit_conflict_while_pose_job_runs(
 ) -> None:
     _auth(client, tmp_settings)
     video_id = _seed_two_tracks(client)
-    jobs_repo.insert_job(
-        client.app.state.db_conn,
-        job_id="pose-busy-1",
-        kind="pose",
-        lane="compute",
-        entity_type="video",
-        entity_id=video_id,
+    # Insert as running so the live compute worker cannot claim and finish it.
+    client.app.state.db_conn.execute(
+        """
+        INSERT INTO jobs (
+            id, kind, lane, status, progress, message,
+            entity_type, entity_id, error, created_at, started_at, finished_at
+        ) VALUES (
+            'pose-busy-1', 'pose', 'compute', 'running', 0, NULL,
+            'video', ?, NULL, '2026-10-24T00:00:00Z', '2026-10-24T00:00:01Z', NULL
+        )
+        """,
+        (video_id,),
     )
     client.app.state.db_conn.commit()
     response = client.post(

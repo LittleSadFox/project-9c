@@ -33,6 +33,14 @@ Copy this block for a new entry.
 - Fix: Key the cache with the raw NPZ sha256 plus the edits hash. Store it next to the run file. A new run id writes a new path.
 - Prevention: Never serve `*.effective.npz` when the raw file hash does not match.
 
+### 2026-10-24 — 409 pose-busy test raced the live worker
+
+- Symptom: `test_pose_edit_conflict_while_pose_job_runs` got 201 in pod-layout. Ubuntu and macOS passed.
+- Where it failed: CI pod-layout /tmp/cc-src
+- Cause: The test inserted a queued pose job. The compute worker claimed it, the missing proxy failed the job, and the 409 check no longer saw queued or running.
+- Fix: Insert the fixture job as `running`. The worker only claims `queued` rows.
+- Prevention: Do not leave a queued pose job for a live `JobQueue` unless the test wants the worker to run it.
+
 ### 2026-10-24 — two pose runs in the same second
 
 - Symptom: A pose re-run in the same second still served the old run.
