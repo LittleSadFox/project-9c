@@ -268,6 +268,14 @@ Kinds: `cut.accept`, `cut.adjust`, `cut.reject`, `cut.missed`, `cut.delete`, `ou
 | `active` | INTEGER NOT NULL | One active row per family |
 | `created_at` | TEXT NOT NULL | ISO 8601 UTC |
 
+Migration `0002_event_rule_v1` seeds the active rule detector.
+
+- `id` is `c0ffee00-0002-4000-8000-000000000002`
+- `family` is `event`
+- `version` is `rule-v1`
+- `source` is `app`
+- `params` holds the default detector thresholds
+
 ## `jobs`
 
 | Column | Type | Notes |
@@ -297,7 +305,18 @@ Environment variables stay in the frozen `Settings` object.
 | `key` | TEXT PK | |
 | `value` | TEXT NOT NULL | JSON |
 
-Keys include `pose_mode`, `det_every`, `proxy_fps`, `proxy_long_side`, `pre_roll_s`, `post_roll_s`, and detector thresholds.
+Keys include `pose_mode`, `det_every`, `proxy_fps`, `proxy_long_side`, `pre_roll_s`, `post_roll_s`, and these detector thresholds:
+
+- `leave_ground_height_s`
+- `leave_ground_hold_s`
+- `ground_return_height_s`
+- `ground_return_hold_s`
+- `drop_speed_s`
+- `drop_window_s`
+- `top_hold_s`
+- `top_grow_s`
+
+Migration `0002_event_rule_v1` inserts the default threshold values.
 
 ## `trash_items`
 
@@ -320,6 +339,7 @@ Keys include `pose_mode`, `det_every`, `proxy_fps`, `proxy_long_side`, `pre_roll
 Running the migrations twice must change nothing.
 
 Phase 0 applies this schema in `backend/app/migrations/0001_init.sql`.
+Phase 2 slice D applies `backend/app/migrations/0002_event_rule_v1.sql`.
 
 ## Files on disk, not columns
 

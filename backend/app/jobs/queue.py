@@ -70,8 +70,12 @@ class JobQueue:
             entity_type=entity_type,
             entity_id=entity_id,
         )
-        self._wake.set()
+        self.notify()
         return job
+
+    def notify(self) -> None:
+        """Wake lane workers after a job is inserted on another connection."""
+        self._wake.set()
 
     def get(self, job_id: str) -> dict[str, Any] | None:
         return jobs_repo.get_job(self._request_conn, job_id)

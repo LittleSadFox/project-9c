@@ -40,7 +40,6 @@ def insert(
             utc_now(),
         ),
     )
-    conn.commit()
     row = as_dict(
         conn.execute("SELECT * FROM feedback_events WHERE id = ?", (event_id,)).fetchone()
     )

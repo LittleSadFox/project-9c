@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class PoseTrackOut(BaseModel):
@@ -44,6 +44,20 @@ class PosePersonOut(BaseModel):
 class PosePersonsOut(BaseModel):
     frame: int
     persons: list[PosePersonOut]
+
+
+class ClimberPut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    track_id: int | None = None
+    frame: int | None = None
+    x: float | None = None
+    y: float | None = None
+
+
+class ClimberOut(BaseModel):
+    climber_track_id: int
+    job_id: str | None = None
 
 
 def track_out(row: dict[str, Any]) -> PoseTrackOut:

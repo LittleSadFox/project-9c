@@ -25,6 +25,30 @@ Copy this block for a new entry.
 
 ## Entries
 
+### 2026-10-24 — floor sign flipped when a standing toe sat below the line
+
+- Symptom: `leave_ground` on a clean synthetic clip was about 75 frames late.
+- Where it failed: bot computer (unit tests)
+- Cause: `to_floor_frame` flipped the axis when the first standing toe was slightly below the floor (`y=604.8` vs `y=600`). Height then grew while the climber stood.
+- Fix: Keep the floor line left to right. Do not flip. Height above the floor is `floor_y - y`.
+- Prevention: Test the auto floor on standing frames whose toes sit a few pixels off the line.
+
+### 2026-10-24 — sit start hid behind toes on the floor
+
+- Symptom: A sit-start clip produced no `leave_ground`.
+- Where it failed: bot computer (unit tests)
+- Cause: The lowest body point stayed on the toes. The hips dropped, but the toes stayed on the floor, so height never crossed 0.15 `s`.
+- Fix: In the sit profile, drop the hips by 0.85 `s` and lift the feet onto the wall (1.15 `s`) until the labelled leave frame.
+- Prevention: Keep sit-start coverage in `test_events.py` and in the eval fixture.
+
+### 2026-10-24 — fall profile returned early
+
+- Symptom: `ground_return` was about 19 frames early on the synthetic fall.
+- Where it failed: bot computer (unit tests)
+- Cause: The fall eased the feet down before the labelled land frame. The 0.10 `s` hold then started too soon.
+- Fix: Keep foot lift at 0.45 `s` until the land frame.
+- Prevention: Label leave and land as contact events, not as padded proposal windows.
+
 ### 2026-10-23 — invalid started_at hit expired TTL on a clock tick
 
 - Symptom: Ubuntu CI failed `test_started_at_injection_does_not_run`. `cc_watchdog_start` exited 1 after `terminate ok`.

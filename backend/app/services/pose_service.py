@@ -350,6 +350,9 @@ def handle_pose_job(
             )
         _set_pose_status(ctx.conn, video_id, "done", commit=False)
         ctx.conn.commit()
+        from app.services.detection import enqueue_detect
+
+        enqueue_detect(ctx.conn, video_id)
         return {"run_id": run_id, "climber_track_id": climber_id, "n_tracks": len(tracks)}
     except Exception as exc:
         _rollback_quiet(ctx.conn)
@@ -519,3 +522,88 @@ def get_persons(
             }
         )
     return {"frame": int(frame), "persons": persons}
+
+
+def set_climber(
+    conn: sqlite3.Connection,
+    paths: LibraryPaths,
+    video_id: str,
+    data: dict[str, Any],
+    queue: Any | None = None,
+) -> dict[str, Any]:
+    """Reassign the climber track. Logs climber.reassign and enqueues detect."""
+    from app.core.climber import person_at_point
+    from app.core.tracking import Track
+    from app.db import immediate
+    from app.learning.feedback import log_feedback
+    from app.repo import models as models_repo
+    from app.services.detection import enqueue_detect
+
+    video = _video(conn, video_id)
+    run = _latest_run(conn, video_id)
+    before_id = run.get("climber_track_id")
+    track_id = data.get("track_id")
+    if track_id is None:
+        frame = data.get("frame")
+        x = data.get("x")
+        y = data.get("y")
+        if frame is None or x is None or y is None:
+            raise AppError("bad_climber", 400, "Give track_id or frame, x, and y.")
+        arrays = _load_run_arrays(paths, video_id, run, effective=False)
+        tracks: list[Track] = []
+        by_id: dict[int, Track] = {}
+        for index, stored in enumerate(arrays["frame"]):
+            tid = int(arrays["track_id"][index])
+            track = by_id.get(tid)
+            if track is None:
+                track = Track(track_id=tid)
+                by_id[tid] = track
+                tracks.append(track)
+            kpt = arrays["keypoints"][index]
+            track.frames.append(int(stored))
+            track.boxes.append(arrays["bbox"][index])
+            track.keypoints.append(kpt[:, :2])
+            if kpt.shape[-1] >= 3:
+                track.scores.append(kpt[:, 2])
+            else:
+                track.scores.append(np.ones((N_KEYPOINTS,), dtype=np.float32))
+        picked = person_at_point(tracks, int(frame), float(x), float(y))
+        if picked is None:
+            raise AppError("not_found", 404, "No person is at that point.")
+        track_id = picked
+    track_id = int(track_id)
+    exists = conn.execute(
+        "SELECT track_id FROM pose_tracks WHERE run_id = ? AND track_id = ?",
+        (run["id"], track_id),
+    ).fetchone()
+    if exists is None:
+        raise AppError("not_found", 404, "The track is not here.")
+    with immediate(conn):
+        conn.execute(
+            "UPDATE pose_runs SET climber_track_id = ? WHERE id = ?",
+            (track_id, run["id"]),
+        )
+        conn.execute(
+            """
+            UPDATE pose_tracks
+            SET is_climber = CASE WHEN track_id = ? THEN 1 ELSE 0 END
+            WHERE run_id = ?
+            """,
+            (track_id, run["id"]),
+        )
+        log_feedback(
+            conn,
+            kind="climber.reassign",
+            entity_type="video",
+            entity_id=video_id,
+            video_id=video_id,
+            before={"climber_track_id": before_id},
+            after={"climber_track_id": track_id},
+            model_version_id=models_repo.active_event_id(conn),
+        )
+    del video
+    job = enqueue_detect(conn, video_id, queue)
+    return {
+        "climber_track_id": track_id,
+        "job_id": None if job is None else job.get("id"),
+    }

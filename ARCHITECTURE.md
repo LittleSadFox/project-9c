@@ -380,3 +380,21 @@ Slice A owns the library API and the media lane.
 - `DELETE` on a video or an attempt moves files into `trash/<id>/`. `POST /api/trash/{id}/restore` moves them back. `DELETE /api/trash` removes the files.
 - `routes/__init__.py` mounts the Phase 1 routers. Slice B adds one `include_router` line for pose.
 - API tests use `FakeMediaTool`. Media tests use `FfmpegTool` and generated fixtures, including a frame-code video.
+
+## 16. Phase 2 detection and review (slice D)
+
+Slice D owns the rule detector, scene marks, proposals, and review actions.
+
+- `core/scene.py` fits a Theil–Sen floor line through static low foot points.
+- Height is `floor_y - y` after the line is rotated to horizontal. The line is left to right. The code does not flip the floor frame from the first standing toe.
+- `core/events.py` finds `leave_ground`, `ground_return`, `drop`, and `top`. Lengths use torso units `s`.
+- A sit start counts. The hips drop while the feet stay off the floor.
+- `core/cuts.py` pads each span by `pre_roll_s` and `post_roll_s`. Overlaps split at the midpoint.
+- `services/detection.py` enqueues a compute-lane `detect` job after pose, scene PUT, and climber change. A reviewed video is a no-op.
+- Until slice E merges, detect reads the raw climber track from the Phase 1 B NPZ store.
+- `learning/feedback.py` `log_feedback` is the only writer. It does not commit. The caller owns the transaction.
+- Each review action writes one `feedback_events` row. `before` and `after` hold ids and values only.
+- Batch-accept and finish-review use one `BEGIN IMMEDIATE` with their feedback rows.
+- Finish-review returns 409 while proposals are pending.
+- `routes/__init__.py` `include_routers()` mounts `scene` and `proposals`.
+- `ml/jobs.py` `eval` scores the rule detector on a synthetic labelled fixture and writes `metrics.json`.

@@ -9,7 +9,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import Response
 
-from app.schemas.pose import PosePersonsOut, PoseRunOut
+from app.schemas.pose import ClimberOut, ClimberPut, PosePersonsOut, PoseRunOut
 from app.security import require_session
 from app.services import pose_service
 
@@ -69,3 +69,15 @@ def get_persons(
         video_id,
         frame=frame,
     )
+
+
+@router.put("/{video_id}/pose/climber", response_model=ClimberOut)
+def put_climber(request: Request, video_id: str, body: ClimberPut) -> ClimberOut:
+    payload = pose_service.set_climber(
+        request.app.state.db_conn,
+        request.app.state.paths,
+        video_id,
+        body.model_dump(exclude_unset=True),
+        request.app.state.queue,
+    )
+    return ClimberOut.model_validate(payload)

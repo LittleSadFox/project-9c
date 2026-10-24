@@ -59,23 +59,30 @@ def create_attempt(
     start = int(data["start_frame"])
     end = int(data["end_frame"])
     _validate_span(start, end, int(video["n_frames"]))
-    attempt = attempts_repo.insert(
-        conn,
-        video_id=video_id,
-        boulder_id=video.get("boulder_id"),
-        start_frame=start,
-        end_frame=end,
-        outcome=str(data["outcome"]),
-    )
-    log_feedback(
-        conn,
-        kind="cut.missed",
-        entity_type="attempt",
-        entity_id=str(attempt["id"]),
-        video_id=video_id,
-        after={"start_frame": start, "end_frame": end, "outcome": data["outcome"]},
-    )
-    job = _request_cut(conn, queue, str(attempt["id"]))
+    from app.db import immediate
+    from app.repo import models as models_repo
+
+    with immediate(conn):
+        attempt = attempts_repo.insert(
+            conn,
+            video_id=video_id,
+            boulder_id=video.get("boulder_id"),
+            start_frame=start,
+            end_frame=end,
+            outcome=str(data["outcome"]),
+            commit=False,
+        )
+        log_feedback(
+            conn,
+            kind="cut.missed",
+            entity_type="attempt",
+            entity_id=str(attempt["id"]),
+            video_id=video_id,
+            before={"proposal_id": None},
+            after={"start_frame": start, "end_frame": end, "outcome": data["outcome"]},
+            model_version_id=models_repo.active_event_id(conn),
+        )
+    job = request_cut(conn, queue, str(attempt["id"]))
     row = _with_video_media(conn, attempt)
     row["job_id"] = job["id"] if job else None
     return row
@@ -135,7 +142,7 @@ def patch_attempt(
     row = attempts_repo.update(conn, attempt_id, updates) or attempt
     job_id = None
     if frames_changed:
-        job = _request_cut(conn, queue, attempt_id)
+        job = request_cut(conn, queue, attempt_id)
         job_id = job["id"] if job else None
     out = _with_video_media(conn, row)
     out["job_id"] = job_id
@@ -258,7 +265,7 @@ def _validate_span(start: int, end: int, n_frames: int) -> None:
         raise AppError("bad_span", 400, "The frames are outside the video.")
 
 
-def _request_cut(
+def request_cut(
     conn: sqlite3.Connection, queue: JobQueue, attempt_id: str
 ) -> dict[str, Any] | None:
     try:

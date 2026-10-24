@@ -138,13 +138,18 @@ def list_videos(
 
 
 def update(
-    conn: sqlite3.Connection, video_id: str, fields: dict[str, Any]
+    conn: sqlite3.Connection,
+    video_id: str,
+    fields: dict[str, Any],
+    *,
+    commit: bool = True,
 ) -> dict[str, Any] | None:
     if not fields:
         return get(conn, video_id, include_deleted=True)
     cols = ", ".join(f"{key} = ?" for key in fields)
     conn.execute(f"UPDATE videos SET {cols} WHERE id = ?", [*fields.values(), video_id])
-    conn.commit()
+    if commit:
+        conn.commit()
     return get(conn, video_id, include_deleted=True)
 
 

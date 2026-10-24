@@ -16,6 +16,14 @@ class SettingsOut(BaseModel):
     proxy_long_side: int | None = None
     pre_roll_s: float | None = None
     post_roll_s: float | None = None
+    leave_ground_height_s: float | None = None
+    leave_ground_hold_s: float | None = None
+    ground_return_height_s: float | None = None
+    ground_return_hold_s: float | None = None
+    drop_speed_s: float | None = None
+    drop_window_s: float | None = None
+    top_hold_s: float | None = None
+    top_grow_s: float | None = None
 
 
 class SettingsPatch(BaseModel):
@@ -27,6 +35,14 @@ class SettingsPatch(BaseModel):
     proxy_long_side: int | None = Field(default=None, ge=160, le=4096)
     pre_roll_s: float | None = Field(default=None, ge=0, le=30)
     post_roll_s: float | None = Field(default=None, ge=0, le=30)
+    leave_ground_height_s: float | None = Field(default=None, ge=0, le=5)
+    leave_ground_hold_s: float | None = Field(default=None, ge=0, le=10)
+    ground_return_height_s: float | None = Field(default=None, ge=0, le=5)
+    ground_return_hold_s: float | None = Field(default=None, ge=0, le=10)
+    drop_speed_s: float | None = Field(default=None, ge=0, le=20)
+    drop_window_s: float | None = Field(default=None, ge=0, le=10)
+    top_hold_s: float | None = Field(default=None, ge=0, le=10)
+    top_grow_s: float | None = Field(default=None, ge=0, le=5)
 
     def changes(self) -> dict[str, Any]:
         return self.model_dump(exclude_unset=True)
