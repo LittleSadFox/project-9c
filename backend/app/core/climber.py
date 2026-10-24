@@ -67,3 +67,29 @@ def person_at_point(tracks: list[Track], frame: int, x: float, y: float) -> int 
         return None
     hits.sort()
     return hits[0][1]
+
+
+def person_at_xy(
+    frames: np.ndarray,
+    track_ids: np.ndarray,
+    boxes: np.ndarray,
+    frame: int,
+    x: float,
+    y: float,
+) -> int | None:
+    """Hit-test pose arrays. Prefer the smallest box that contains (x, y)."""
+    hits: list[tuple[float, int]] = []
+    stored_frames = np.asarray(frames)
+    ids = np.asarray(track_ids)
+    stored_boxes = np.asarray(boxes, dtype=np.float32).reshape(-1, 4)
+    for index, stored in enumerate(stored_frames):
+        if int(stored) != int(frame):
+            continue
+        box = stored_boxes[index]
+        if float(box[0]) <= x <= float(box[2]) and float(box[1]) <= y <= float(box[3]):
+            area = max(0.0, float(box[2]) - float(box[0])) * max(0.0, float(box[3]) - float(box[1]))
+            hits.append((area, int(ids[index])))
+    if not hits:
+        return None
+    hits.sort()
+    return hits[0][1]

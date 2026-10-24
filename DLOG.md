@@ -705,3 +705,45 @@ Eval:
 - CPU tests only
 
 Do not change `AGENTS.md`, `coding_plan.md`, `scripts/gpu/`, or `docker/`.
+
+## 2026-10-24 — p2-B skeleton corrections backend
+
+Add pose edit APIs and the effective-track cache.
+
+Core:
+
+- `core/edits.py` applies move, L/R swap, invalid, and confirm
+- A move uses tent interpolation inside its range
+- Only frames inside the range change
+- `core/pose_checks.py` flags an L/R flip when a swap cuts the jump by more than 50 percent
+- It also flags a mean score below 0.5
+- The review queue is worst first
+
+Store and service:
+
+- Effective-track cache key is raw NPZ sha256 plus the edits hash
+- A pose re-run writes a new NPZ, so the cache cannot serve a stale track
+- `get_effective_track` applies active `pose_edits` to the climber track
+- `PUT /pose/climber` accepts a track id or a point
+- `GET /pose/persons` can hit-test with `x` and `y`
+- `GET /pose/review-queue` returns flagged frames
+- `GET/POST/DELETE /pose/edits` writes one feedback row per review action
+- The 409 pose-job check runs in the same `BEGIN IMMEDIATE` as the edit write
+
+This rebase sits on main after p2-A (`643f9d79`).
+Climber reassignment calls `services.detection.enqueue_detect`.
+A successful pose job also calls `enqueue_detect`.
+Detection reads `get_effective_track`, not the raw climber track.
+
+Do not change `AGENTS.md`, `coding_plan.md`, `scripts/gpu/`, `docker/`, `ARCHITECTURE.md`, or the frontend.
+
+## 2026-10-24 — stabilize pose-busy edit conflict test
+
+`test_pose_edit_conflict_while_pose_job_runs` seeds a stuck `running` jobs row.
+
+Do not insert that row as `queued`.
+The test queue claims a queued pose job.
+A live `handle_pose` fails at once when ffmpeg is missing.
+
+The 409 check still uses `_pose_job_active`.
+The test no longer needs a live pose handle to stay busy.
