@@ -56,10 +56,6 @@ test("reviews a whole fixture video keyboard-only against mocked D+E APIs", asyn
   video.review_status = "unreviewed";
   video.counts.pending_proposals = 2;
 
-  await page.route("**/api/boulders**", (route) => json(route, empty));
-  await page.route("**/api/sessions**", (route) => json(route, empty));
-  await page.route("**/api/attempts**", (route) => json(route, empty));
-  await page.route("**/api/trash**", (route) => json(route, empty));
   await page.route("**/health", (route) =>
     json(route, {
       status: "ok",
@@ -71,59 +67,87 @@ test("reviews a whole fixture video keyboard-only against mocked D+E APIs", asyn
       dev: false,
     }),
   );
-  await page.route("**/api/jobs**", (route) => json(route, empty));
-  await page.route("**/api/videos/vid-1/pose/keypoints**", (route) =>
-    json(route, { start: 0, end: 120, frames: [] }),
-  );
-  await page.route("**/api/videos/vid-1/pose/review-queue", (route) => json(route, []));
-  await page.route("**/api/videos/vid-1/pose/persons**", (route) => json(route, []));
-  await page.route("**/api/videos/vid-1/pose", (route) =>
-    json(route, { climber_track_id: 1, edges: [], tracks: [] }),
-  );
-  await page.route("**/api/videos/vid-1/scene", async (route) => {
-    if (route.request().method() === "PUT") {
-      await json(route, { scene: {}, job_id: "detect-1" });
+  await page.route("**/api/**", async (route) => {
+    const url = new URL(route.request().url());
+    const path = url.pathname;
+    const method = route.request().method();
+    if (path === "/api/jobs") {
+      await json(route, empty);
       return;
     }
-    await json(route, {
-      floor_line: [
-        [0, 1000],
-        [1900, 1000],
-      ],
-      top_zone: [
-        [700, 40],
-        [1200, 40],
-        [1200, 160],
-        [700, 160],
-      ],
-      start_holds: [],
-      ref_points: [],
-      source: "auto",
-    });
-  });
-  await page.route("**/api/videos/vid-1/proposals", (route) => json(route, proposals));
-  await page.route("**/api/proposals/prop-1/accept", async (route) => {
-    proposals[0].status = "accepted";
-    await json(route, { attempt: { id: "att-1" }, job_id: "cut-1" }, 201);
-  });
-  await page.route("**/api/proposals/prop-2/accept", async (route) => {
-    proposals[1].status = "accepted";
-    await json(route, { attempt: { id: "att-2" }, job_id: "cut-2" }, 201);
-  });
-  await page.route("**/api/videos/vid-1", async (route) => {
-    if (route.request().method() === "PATCH") {
+    if (path === "/api/videos/vid-1/proposals") {
+      await json(route, proposals);
+      return;
+    }
+    if (path === "/api/proposals/prop-1/accept" && method === "POST") {
+      proposals[0].status = "accepted";
+      await json(route, { attempt: { id: "att-1" }, job_id: "cut-1" }, 201);
+      return;
+    }
+    if (path === "/api/proposals/prop-2/accept" && method === "POST") {
+      proposals[1].status = "accepted";
+      await json(route, { attempt: { id: "att-2" }, job_id: "cut-2" }, 201);
+      return;
+    }
+    if (path === "/api/videos/vid-1" && method === "PATCH") {
       video.review_status = "reviewed";
       video.counts.pending_proposals = 0;
       await json(route, video);
       return;
     }
-    await json(route, video);
+    if (path === "/api/videos/vid-1") {
+      await json(route, video);
+      return;
+    }
+    if (path === "/api/videos/vid-1/pose") {
+      await json(route, { climber_track_id: 1, edges: [], tracks: [] });
+      return;
+    }
+    if (path === "/api/videos/vid-1/pose/keypoints") {
+      await json(route, { start: 0, end: 120, frames: [] });
+      return;
+    }
+    if (path === "/api/videos/vid-1/pose/review-queue") {
+      await json(route, []);
+      return;
+    }
+    if (path === "/api/videos/vid-1/pose/persons") {
+      await json(route, []);
+      return;
+    }
+    if (path === "/api/videos/vid-1/scene") {
+      await json(route, {
+        floor_line: [
+          [0, 1000],
+          [1900, 1000],
+        ],
+        top_zone: [
+          [700, 40],
+          [1200, 40],
+          [1200, 160],
+          [700, 160],
+        ],
+        start_holds: [],
+        ref_points: [],
+        source: "auto",
+      });
+      return;
+    }
+    if (path.startsWith("/api/videos/vid-1/proxy") || path.startsWith("/api/videos/vid-1/thumb") || path.startsWith("/api/videos/vid-1/frame")) {
+      await route.fulfill({ status: 204 });
+      return;
+    }
+    await json(route, empty);
   });
+
   await page.goto("/videos/vid-1");
   await expect(page.getByRole("button", { name: "Finish review" })).toBeVisible();
   await expect(page.getByRole("button", { name: /10–40/ })).toBeVisible();
   await page.keyboard.press("Enter");
+  await expect(page.getByText("Accepted").first()).toBeVisible();
+  await expect(page.getByRole("button", { name: "Accept attempt" })).toBeEnabled();
   await page.keyboard.press("Enter");
+  await expect(page.getByText("Accepted").nth(1)).toBeVisible();
   const finish = page.getByRole("button", { name: "Finish review" });
   await expect(finish).toBeEnabled();
   await finish.focus();
