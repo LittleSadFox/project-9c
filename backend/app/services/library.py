@@ -154,31 +154,42 @@ def get_video(conn: sqlite3.Connection, video_id: str) -> dict[str, Any]:
 
 
 def patch_video(conn: sqlite3.Connection, video_id: str, fields: dict[str, Any]) -> dict[str, Any]:
-    video = get_video(conn, video_id)
+    from app.db import immediate
+    from app.repo import models as models_repo
+
+    get_video(conn, video_id)
     cleaned = {key: value for key, value in fields.items() if key in VIDEO_PATCH_FIELDS}
     if "boulder_id" in cleaned and cleaned["boulder_id"]:
         get_boulder(conn, str(cleaned["boulder_id"]))
     if "session_id" in cleaned and cleaned["session_id"]:
         get_session(conn, str(cleaned["session_id"]))
     if cleaned.get("review_status") == "reviewed":
-        pending = videos_repo.pending_proposal_count(conn, video_id)
-        if pending:
-            raise AppError(
-                "review_blocked",
-                409,
-                "This video still has pending proposals.",
-                {"pending_proposals": pending},
-            )
-        log_feedback(
-            conn,
-            kind="review.complete",
-            entity_type="video",
-            entity_id=video_id,
-            video_id=video_id,
-            before={"review_status": video["review_status"]},
-            after={"review_status": "reviewed"},
-        )
-    row = videos_repo.update(conn, video_id, cleaned)
+        with immediate(conn):
+            locked = videos_repo.get(conn, video_id)
+            if locked is None:
+                raise AppError("not_found", 404, "The video is not here.")
+            pending = videos_repo.pending_proposal_count(conn, video_id)
+            if pending:
+                raise AppError(
+                    "review_blocked",
+                    409,
+                    "This video still has pending proposals.",
+                    {"pending_proposals": pending},
+                )
+            if str(locked.get("review_status")) != "reviewed":
+                log_feedback(
+                    conn,
+                    kind="review.complete",
+                    entity_type="video",
+                    entity_id=video_id,
+                    video_id=video_id,
+                    before={"review_status": locked["review_status"]},
+                    after={"review_status": "reviewed"},
+                    model_version_id=models_repo.active_event_id(conn),
+                )
+            row = videos_repo.update(conn, video_id, cleaned, commit=False)
+    else:
+        row = videos_repo.update(conn, video_id, cleaned)
     assert row is not None
     row["pending_proposals"] = videos_repo.pending_proposal_count(conn, video_id)
     row["attempts"] = videos_repo.attempt_count(conn, video_id)

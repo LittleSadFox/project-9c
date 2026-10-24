@@ -666,3 +666,42 @@ That wrapper is Phase 2.
 Send only changed rating fields on PATCH.
 Keep missing proximity and exertion as null.
 A notes-only edit must not mark the attempt as rated 0/0.
+
+## 2026-10-24 — p2-A detection and review backend
+
+Add Phase 2 slice D.
+
+Core:
+
+- `core/geometry.py`, `core/scene.py`, `core/events.py`, `core/cuts.py`, `core/metrics.py`
+- Theil–Sen auto floor line
+- Rule detector for leave, return, drop, and top
+- Proposal padding and overlap split
+
+Services and routes:
+
+- `services/detection.py` and `services/review.py`
+- `routes/scene.py` and `routes/proposals.py` through `include_routers()`
+- Pose calls `enqueue_detect` after a successful run
+- Climber PUT logs `climber.reassign` and enqueues detect
+- Missed attempts log `cut.missed`
+- Finish-review logs `review.complete` or returns 409
+
+Feedback:
+
+- Extend Phase 1 `learning/feedback.py`
+- One writer
+- No second write path
+- Caller owns the transaction
+
+Data:
+
+- Migration `0002_event_rule_v1` seeds `event/rule-v1` and detector thresholds
+- Update `DATA_MODEL.md`
+
+Eval:
+
+- `ml/jobs.py` `eval` on a synthetic labelled fixture
+- CPU tests only
+
+Do not change `AGENTS.md`, `coding_plan.md`, `scripts/gpu/`, or `docker/`.

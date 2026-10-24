@@ -26,7 +26,15 @@ def handle_pose(ctx: JobContext) -> None:
     handle_pose_job(ctx)
 
 
+def handle_detect(ctx: JobContext) -> None:
+    """Compute-lane detect job. Pose enqueues this after a successful run."""
+    from app.services.detection import handle_detect_job
+
+    handle_detect_job(ctx)
+
+
 HANDLERS: dict[str, JobHandler] = {
     "noop": handle_noop,
     "pose": handle_pose,
+    "detect": handle_detect,
 }

@@ -18,6 +18,7 @@ def insert(
     end_frame: int,
     outcome: str,
     proposal_id: str | None = None,
+    commit: bool = True,
 ) -> dict[str, Any]:
     attempt_id = new_id()
     conn.execute(
@@ -30,7 +31,8 @@ def insert(
         """,
         (attempt_id, video_id, boulder_id, proposal_id, start_frame, end_frame, outcome, utc_now()),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     row = get(conn, attempt_id, include_deleted=True)
     assert row is not None
     return row
@@ -88,13 +90,18 @@ def list_for_video(conn: sqlite3.Connection, video_id: str) -> list[dict[str, An
 
 
 def update(
-    conn: sqlite3.Connection, attempt_id: str, fields: dict[str, Any]
+    conn: sqlite3.Connection,
+    attempt_id: str,
+    fields: dict[str, Any],
+    *,
+    commit: bool = True,
 ) -> dict[str, Any] | None:
     if not fields:
         return get(conn, attempt_id, include_deleted=True)
     cols = ", ".join(f"{key} = ?" for key in fields)
     conn.execute(f"UPDATE attempts SET {cols} WHERE id = ?", [*fields.values(), attempt_id])
-    conn.commit()
+    if commit:
+        conn.commit()
     return get(conn, attempt_id, include_deleted=True)
 
 

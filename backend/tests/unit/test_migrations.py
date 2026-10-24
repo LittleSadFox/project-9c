@@ -28,8 +28,19 @@ def test_migrations_twice_are_noops(tmp_path: Path) -> None:
         str(row[0])
         for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
     }
-    conn.close()
-    assert first == ["0001_init"]
+    assert first == ["0001_init", "0002_event_rule_v1"]
     assert first == second
     assert "jobs" in tables
     assert tables == tables_again
+    rule = conn.execute(
+        "SELECT family, version, active FROM model_versions WHERE id = ?",
+        ("c0ffee00-0002-4000-8000-000000000002",),
+    ).fetchone()
+    assert rule is not None
+    assert rule["family"] == "event"
+    assert rule["version"] == "rule-v1"
+    assert int(rule["active"]) == 1
+    keys = {str(row["key"]) for row in conn.execute("SELECT key FROM settings")}
+    assert "leave_ground_height_s" in keys
+    assert "top_grow_s" in keys
+    conn.close()

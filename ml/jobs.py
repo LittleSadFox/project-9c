@@ -2,7 +2,8 @@
 
 Phase 0 implements gpu_tests.
 Phase 1 adds pose_bench.
-Later phases add eval, train_events, tune_align, and finetune_pose.
+Phase 2 adds eval.
+Later phases add train_events, tune_align, and finetune_pose.
 """
 
 from __future__ import annotations
@@ -992,10 +993,104 @@ def pose_bench(
     return metrics
 
 
+def eval_job(run_dir: Path) -> dict[str, Any]:
+    """Score the rule detector on a synthetic labelled fixture. Writes metrics.json.
+
+    A later golden-set pod pass can add real footage. This job stays CPU-safe.
+    """
+    from app.core.cuts import build_proposals, proposal_inner_spans
+    from app.core.events import detect_events
+    from app.core.metrics import attempt_eval
+    from tests.fixtures.synth_pose import labelled_eval_fixture
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    videos = labelled_eval_fixture()
+    per_video: list[dict[str, Any]] = []
+    all_pred: list[tuple[int, int]] = []
+    all_truth: list[tuple[int, int]] = []
+    pred_out: list[str] = []
+    truth_out: list[str] = []
+    standing_ok = True
+    sit_ok = True
+    two_ok = True
+    for video in videos:
+        events, spans = detect_events(
+            video.keypoints,
+            video.scores,
+            video.floor_line,
+            fps=video.fps,
+            top_zone=video.top_zone,
+        )
+        proposals = build_proposals(spans, fps=video.fps, n_frames=video.n_frames)
+        pred = proposal_inner_spans(proposals)
+        truth = [(item.leave_ground, item.ground_return) for item in video.attempts]
+        stats = attempt_eval(
+            pred,
+            truth,
+            pred_outcomes=[item.outcome_guess for item in proposals],
+            truth_outcomes=[item.outcome for item in video.attempts],
+            fps=video.fps,
+        )
+        if video.name == "standing":
+            standing_ok = len(proposals) == 0
+        if video.name == "sit_start":
+            sit_ok = len(spans) == 1
+        if video.name == "two_attempts":
+            two_ok = len(proposals) == 2
+        all_pred.extend(pred)
+        all_truth.extend(truth)
+        pred_out.extend(item.outcome_guess for item in proposals)
+        truth_out.extend(item.outcome for item in video.attempts)
+        per_video.append(
+            {
+                "name": video.name,
+                "n_pred": len(proposals),
+                "n_truth": len(video.attempts),
+                "n_events": len(events),
+                **{key: stats[key] for key in stats if key != "ious"},
+            }
+        )
+    overall = attempt_eval(
+        all_pred,
+        all_truth,
+        pred_outcomes=pred_out,
+        truth_outcomes=truth_out,
+        fps=30.0,
+    )
+    overall.pop("ious", None)
+    status = "passed"
+    if not standing_ok or not sit_ok or not two_ok:
+        status = "failed"
+    if overall.get("recall", 0) < 0.9 or overall.get("precision", 0) < 0.85:
+        status = "failed"
+    metrics = {
+        "job": "eval",
+        "status": status,
+        "source": "synthetic",
+        "model": {"family": "event", "version": "rule-v1"},
+        "overall": overall,
+        "videos": per_video,
+        "gates": {
+            "standing_zero_proposals": standing_ok,
+            "sit_start_detected": sit_ok,
+            "two_attempts": two_ok,
+        },
+    }
+    _atomic_metrics(run_dir, metrics)
+    with (run_dir / "log.txt").open("a", encoding="utf-8") as log:
+        log.write(
+            f"eval status={status} source=synthetic "
+            f"recall={overall.get('recall')} precision={overall.get('precision')}\n"
+        )
+    if status != "passed":
+        raise JobError("eval failed on the synthetic labelled fixture.")
+    return metrics
+
+
 JOBS: dict[str, JobFn] = {
     "gpu_tests": gpu_tests,
     "pose_bench": pose_bench,
-    "eval": _not_ready("eval"),
+    "eval": eval_job,
     "train_events": _not_ready("train_events"),
     "tune_align": _not_ready("tune_align"),
     "finetune_pose": _not_ready("finetune_pose"),

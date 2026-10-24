@@ -14,6 +14,14 @@ ALLOWED_KEYS = frozenset(
         "proxy_long_side",
         "pre_roll_s",
         "post_roll_s",
+        "leave_ground_height_s",
+        "leave_ground_hold_s",
+        "ground_return_height_s",
+        "ground_return_hold_s",
+        "drop_speed_s",
+        "drop_window_s",
+        "top_hold_s",
+        "top_grow_s",
     }
 )
 
