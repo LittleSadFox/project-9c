@@ -285,6 +285,10 @@ describe("VideoReviewPage", () => {
         true,
       );
     });
+    const savePut = fetchMock.mock.calls.find((call) => String(call[0]).endsWith("/scene") && call[1]?.method === "PUT");
+    const saveBody = JSON.parse(savePut[1].body);
+    expect(saveBody).not.toHaveProperty("source");
+    expect(Object.keys(saveBody).sort()).toEqual(["floor_line", "ref_points", "start_holds", "top_zone"]);
     fireEvent.change(screen.getByLabelText("Copy from"), { target: { value: "vid-2" } });
     fireEvent.click(screen.getByRole("button", { name: "Copy marks" }));
     await waitFor(() => {

@@ -778,3 +778,14 @@ A real D+E backend spec is written and skipped until `CC_E2E_BACKEND=1`.
 This rebase sits on main after p2-B (`f74166c4`).
 Keep the p2-A and p2-B backend already on main.
 Do not change `AGENTS.md`, `coding_plan.md`, `scripts/gpu/`, or `docker/`.
+
+## 2026-10-24 — scene PUT strips source
+
+`PUT /api/videos/{id}/scene` rejects extra fields (`ScenePut` uses `extra="forbid"`).
+
+The review page sent the GET scene object on save and undo.
+That object includes `source`.
+The API returned 422.
+
+`putScene` now sends only `floor_line`, `top_zone`, `start_holds`, and `ref_points`.
+A Vitest check fails if `source` is in the PUT body.
