@@ -18,6 +18,7 @@ GPU_SCRIPTS = [
     ROOT / "scripts" / "gpu" / "pod_ls.sh",
     ROOT / "scripts" / "gpu" / "defaults.env",
     ROOT / "scripts" / "sync_volume.sh",
+    ROOT / "scripts" / "sync_volume_prep.py",
     ROOT / "scripts" / "export_labels.py",
 ]
 

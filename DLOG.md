@@ -789,3 +789,14 @@ The API returned 422.
 
 `putScene` now sends only `floor_line`, `top_zone`, `start_holds`, and `ref_points`.
 A Vitest check fails if `source` is in the PUT body.
+
+## 2026-10-25 — sync_volume 1080p pre-step
+
+`sync_volume.sh` transcodes a golden video over 150 MiB to H.264 1080p before upload.
+It keeps the source frame rate.
+It applies rotation through `CC_FFMPEG_BIN` as an argument list.
+The manifest stores `original_sha256` and the uploaded `sha256`.
+A matching original hash skips the transcode.
+A transcoded file that is still over 150 MiB fails before any put-object.
+
+Do not start an eval pod.

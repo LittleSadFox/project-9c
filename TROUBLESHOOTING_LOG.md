@@ -273,6 +273,14 @@ Copy this block for a new entry.
 - Fix: `sync_volume.sh` uses `aws s3api put-object` and `get-object` only. It does not write a temp AWS config. It does not change `AWS_CONFIG_FILE`. It does not write `~/.aws/config`. It refuses files over 150MiB before any upload. Multipart is not supported yet. Runpod S3 EU-RO-1 rejects larger single PUTs.
 - Prevention: Do not use `aws s3 cp` against the Runpod S3 endpoint. Do not export `AWS_CONFIG_FILE` from `sync_volume.sh`.
 
+### 2026-10-25 — sync_volume 1080p pre-step
+
+- Symptom: A 4K iPhone clip over 150 MiB was refused before S3.
+- Where it failed: Mac / volume S3
+- Cause: put-object has a 150 MiB cap. Multipart is not used.
+- Fix: Transcode that clip to H.264 1080p with the same frame rate and rotation applied through `CC_FFMPEG_BIN` as an argument list. Upload the smaller file. Record both sha256 values in the manifest.
+- Prevention: If the 1080p file is still over 150 MiB, fail before any put-object. A matching original hash skips the transcode.
+
 ### 2026-10-22 — terminate stamp symlink and volume override
 
 - Symptom: A planted `/tmp` symlink or `CC_TERMINATE_STAMP_DIR` on the volume could skip terminate after a restart.

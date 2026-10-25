@@ -28,7 +28,7 @@ else
 fi
 
 echo "Ruff"
-ruff check backend ml scripts/export_labels.py scripts/download_models.py
+ruff check backend ml scripts/export_labels.py scripts/download_models.py scripts/sync_volume_prep.py
 
 if command -v shellcheck >/dev/null 2>&1; then
   echo "Shellcheck"
