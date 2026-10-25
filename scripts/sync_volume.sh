@@ -3,7 +3,9 @@
 # Copy file by file. Skip files already listed in <prefix>/manifest.json.
 # Do not invent credentials. Read ids and the S3 endpoint from the environment.
 # Do not change AWS_CONFIG_FILE. Do not write ~/.aws/config.
-# put-object is the only upload path. Refuse files over 150MiB before any upload.
+# put-object is the only upload path. Multipart is not used.
+# A video over 150MiB is transcoded to H.264 1080p first (CC_FFMPEG_BIN argv).
+# Refuse a file that is still over 150MiB before any upload.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -46,7 +48,8 @@ while [ $# -gt 0 ]; do
       echo "Usage: scripts/sync_volume.sh [--dry-run] [--prefix <path>]"
       echo "Default prefix is videos."
       echo "A prefix other than videos does not write videos/manifest.json."
-      echo "put-object refuses files over 150MiB. Multipart is not supported yet."
+      echo "A video over 150MiB is transcoded to H.264 1080p first."
+      echo "put-object refuses a file that is still over 150MiB. Multipart is not supported yet."
       exit 0
       ;;
     *)
@@ -89,43 +92,11 @@ if [ -n "${CC_AWS_PROFILE:-}" ]; then
   export AWS_PROFILE="$CC_AWS_PROFILE"
 fi
 
-# Refuse oversize files before any S3 call. Do not touch AWS_CONFIG_FILE.
-python3 - "$GOLDEN" "$MAX_PUT_BYTES" <<'PY'
-import sys
-from pathlib import Path
-
-golden = Path(sys.argv[1])
-max_put = int(sys.argv[2])
-VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".hevc", ".3gp"}
-too_big: list[tuple[str, int]] = []
-
-def check(rel: str, path: Path) -> None:
-    size = path.stat().st_size
-    if size > max_put:
-        too_big.append((rel, size))
-
-labels = golden / "labels" / "labels.json"
-if labels.is_file():
-    check("labels/labels.json", labels)
-if golden.is_dir():
-    for path in sorted(golden.rglob("*")):
-        if not path.is_file():
-            continue
-        if path.suffix.lower() not in VIDEO_SUFFIXES:
-            continue
-        check(path.relative_to(golden).as_posix(), path)
-
-if too_big:
-    for rel, size in too_big:
-        sys.stderr.write(
-            f"ERROR: {rel} is {size} bytes. put-object refuses files over 150MiB ({max_put} bytes). Multipart is not supported yet.\n"
-        )
-    sys.exit(1)
-PY
-
 MANIFEST_LOCAL="$(mktemp)"
 NEW_MANIFEST="$(mktemp)"
-trap 'rm -f "$MANIFEST_LOCAL" "$NEW_MANIFEST"' EXIT
+PLAN="$(mktemp)"
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK" "$MANIFEST_LOCAL" "$NEW_MANIFEST" "$PLAN"' EXIT
 if cc_s3_cp_stdout "s3://${VOLUME}/${PREFIX}/manifest.json" "$REGION" "$ENDPOINT" \
   >"$MANIFEST_LOCAL"; then
   :
@@ -133,33 +104,30 @@ else
   echo '{"files":{}}' >"$MANIFEST_LOCAL"
 fi
 
-python3 - "$MANIFEST_LOCAL" "$NEW_MANIFEST" "$GOLDEN" "$VOLUME" "$PREFIX" "$REGION" "$ENDPOINT" "$MAX_PUT_BYTES" <<'PY'
+# Transcode oversize videos before any put-object. Fail if a body is still over 150MiB.
+python3 "$ROOT/scripts/sync_volume_prep.py" \
+  --golden "$GOLDEN" \
+  --manifest "$MANIFEST_LOCAL" \
+  --plan "$PLAN" \
+  --work "$WORK" \
+  --max-put "$MAX_PUT_BYTES"
+
+# Do not touch AWS_CONFIG_FILE.
+python3 - "$PLAN" "$NEW_MANIFEST" "$VOLUME" "$PREFIX" "$REGION" "$ENDPOINT" <<'PY'
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
 
-manifest_path, new_path, golden_s, volume, prefix, region, endpoint, max_put_s = sys.argv[1:9]
-max_put = int(max_put_s)
-golden = Path(golden_s)
-try:
-    manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
-except json.JSONDecodeError:
-    manifest = {}
-files = manifest.get("files")
+plan_path, new_path, volume, prefix, region, endpoint = sys.argv[1:7]
+plan = json.loads(Path(plan_path).read_text(encoding="utf-8"))
+files = plan.get("files")
 if not isinstance(files, dict):
     files = {}
-
-VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".hevc", ".3gp"}
-
-def digest(path: Path) -> str:
-    import hashlib
-    h = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
+uploads = plan.get("uploads")
+if not isinstance(uploads, list):
+    uploads = []
 
 def aws_put(path: Path, key: str) -> None:
     cmd = [
@@ -182,38 +150,18 @@ def aws_put(path: Path, key: str) -> None:
         cmd.extend(["--profile", profile])
     subprocess.run(cmd, check=True)
 
-candidates: list[tuple[str, Path]] = []
-labels = golden / "labels" / "labels.json"
-if labels.is_file():
-    candidates.append(("labels/labels.json", labels))
-if golden.is_dir():
-    for path in sorted(golden.rglob("*")):
-        if not path.is_file():
-            continue
-        if path.suffix.lower() not in VIDEO_SUFFIXES:
-            continue
-        rel = path.relative_to(golden).as_posix()
-        candidates.append((rel, path))
-
-for key, path in candidates:
-    size = path.stat().st_size
-    if size > max_put:
-        print(
-            f"ERROR: {key} is {size} bytes. put-object refuses files over 150MiB ({max_put} bytes). Multipart is not supported yet.",
-            file=sys.stderr,
-        )
+for item in uploads:
+    if not isinstance(item, dict):
+        print("ERROR: upload plan is invalid.", file=sys.stderr)
         sys.exit(1)
-
-for key, path in candidates:
-    actual = digest(path)
-    listed = files.get(key)
-    listed_sha = listed.get("sha256") if isinstance(listed, dict) else None
-    if listed_sha == actual:
-        print(f"skip {key}")
-        continue
+    key = item.get("key")
+    raw_path = item.get("path")
+    if not isinstance(key, str) or not isinstance(raw_path, str):
+        print("ERROR: upload plan is invalid.", file=sys.stderr)
+        sys.exit(1)
+    path = Path(raw_path)
     print(f"upload {key}")
     aws_put(path, key)
-    files[key] = {"sha256": actual, "size": path.stat().st_size}
 
 Path(new_path).write_text(json.dumps({"files": files}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
