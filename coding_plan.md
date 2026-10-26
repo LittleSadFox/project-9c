@@ -13,7 +13,7 @@ todos:
     status: completed
   - id: p0-runpod-runner
     content: "Runpod runner (section 2): docker/gpu image (CUDA 12 + cuDNN 9, Python 3.12, onnxruntime-gpu 1.23.2, static ffmpeg 7, sshd, TTL watchdog) pushed to GHCR by gpu-image.yml; scripts/gpu (pod_up, run_job, wait_job, pod_down, pod_ls); ml/jobs.py with gpu_tests; sync_volume.sh; the first gpu_tests pod run reports and terminates itself"
-    status: pending
+    status: completed
   - id: p1-ingest
     content: "Library CRUD, streaming upload, MediaTool protocol (FfmpegTool, FakeMediaTool), ingest job (ffprobe, CFR H.264 proxy, thumbnails), media endpoints with byte ranges, exact-frame JPEG, trash; media fixture generator and tests"
     status: completed
@@ -31,7 +31,7 @@ todos:
     status: pending
   - id: p2-skeleton-editor
     content: "KeypointEditor (drag, L/R swap range, invalid, confirm, undo), click-to-reassign climber, edits API, effective-track cache, skeleton review queue"
-    status: pending
+    status: completed
   - id: p3-align-diff
     content: "Moves, per-frame features, multi-resolution DTW with open end and anchors, registration, posture and pacing differences, comparisons API"
     status: pending
@@ -168,7 +168,7 @@ sequenceDiagram
 - Interactive debugging: `pod_up.sh --interactive`, then `ssh <pod>@ssh.runpod.io -i ~/.ssh/climbing_coach_ed25519` (Runpod's SSH proxy; it has no SCP, so files move through the volume), then `pod_down.sh`.
 
 ### 2.7 Data path between the Mac and the volume
-- `scripts/sync_volume.sh` (Mac) runs `export_labels.py`, then copies new golden videos and `labels.json` to `videos/` with `aws s3 cp --region <DC> --endpoint-url https://s3api-<dc>.runpod.io/ s3://<volume_id>/...`. It copies file by file and skips files already listed in `videos/manifest.json`, because `aws s3 sync` is unreliable on Runpod's S3 API for large trees. Each file goes up as one `put-object` call. Runpod's S3 API rejects a single upload above about 175–200 MB (HTTP 413, which the AWS CLI reports as "Connection was closed"), so `sync_volume.sh` refuses any file over 150 MiB before it calls S3. Multipart upload is not used. Before the golden-set sync, `sync_volume.sh` gains a pre-step (decided by you, 2026-10-22): a file over 150 MiB is transcoded to H.264 1080p with the same frame rate and the rotation applied (through `CC_FFMPEG_BIN` with an argument list, never a shell), and smaller files go up unchanged. The manifest records the sha256 of the original and of the uploaded file, so `labels.json` (keyed by the original's sha256) still resolves and the skip logic does not transcode again. A test proves that a proxy built from the 1080p file has the same `n_frames` and `proxy_fps` as one built from the original, ±1 frame. If a transcoded file is still over 150 MiB, the run fails before it uploads anything.
+- `scripts/sync_volume.sh` (Mac) runs `export_labels.py`, then copies new golden videos and `labels.json` to `videos/` with `aws s3api put-object --region <DC> --endpoint-url https://s3api-<dc>.runpod.io/` to `s3://<volume_id>/...`. It copies file by file and skips files already listed in `videos/manifest.json`, because `aws s3 sync` is unreliable on Runpod's S3 API for large trees. Each file goes up as one `put-object` call. Multipart upload is not used. Runpod's S3 API rejects a single upload above about 175–200 MB (HTTP 413, which the AWS CLI reports as "Connection was closed"). A file over 150 MiB is transcoded to H.264 1080p with the same frame rate and the rotation applied (through `CC_FFMPEG_BIN` with an argument list, never a shell). Smaller files go up unchanged. The manifest records `original_sha256` and the uploaded `sha256`, so `labels.json` (keyed by the original's sha256) still resolves and the skip logic does not transcode again. A test proves that a proxy built from the 1080p file has the same `n_frames` and `proxy_fps` as one built from the original, ±1 frame. If a transcoded file is still over 150 MiB, the run fails before it uploads anything.
 - `scripts/export_dataset.sh` (Mac) builds a feedback dataset (Phase 4) or a COCO export (Phase 6) from your library and uploads it to `datasets/<name>/`.
 - `download_models.py --from-volume <run_id>` (Mac) copies a trained model and its `metrics.json` into your library as a new, inactive `model_versions` row.
 - Models from the volume are untrusted input. They are ONNX plus JSON only, never pickle or joblib. `download_models.py` refuses any other file type and checks each file's sha256 against `metrics.json`.
@@ -512,7 +512,7 @@ scripts/
   run_mac.sh                  new token, uvicorn on 127.0.0.1:8810 with your library, opens the launch URL
   download_models.py          fetch RTMPose and YOLOX ONNX files (sha256 lock file); --from-volume <run_id> imports a pod-trained model
   export_labels.py            golden labels from the dev library -> golden/labels/labels.json (keyed by video sha256)
-  sync_volume.sh              export_labels.py, then copy new golden videos and labels to /workspace/videos (S3 API)
+  sync_volume.sh              export_labels.py, then copy new golden videos and labels to /workspace/videos (S3 put-object; a file over 150 MiB is transcoded to H.264 1080p first)
   export_dataset.sh           feedback dataset (Phase 4) or COCO export (Phase 6) -> /workspace/datasets/<name>
   package_mac.sh              Phase 5 PyInstaller build of launcher/
   gpu/
@@ -583,7 +583,7 @@ Videos and media
 
 Scene marks
 - `GET /api/videos/{id}/scene` returns `{floor_line: [[x, y], [x, y]], top_zone: [[x, y], ...], start_holds: [[x, y]], ref_points: [{name, x, y}], source}`.
-- `PUT /api/videos/{id}/scene` is a full replace (points must lie inside the frame; the polygon needs ≥ 3 points). It returns `{scene, job_id}` (re-detection) and logs `scene.edit`.
+- `PUT /api/videos/{id}/scene` is a full replace of `floor_line`, `top_zone`, `start_holds` and `ref_points` (points must lie inside the frame; the polygon needs ≥ 3 points). It does not accept `source`. It returns `{scene, job_id}` (re-detection) and logs `scene.edit`.
 - `POST /api/videos/{id}/scene/copy-from/{other_id}` works only within the same boulder.
 
 Pose
@@ -695,13 +695,17 @@ The Ryan Mac pass is complete (2026-10-24).
   - `pytest -m "model and macos"`: CoreML and CPU keypoints differ by ≤ 1 px on average over 100 frames. Frames per second for each pose mode are recorded in `DLOG.md`.
   - Overlay sync and manual cuts look right in Safari; a 1 GB upload raises server memory by less than 100 MB.
 
-Between Phase 1 and Phase 2, you build the golden set (section 11) with the Phase 1 tools and copy it to the volume. The `sync_volume.sh` 1080p pre-step from section 2.7 must be merged before that copy.
+The golden set (section 11) is still open. Label the videos and copy them to the volume with `sync_volume.sh`. The 1080p pre-step from section 2.7 is on main as #27 (`0fe64180`). Golden-set labeling and sync is Ryan's next step.
 
 ### Phase 2 — Review tools: automatic start and fall, auto-cut, skeleton corrections
-Phase 2 is planned as three slices: p2-A scene and detect, p2-B skeleton edits, and p2-C review UI.
-Phase 2 merges are OK under the usual gate (Coder + Inspector + Runpod APPROVE + CI green).
-Merge order is D → E → F / A → B → C.
-Do not start an eval pod until the golden-set and the 1080p `sync_volume.sh` pre-step (Planner).
+The Phase 2 build is on main (2026-10-24).
+p2-A is #25 (`643f9d79`).
+p2-B is #22 (`f74166c4`).
+p2-C is #23 (`091ac9ac`).
+#26 (`037bdbc9`) strips `source` from scene PUT.
+The Ryan Mac pass is complete (2026-10-24).
+Phase 2 merges are complete under the usual gate (Coder + Inspector + Runpod APPROVE + CI green).
+Do not start an eval pod until the golden set exists and the 1080p sync has run.
 
 - Build
   - The automatic floor line; `SceneMarksEditor` (floor line, top zone, start holds, reference points; copy from another video).
@@ -799,7 +803,7 @@ Do not start an eval pod until the golden-set and the 1080p `sync_volume.sh` pre
 - End-to-end browsers: Chromium in both CI jobs and on the Mac; WebKit in the `macos-15` job and on a Mac with macOS 15+; on an older Mac, Safari is checked by hand with the README checklist.
 - Fixtures: `make_media.py` builds a frame-code video (each frame carries its frame number as a 16-block binary code that survives compression), plus VFR, rotated, HEVC and no-person variants. `synth_pose.py` builds a parametric climber: stand, sit start, scripted moves, rest, top, drop, down-climb, and a second person; with time stretch, noise, dropouts and L/R flips. A builder seeds the E2E library.
 - Golden set: ≥ 10 videos with ≥ 30 attempts, covering standing and sit starts, falls, sends ending in a jump-off or a down-climb, a spotter or bystander in frame, portrait and landscape, iPhone HEVC.
-  - Built after Phase 1: import the videos into the dev library and mark each attempt as a manual attempt (start at leave-ground, end at ground-return, outcome). Add top zones once the Phase 2 scene editor exists.
+  - Built after Phase 1: import the videos into the dev library and mark each attempt as a manual attempt (start at leave-ground, end at ground-return, outcome). Add top zones with the Phase 2 scene editor.
   - `export_labels.py` writes `labels/labels.json`, keyed by video sha256, with times in seconds and the scene marks you drew.
   - The footage lives in `CC_GOLDEN_DIR` on the Mac (default `~/Library/Application Support/ClimbingCoach/golden/`), with a copy on the volume at `/workspace/videos/` made by `sync_volume.sh`. It is never committed.
   - Metrics go to `reports/` on the Mac and to `runs/<id>/metrics.json` on pods; the numbers go into `DLOG.md`.
