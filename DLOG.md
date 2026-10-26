@@ -800,3 +800,13 @@ A matching original hash skips the transcode.
 A transcoded file that is still over 150 MiB fails before any put-object.
 
 Do not start an eval pod.
+
+## 2026-10-26 — scene null arrays crash review
+
+A GET scene object can be truthy with `top_zone`, `start_holds`, or `ref_points` set to `null`.
+`SceneMarksEditor` used `scene || emptyScene()` and then read `.length`.
+That throw replaced the whole review UI with ErrorBoundary.
+
+`normalizeScene` in `lists.js` now fills missing or null arrays from `emptyScene`.
+The editor, click helper, and review page use that helper.
+A Vitest check feeds a partial auto scene and expects counts of 0.

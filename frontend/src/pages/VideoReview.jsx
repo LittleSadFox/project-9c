@@ -22,7 +22,7 @@ import { invalidate, useResource } from "../hooks/useResource.js";
 import { t } from "../i18n/index.js";
 import { clampFrame, inOutValid } from "../lib/frameTime.js";
 import { HALPE26_EDGES } from "../lib/halpe26.js";
-import { asList, emptyScene, pendingProposals } from "../lib/lists.js";
+import { asList, normalizeScene, pendingProposals } from "../lib/lists.js";
 import { acceptPayload, canFinishReview, nextPending } from "../lib/review.js";
 
 const OUTCOMES = ["send", "fall", "unknown"];
@@ -94,7 +94,7 @@ export function VideoReviewPage() {
   const proposals = asList(proposalsRes.data);
   const pending = pendingProposals(proposals);
   const selected = proposals.find((item) => item.id === selectedId) || pending[0] || null;
-  const scene = sceneDraft || sceneRes.data || emptyScene();
+  const scene = normalizeScene(sceneDraft || sceneRes.data);
   const canFinish =
     Boolean(data) && !proposalsRes.loading && canFinishReview(proposals, data.review_status);
   const proposalsRef = useRef(proposals);
@@ -104,7 +104,7 @@ export function VideoReviewPage() {
 
   useEffect(() => {
     if (sceneRes.data && !sceneDraft) {
-      setSceneDraft(sceneRes.data);
+      setSceneDraft(normalizeScene(sceneRes.data));
     }
   }, [sceneDraft, sceneRes.data]);
 
@@ -273,7 +273,7 @@ export function VideoReviewPage() {
 
   const saveScene = useCallback(
     async (next) => {
-      const previous = sceneRes.data || emptyScene();
+      const previous = normalizeScene(sceneRes.data);
       await undo.run({
         do: async () => {
           await putScene(videoId, next);
@@ -294,7 +294,7 @@ export function VideoReviewPage() {
     async (otherId) => {
       await runBusy(async () => {
         const result = await copySceneFrom(videoId, otherId);
-        setSceneDraft((result && result.scene) || result);
+        setSceneDraft(normalizeScene((result && result.scene) || result));
         invalidate(`scene:${videoId}`);
       });
     },
