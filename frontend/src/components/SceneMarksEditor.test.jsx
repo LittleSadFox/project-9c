@@ -57,4 +57,38 @@ describe("SceneMarksEditor", () => {
       y: 6,
     });
   });
+
+  it("renders zero counts when auto scene arrays are null", () => {
+    const partial = {
+      floor_line: [
+        [0, 0],
+        [720, 0],
+      ],
+      top_zone: null,
+      start_holds: null,
+      ref_points: null,
+      source: "auto",
+    };
+    expect(() =>
+      render(
+        <SceneMarksEditor
+          scene={partial}
+          srcWidth={200}
+          srcHeight={100}
+          videos={[]}
+          currentVideoId="vid-1"
+          onChange={vi.fn()}
+          onSave={vi.fn()}
+          onCopy={vi.fn()}
+        />,
+      ),
+    ).not.toThrow();
+    expect(screen.getByText(/Floor: 2/)).toBeTruthy();
+    expect(screen.getByText(/Top zone: 0/)).toBeTruthy();
+    expect(screen.getByText(/Start holds: 0/)).toBeTruthy();
+    expect(screen.getByText(/Ref points: 0/)).toBeTruthy();
+    expect(applySceneClick(partial, "zone", [1, 2]).top_zone).toEqual([[1, 2]]);
+    expect(applySceneClick(partial, "holds", [3, 4]).start_holds).toEqual([[3, 4]]);
+    expect(applySceneClick(partial, "refs", [5, 6], "lip").ref_points).toEqual([{ name: "lip", x: 5, y: 6 }]);
+  });
 });

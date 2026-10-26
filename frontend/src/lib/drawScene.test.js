@@ -25,4 +25,26 @@ describe("drawSceneMarks", () => {
     expect(ctx.fill).toHaveBeenCalled();
     expect(ctx.arc).toHaveBeenCalled();
   });
+
+  it("skips null zone, holds, and refs", () => {
+    const ctx = fakeCtx();
+    expect(() =>
+      drawSceneMarks(
+        ctx,
+        {
+          floor_line: [
+            [0, 0],
+            [720, 0],
+          ],
+          top_zone: null,
+          start_holds: null,
+          ref_points: null,
+          source: "auto",
+        },
+        { srcWidth: 720, srcHeight: 1280, dstWidth: 72, dstHeight: 128 },
+      ),
+    ).not.toThrow();
+    expect(ctx.stroke).toHaveBeenCalled();
+    expect(ctx.arc).not.toHaveBeenCalled();
+  });
 });

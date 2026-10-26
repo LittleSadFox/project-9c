@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { t } from "../i18n/index.js";
 import { clampPoint, clientToSource } from "../lib/geometry.js";
-import { emptyScene } from "../lib/lists.js";
+import { normalizeScene } from "../lib/lists.js";
 import { Button } from "./glass.jsx";
 
 const TOOLS = ["floor", "zone", "holds", "refs"];
@@ -12,13 +12,13 @@ function nextRefName(points) {
 }
 
 export function applySceneClick(scene, tool, point, name) {
+  const base = normalizeScene(scene);
   const next = {
-    ...emptyScene(),
-    ...scene,
-    floor_line: [...(scene.floor_line || [])],
-    top_zone: [...(scene.top_zone || [])],
-    start_holds: [...(scene.start_holds || [])],
-    ref_points: [...(scene.ref_points || [])],
+    ...base,
+    floor_line: [...base.floor_line],
+    top_zone: [...base.top_zone],
+    start_holds: [...base.start_holds],
+    ref_points: [...base.ref_points],
     source: "user",
   };
   if (tool === "floor") {
@@ -53,7 +53,7 @@ export function SceneMarksEditor({
   const [copyId, setCopyId] = useState("");
   const [refName, setRefName] = useState("");
   const stageRef = useRef(null);
-  const draft = scene || emptyScene();
+  const draft = normalizeScene(scene);
 
   useEffect(() => {
     setCopyId("");
