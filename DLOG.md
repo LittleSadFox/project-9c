@@ -810,3 +810,25 @@ That throw replaced the whole review UI with ErrorBoundary.
 `normalizeScene` in `lists.js` now fills missing or null arrays from `emptyScene`.
 The editor, click helper, and review page use that helper.
 A Vitest check feeds a partial auto scene and expects counts of 0.
+
+## 2026-11-17 — Runpod REST v2; drop --spot
+
+Ryan decided: move every pod call to REST v2, and drop `--spot`.
+Do not keep spot on GraphQL.
+REST v1 (`https://rest.runpod.io/v1`) retired on 15 Nov 2026.
+
+`cc_rest` now calls `https://api.runpod.io/v2`.
+The six call sites:
+
+- `GET /registries/{id}` (was `GET /containerregistryauth/{id}`)
+- `POST /pods` (nested v2 body: `cloud`, `gpu.id`, `image`, `registry`, `mounts.network`)
+- `GET /pods` (wrapped `{pods:[...]}` plus cursor pages)
+- `GET /pods/{id}` (read `status`, not `desiredStatus`)
+- `DELETE /pods/{id}` (204, no body)
+
+REST v2 takes one GPU type per create.
+`pod_up` retries the existing preference list one type at a time.
+`--spot` / `interruptible` are gone.
+Cheap short jobs (`gpu_tests`, `pose_bench`) run on-demand only.
+
+Do not start a live pod from this change.

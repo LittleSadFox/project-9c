@@ -31,13 +31,6 @@ cc_is_known_job() {
   return 1
 }
 
-cc_spot_allowed() {
-  case "${1:-}" in
-    gpu_tests|pose_bench) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
 cc_max_ttl_s() {
   echo 43200
 }
@@ -141,6 +134,26 @@ cc_default_gpu_csv() {
   # ONNX Runtime has never been verified on sm_120 (Blackwell) on a pod.
   # Leave RTX PRO 4500/4000 Blackwell and RTX 5090 out of the default list.
   printf '%s' "NVIDIA L4,NVIDIA RTX 2000 Ada Generation,NVIDIA GeForce RTX 4090,NVIDIA A100 80GB PCIe"
+}
+
+cc_gpu_types() {
+  local csv="${1:-$(cc_default_gpu_csv)}"
+  command -v jq >/dev/null 2>&1 || cc_fail "Install jq. The pod scripts need it."
+  jq -nr --arg gpus "$csv" '
+    $gpus
+    | split(",")
+    | map(gsub("^ +| +$";""))
+    | map(select(length > 0))
+    | .[]
+  '
+}
+
+cc_first_gpu_type() {
+  local types gpu
+  types="$(cc_gpu_types "${1:-}")"
+  gpu="${types%%$'\n'*}"
+  [[ -n "$gpu" ]] || cc_fail "No GPU types to try. Pass --gpu or check the default list."
+  printf '%s\n' "$gpu"
 }
 
 cc_allowed_cuda_versions() {
@@ -260,15 +273,10 @@ cc_build_pod_env_json() {
 cc_build_pod_payload() {
   local name="$1"
   local env_json="$2"
-  local spot="$3"
-  local gpu_csv="$4"
+  local gpu_id="$3"
   command -v jq >/dev/null 2>&1 || cc_fail "Install jq. The pod scripts need it."
+  [[ -n "$gpu_id" ]] || cc_fail "A pod create needs one GPU type. REST v2 has no GPU fallback list."
 
-  local gpus="${gpu_csv:-$(cc_default_gpu_csv)}"
-  local interruptible=false
-  if [[ "$spot" == "1" ]]; then
-    interruptible=true
-  fi
   local dc="${CC_RUNPOD_DATACENTER:-EU-RO-1}"
   local cuda_json=""
   if [[ -n "${CC_ALLOWED_CUDA:-}" ]]; then
@@ -280,8 +288,7 @@ cc_build_pod_payload() {
     jq -n \
       --arg name "$name" \
       --argjson env "$env_json" \
-      --argjson interruptible "$interruptible" \
-      --arg gpus "$gpus" \
+      --arg gpu "$gpu_id" \
       --arg template "${CC_RUNPOD_TEMPLATE_ID:-}" \
       --arg volume "${CC_RUNPOD_VOLUME_ID:-}" \
       --arg image "${CC_GPU_IMAGE:-}" \
@@ -291,24 +298,21 @@ cc_build_pod_payload() {
       --argjson disk 20 \
       '{
         name: $name,
-        cloudType: "SECURE",
-        computeType: "GPU",
-        gpuCount: 1,
-        gpuTypePriority: "custom",
-        gpuTypeIds: ($gpus | split(",") | map(gsub("^ +| +$";""))),
-        containerDiskInGb: $disk,
-        volumeInGb: 0,
-        volumeMountPath: "/workspace",
+        cloud: "SECURE",
+        gpu: (
+          {id: $gpu, count: 1}
+          + (if $cuda != "" then {allowedCudaVersions: ($cuda | fromjson)} else {} end)
+        ),
+        disk: $disk,
         dataCenterIds: [$dc],
         ports: ["22/tcp"],
-        interruptible: $interruptible,
-        env: $env
+        env: $env,
+        startSsh: true
       }
       + (if $template != "" then {templateId: $template} else {} end)
-      + (if $volume != "" then {networkVolumeId: $volume} else {} end)
-      + (if $image != "" then {imageName: $image} else {} end)
-      + (if $registry != "" then {containerRegistryAuthId: $registry} else {} end)
-      + (if $cuda != "" then {allowedCudaVersions: ($cuda | fromjson)} else {} end)'
+      + (if $volume != "" then {mounts: {network: [{volumeId: $volume, path: "/workspace"}]}} else {} end)
+      + (if $image != "" then {image: $image} else {} end)
+      + (if $registry != "" then {registry: $registry} else {} end)'
   )"; then
     cc_fail "Could not build the pod payload. Check CC_ALLOWED_CUDA."
   fi
@@ -317,6 +321,60 @@ cc_build_pod_payload() {
     cc_fail "Pod payload is missing CC_TTL_S."
   fi
   printf '%s\n' "$payload"
+}
+
+cc_create_pod() {
+  local name="$1"
+  local env_json="$2"
+  local gpu_csv="${3:-}"
+  local gpu payload dest code
+  local types=""
+  types="$(cc_gpu_types "$gpu_csv")"
+  [[ -n "$types" ]] || cc_fail "No GPU types to try. Pass --gpu or check the default list."
+  dest="$(mktemp)"
+  while IFS= read -r gpu; do
+    [[ -n "$gpu" ]] || continue
+    payload="$(cc_build_pod_payload "$name" "$env_json" "$gpu")"
+    echo "POST /pods gpu=${gpu}" >&2
+    if cc_rest POST /pods "$payload" >"$dest"; then
+      cat "$dest"
+      rm -f "$dest"
+      return 0
+    fi
+    code="${CC_LAST_HTTP_CODE:-}"
+    case "$code" in
+      400|403)
+        echo "GPU ${gpu} was not placed (HTTP ${code}). Try the next type." >&2
+        continue
+        ;;
+      429|500|502|503|504)
+        echo "GPU ${gpu} returned HTTP ${code}. Retry the same type once." >&2
+        if [[ "${CC_TERMINATE_NO_SLEEP:-}" != "1" ]]; then
+          sleep 2
+        fi
+        if cc_rest POST /pods "$payload" >"$dest"; then
+          cat "$dest"
+          rm -f "$dest"
+          return 0
+        fi
+        code="${CC_LAST_HTTP_CODE:-}"
+        case "$code" in
+          400|403|429|500|502|503|504)
+            echo "GPU ${gpu} was not placed (HTTP ${code}). Try the next type." >&2
+            continue
+            ;;
+        esac
+        rm -f "$dest"
+        cc_fail "Runpod POST /pods failed for GPU ${gpu} (HTTP ${code})."
+        ;;
+      *)
+        rm -f "$dest"
+        cc_fail "Runpod POST /pods failed for GPU ${gpu} (HTTP ${code})."
+        ;;
+    esac
+  done <<<"$types"
+  rm -f "$dest"
+  cc_fail "No GPU type was placed. REST v2 takes one GPU type per create."
 }
 
 cc_require_bot_api_key() {
@@ -467,8 +525,8 @@ cc_verify_gpu_image_exists() {
 cc_verify_registry_auth() {
   local id="${CC_RUNPOD_REGISTRY_AUTH_ID:-}"
   [[ -n "$id" ]] || cc_fail "CC_RUNPOD_REGISTRY_AUTH_ID is missing."
-  if ! cc_rest GET "/containerregistryauth/${id}" >/dev/null; then
-    cc_fail "Section 9.4: GET /containerregistryauth/${id} failed. Do not start a pod."
+  if ! cc_rest GET "/registries/${id}" >/dev/null; then
+    cc_fail "Section 9.4: GET /registries/${id} failed. Do not start a pod."
   fi
 }
 
@@ -621,10 +679,10 @@ cc_pod_gone() {
   [[ -n "$pod_id" ]] || return 1
   tmp="$(mktemp)"
   if cc_pod_lookup_desired "$pod_id" "$tmp"; then
-    desired="$(jq -r '.desiredStatus // .status // empty' <"$tmp")"
+    desired="$(jq -r '.status // .desiredStatus // empty' <"$tmp")"
     rm -f "$tmp"
     case "$desired" in
-      EXITED|TERMINATED)
+      EXITED|TERMINATED|ERROR)
         printf '%s\n' "$desired"
         return 0
         ;;
@@ -649,7 +707,7 @@ cc_pod_deleted() {
   [[ -n "$pod_id" ]] || return 1
   tmp="$(mktemp)"
   if cc_pod_lookup_desired "$pod_id" "$tmp"; then
-    desired="$(jq -r '.desiredStatus // .status // empty' <"$tmp")"
+    desired="$(jq -r '.status // .desiredStatus // empty' <"$tmp")"
     rm -f "$tmp"
     if [[ "$desired" == "TERMINATED" ]]; then
       echo "TERMINATED"
@@ -1189,13 +1247,18 @@ cc_s3_cp_stdout() {
   return 1
 }
 
+cc_rest_base() {
+  printf '%s' "https://api.runpod.io/v2"
+}
+
 cc_rest() {
   local method="$1"
   local path="$2"
   local body="${3:-}"
   cc_require_bot_api_key
   command -v curl >/dev/null 2>&1 || cc_fail "Install curl. The pod scripts need it."
-  local url="https://rest.runpod.io/v1${path}"
+  local url
+  url="$(cc_rest_base)${path}"
   local hdr tmp code
   hdr="$(mktemp)"
   tmp="$(mktemp)"
@@ -1328,8 +1391,8 @@ cc_pods_from_response() {
   local items
   items="$(
     jq -c '
-      if type == "array" then .
-      elif ((.pods // empty) | type) == "array" then .pods
+      if ((.pods // empty) | type) == "array" then .pods
+      elif type == "array" then .
       elif ((.data // empty) | type) == "array" then .data
       else empty
       end
@@ -1340,6 +1403,39 @@ cc_pods_from_response() {
     cc_fail "Runpod /pods did not return an array."
   fi
   printf '%s\n' "$items"
+}
+
+cc_list_pods() {
+  local cursor="" page items batch has next encoded path
+  items="[]"
+  local pages=0
+  while [[ "$pages" -lt 20 ]]; do
+    pages=$((pages + 1))
+    path="/pods?limit=1000"
+    if [[ -n "$cursor" ]]; then
+      encoded="$(jq -nr --arg c "$cursor" '$c | @uri')"
+      path="${path}&cursor=${encoded}"
+    fi
+    if ! page="$(cc_rest GET "$path")"; then
+      return 1
+    fi
+    if ! batch="$(cc_pods_from_response "$page")"; then
+      return 1
+    fi
+    if ! items="$(jq -nc --argjson a "$items" --argjson b "$batch" '$a + $b')"; then
+      echo "$page" >&2
+      echo "ERROR: Runpod /pods page could not be merged." >&2
+      return 1
+    fi
+    has="$(jq -r '.pagination.hasNextPage // false' <<<"$page")"
+    next="$(jq -r '.pagination.nextCursor // empty' <<<"$page")"
+    if [[ "$has" != "true" || -z "$next" ]]; then
+      printf '%s\n' "$items"
+      return 0
+    fi
+    cursor="$next"
+  done
+  cc_fail "Runpod GET /pods paginated past 20 pages."
 }
 
 cc_require_cuda_driver() {
