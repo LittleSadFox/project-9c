@@ -10,7 +10,7 @@ source "$ROOT/scripts/gpu/lib.sh"
 usage() {
   cat <<'EOF'
 Usage:
-  scripts/gpu/pod_up.sh --job <name> --ref <sha> [--gpu <csv>] [--spot] [--ttl <dur>] [--dry-run]
+  scripts/gpu/pod_up.sh --job <name> --ref <sha> [--gpu <csv>] [--ttl <dur>] [--dry-run]
   scripts/gpu/pod_up.sh --interactive [--ref <sha>] [--gpu <csv>] [--ttl <dur>] [--dry-run]
 
 CC_TTL_S is always sent to the pod.
@@ -23,7 +23,6 @@ EOF
 JOB=""
 REF=""
 INTERACTIVE=0
-SPOT=0
 TTL_RAW=""
 DRY_RUN=0
 GPU_CSV=""
@@ -42,10 +41,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --interactive)
       INTERACTIVE=1
-      shift
-      ;;
-    --spot)
-      SPOT=1
       shift
       ;;
     --ttl)
@@ -92,11 +87,6 @@ if [[ -z "$REF" ]]; then
     cc_fail "--ref <sha> is required for a job pod. Pods run only pushed commits."
   fi
 fi
-if [[ "$SPOT" == "1" ]]; then
-  if [[ "$INTERACTIVE" == "1" ]] || ! cc_spot_allowed "$JOB"; then
-    cc_fail "--spot is allowed only for gpu_tests and pose_bench."
-  fi
-fi
 
 REF="$(cc_resolve_ref "$REF")"
 
@@ -127,14 +117,17 @@ cc_refuse_existing_run "$JOB_ID" "$CALLER_JOB_ID"
 NAME="$JOB_ID"
 cc_require_image_tag "$REF"
 ENV_JSON="$(cc_build_pod_env_json "$JOB" "$REF" "$JOB_ID" "$CC_TTL_S" "$INTERACTIVE")"
-PAYLOAD="$(cc_build_pod_payload "$NAME" "$ENV_JSON" "$SPOT" "$GPU_CSV")"
 
 if [[ "$DRY_RUN" == "1" ]]; then
+  FIRST_GPU="$(cc_first_gpu_type "$GPU_CSV")"
+  PAYLOAD="$(cc_build_pod_payload "$NAME" "$ENV_JSON" "$FIRST_GPU")"
   printf '%s\n' "$PAYLOAD"
   echo "pod_id=DRY_RUN"
   echo "job_id=${JOB_ID}"
+  echo "gpu=${FIRST_GPU}"
+  echo "gpu_fallback=${GPU_CSV:-$(cc_default_gpu_csv)}"
   if [[ -n "${CC_RUNPOD_REGISTRY_AUTH_ID:-}" ]]; then
-    echo "GET /containerregistryauth/${CC_RUNPOD_REGISTRY_AUTH_ID}"
+    echo "GET /registries/${CC_RUNPOD_REGISTRY_AUTH_ID}"
   fi
   exit 0
 fi
@@ -150,7 +143,7 @@ cc_require_registry_auth
 cc_require_bot_api_key
 cc_verify_gpu_image_exists
 cc_verify_registry_auth
-RESPONSE="$(cc_rest POST /pods "$PAYLOAD")"
+RESPONSE="$(cc_create_pod "$NAME" "$ENV_JSON" "$GPU_CSV")"
 POD_ID="$(jq -r '.id // .podId // empty' <<<"$RESPONSE")"
 if [[ -z "$POD_ID" || "$POD_ID" == "null" ]]; then
   tmp_err="$(mktemp)"

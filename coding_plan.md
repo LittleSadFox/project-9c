@@ -136,8 +136,8 @@ flowchart LR
 - The account API key never goes into a pod. A job pod terminates itself with the pod-scoped `RUNPOD_API_KEY` and the `RUNPOD_POD_ID` that Runpod injects.
 
 ### 2.5 Pod settings per job
-- Secure Cloud always (the volume needs it). On-Demand for `eval`, `train_events`, `tune_align` and `finetune_pose`. Interruptible (spot) is allowed for `gpu_tests` and `pose_bench`, where a restart is cheap.
-- GPU preference lists (`gpuTypeIds` with `gpuTypePriority: "custom"`): `NVIDIA L4`, `NVIDIA RTX 2000 Ada Generation`, `NVIDIA GeForce RTX 4090`, `NVIDIA A100 80GB PCIe`. Keep `NVIDIA RTX PRO 4500 Blackwell`, `NVIDIA RTX PRO 4000 Blackwell`, and `NVIDIA GeForce RTX 5090` off the default list until a pod shows `CUDAExecutionProvider` working under ONNX Runtime on sm_120. These types are available in `EU-RO-1`.
+- Secure Cloud always (the volume needs it). On-Demand for every job, including `gpu_tests` and `pose_bench`. Interruptible (spot) was dropped on 2026-11-17. REST v2 has no spot pods.
+- GPU preference order: `NVIDIA L4`, `NVIDIA RTX 2000 Ada Generation`, `NVIDIA GeForce RTX 4090`, `NVIDIA A100 80GB PCIe`. REST v2 takes one GPU type per create, so `pod_up` retries that list one type at a time. Keep `NVIDIA RTX PRO 4500 Blackwell`, `NVIDIA RTX PRO 4000 Blackwell`, and `NVIDIA GeForce RTX 5090` off the default list until a pod shows `CUDAExecutionProvider` working under ONNX Runtime on sm_120. These types are available in `EU-RO-1`.
 - `CC_TTL_S` is the backstop if `run_job.sh` hangs: 2 h for interactive pods, and a limit per job type for job pods (for example 1 h for `gpu_tests` and 12 h for `finetune_pose`).
 
 ### 2.6 Job flow
@@ -161,8 +161,8 @@ sequenceDiagram
 ```
 
 - Pods run only pushed commits: the bot pushes first, then starts the pod with that sha.
-- `scripts/gpu/pod_up.sh --job <name> --ref <sha> [--gpu ...] [--spot] [--ttl ...]`, or `--interactive`, calls `POST https://rest.runpod.io/v1/pods` (template, volume, GPU list, `interruptible`, job env) and prints the pod id and job id. `runpodctl pod ...` stays available for manual use.
-- `scripts/gpu/run_job.sh` (inside the pod): clone at `CC_GIT_REF`; install from `requirements-gpu.txt` with `/workspace/cache/pip` (a no-op when the image is current); run the job from `ml/jobs.py`, with output copied to `runs/<id>/log.txt`; write `metrics.json` and `status`; POST a summary to `CC_WEBHOOK_URL`; terminate the pod (`DELETE https://rest.runpod.io/v1/pods/$RUNPOD_POD_ID`). A shell `trap` makes sure that a failure still writes `status=failed`, pings and terminates.
+- `scripts/gpu/pod_up.sh --job <name> --ref <sha> [--gpu ...] [--ttl ...]`, or `--interactive`, calls `POST https://api.runpod.io/v2/pods` (template, volume, one GPU type, job env) and prints the pod id and job id. If that GPU type has no capacity, it retries the next type in the preference list. `runpodctl pod ...` stays available for manual use.
+- `scripts/gpu/run_job.sh` (inside the pod): clone at `CC_GIT_REF`; install from `requirements-gpu.txt` with `/workspace/cache/pip` (a no-op when the image is current); run the job from `ml/jobs.py`, with output copied to `runs/<id>/log.txt`; write `metrics.json` and `status`; POST a summary to `CC_WEBHOOK_URL`; terminate the pod (`DELETE https://api.runpod.io/v2/pods/$RUNPOD_POD_ID`). A shell `trap` makes sure that a failure still writes `status=failed`, pings and terminates.
 - `wait_job.sh <job_id> [--pod-id <pod_id>]` polls `runs/<id>/status` through the S3 API (the fallback when a ping is missed). `--pod-id` fails early if the pod exits before status is `passed`. `pod_down.sh <pod_id>` terminates a pod; `pod_ls.sh` lists pods and their age.
 - Jobs (`ml/jobs.py`): `gpu_tests` (every pytest tier that Linux supports), `pose_bench` (frames per second per pose mode on CUDA, and CUDA vs CPU keypoint parity), `eval` (event, cut and climber metrics of a rule set or model version on the golden footage), `train_events`, `tune_align`, `finetune_pose`.
 - Interactive debugging: `pod_up.sh --interactive`, then `ssh <pod>@ssh.runpod.io -i ~/.ssh/climbing_coach_ed25519` (Runpod's SSH proxy; it has no SCP, so files move through the volume), then `pod_down.sh`.
@@ -212,7 +212,7 @@ Frontend: `npm run build` writes `frontend/dist` (not committed); FastAPI serves
 
 GPU tier (Runpod, section 2)
 - Pod image: `nvidia/cuda` 12.x + cuDNN 9 runtime on Ubuntu 24.04, Python 3.12, `onnxruntime-gpu==1.23.2`, the CI's static ffmpeg 7 build, sshd, git, curl, jq.
-- Control: the Runpod REST API (`https://rest.runpod.io/v1`) through `curl` and `jq`; the volume's S3 API through AWS CLI v2 (bot computer and Mac).
+- Control: the Runpod REST API (`https://api.runpod.io/v2`) through `curl` and `jq`; the volume's S3 API through AWS CLI v2 (bot computer and Mac).
 - Phase 6 trainer image: PyTorch, MMCV 2.2, MMPose 1.3, NumPy 1.26 (exact pins chosen then).
 
 Tests and tooling
@@ -516,7 +516,7 @@ scripts/
   export_dataset.sh           feedback dataset (Phase 4) or COCO export (Phase 6) -> /workspace/datasets/<name>
   package_mac.sh              Phase 5 PyInstaller build of launcher/
   gpu/
-    pod_up.sh                 --job <name> --ref <sha> [--gpu ...] [--spot] [--ttl ...] or --interactive; REST API pod create
+    pod_up.sh                 --job <name> --ref <sha> [--gpu ...] [--ttl ...] or --interactive; REST v2 pod create
     run_job.sh                inside the pod: clone, install, run, write runs/<id>, ping the webhook, terminate
     wait_job.sh               poll runs/<id>/status through the S3 API
     pod_down.sh               terminate a pod

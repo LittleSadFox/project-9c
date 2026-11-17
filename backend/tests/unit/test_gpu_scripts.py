@@ -151,6 +151,49 @@ def _payload(stdout: str) -> dict[str, object]:
     return data
 
 
+_V1_CREATE_FIELDS = (
+    "cloudType",
+    "computeType",
+    "gpuCount",
+    "gpuTypePriority",
+    "gpuTypeIds",
+    "containerDiskInGb",
+    "volumeInGb",
+    "volumeMountPath",
+    "interruptible",
+    "imageName",
+    "networkVolumeId",
+    "containerRegistryAuthId",
+)
+
+
+def _assert_v2_create_payload(
+    payload: dict[str, object],
+    *,
+    gpu: str,
+    image: str,
+    volume: str = "wguvx2347m",
+    registry: str = "cmvhzigy8002b13z5y84jqc73",
+) -> None:
+    for field in _V1_CREATE_FIELDS:
+        assert field not in payload, field
+    assert "allowedCudaVersions" not in payload
+    assert payload["cloud"] == "SECURE"
+    gpu_obj = payload["gpu"]
+    assert isinstance(gpu_obj, dict)
+    assert gpu_obj["id"] == gpu
+    assert gpu_obj["count"] == 1
+    assert payload["image"] == image
+    assert payload["disk"] == 20
+    assert payload["ports"] == ["22/tcp"]
+    assert payload["startSsh"] is True
+    assert payload["registry"] == registry
+    assert payload["dataCenterIds"] == ["EU-RO-1"]
+    mounts = payload["mounts"]
+    assert isinstance(mounts, dict)
+    assert mounts["network"] == [{"volumeId": volume, "path": "/workspace"}]
+
+
 _BASETEMP: Path | None = None
 _ISOLATION_ROOT: Path | None = None
 _TMP_CC_SRC_DIRS: list[Path] = []
@@ -756,25 +799,19 @@ def test_pod_up_dry_run_sets_ttl_and_secret_refs() -> None:
     assert env["CC_WEBHOOK_KEY"] == "{{ RUNPOD_SECRET_cc_webhook_key }}"
     assert "RUNPOD_API_KEY" not in env
     assert "test-key-do-not-inject" not in result.stdout
-    assert "GET /containerregistryauth/cmvhzigy8002b13z5y84jqc73" in result.stdout
+    assert "GET /registries/cmvhzigy8002b13z5y84jqc73" in result.stdout
+    assert "containerregistryauth" not in result.stdout
     assert payload["name"] == result.stdout.split("job_id=")[-1].splitlines()[0]
-    assert payload["cloudType"] == "SECURE"
-    assert payload["volumeInGb"] == 0
-    assert payload["networkVolumeId"] == "wguvx2347m"
-    assert payload["dataCenterIds"] == ["EU-RO-1"]
-    assert payload["containerRegistryAuthId"] == "cmvhzigy8002b13z5y84jqc73"
-    assert payload["imageName"] == f"ghcr.io/littlesadfox/climbing-coach-gpu:{SHA40}"
-    assert "allowedCudaVersions" not in payload
-    gpus = payload["gpuTypeIds"]
-    assert isinstance(gpus, list)
-    for name in EXPECTED_GPUS:
-        assert name in gpus
-    assert gpus == EXPECTED_GPUS
-    assert "NVIDIA A40" not in gpus
-    assert "NVIDIA RTX A5000" not in gpus
-    assert "NVIDIA RTX PRO 4500 Blackwell" not in gpus
-    assert "NVIDIA RTX PRO 4000 Blackwell" not in gpus
-    assert "NVIDIA GeForce RTX 5090" not in gpus
+    image = f"ghcr.io/littlesadfox/climbing-coach-gpu:{SHA40}"
+    _assert_v2_create_payload(payload, gpu=EXPECTED_GPUS[0], image=image)
+    assert f"gpu={EXPECTED_GPUS[0]}" in result.stdout
+    assert f"gpu_fallback={','.join(EXPECTED_GPUS)}" in result.stdout
+    fallback = result.stdout.split("gpu_fallback=", 1)[1].splitlines()[0]
+    assert "NVIDIA A40" not in fallback
+    assert "NVIDIA RTX A5000" not in fallback
+    assert "NVIDIA RTX PRO 4500 Blackwell" not in fallback
+    assert "NVIDIA RTX PRO 4000 Blackwell" not in fallback
+    assert "NVIDIA GeForce RTX 5090" not in fallback
 
 
 def test_pod_up_pose_bench_passes_bench_clip() -> None:
@@ -1045,21 +1082,14 @@ def test_pod_up_refuses_zero_ttl() -> None:
     assert "CC_TTL_S" in result.stderr or "TTL" in result.stderr
 
 
-def test_pod_up_refuses_spot_for_on_demand_jobs() -> None:
-    result = _run(
-        [str(POD_UP), "--job", "eval", "--ref", SHA40, "--spot", "--dry-run"],
-    )
-    assert result.returncode != 0
-    assert "spot" in result.stderr
-
-
-def test_pod_up_allows_spot_for_gpu_tests() -> None:
-    result = _run(
-        [str(POD_UP), "--job", "gpu_tests", "--ref", SHA40, "--spot", "--dry-run"],
-    )
-    assert result.returncode == 0, result.stderr
-    payload = _payload(result.stdout)
-    assert payload["interruptible"] is True
+def test_pod_up_rejects_spot_flag() -> None:
+    for job in ("eval", "gpu_tests", "pose_bench"):
+        result = _run(
+            [str(POD_UP), "--job", job, "--ref", SHA40, "--spot", "--dry-run"],
+        )
+        assert result.returncode != 0, job
+        assert "Unknown argument: --spot" in result.stderr
+        assert "pod_id=" not in result.stdout
 
 
 def test_live_pod_up_refuses_without_api_key() -> None:
@@ -1192,6 +1222,183 @@ def test_lib_git_auth_is_basic_x_access_token() -> None:
     text = LIB.read_text(encoding="utf-8")
     assert "x-access-token:" in text
     assert "AUTHORIZATION: basic" in text
+
+
+def test_scripts_use_rest_v2_and_drop_spot() -> None:
+    texts = [
+        LIB.read_text(encoding="utf-8"),
+        POD_UP.read_text(encoding="utf-8"),
+        POD_DOWN.read_text(encoding="utf-8"),
+        POD_LS.read_text(encoding="utf-8"),
+        WAIT_JOB.read_text(encoding="utf-8"),
+        RUN_JOB.read_text(encoding="utf-8"),
+    ]
+    joined = "\n".join(texts)
+    assert "https://api.runpod.io/v2" in joined
+    assert "rest.runpod.io" not in joined
+    assert "https://rest.runpod.io/v1" not in joined
+    assert "containerregistryauth" not in joined
+    assert "interruptible" not in joined
+    assert "gpuTypeIds" not in joined
+    assert "--spot)" not in joined
+    assert "cc_spot_allowed" not in joined
+    assert 'cc_rest GET "/registries/${id}"' in joined
+    assert "cc_rest POST /pods" in joined
+    assert 'cc_rest GET "/pods/${pod_id}"' in joined
+    assert 'cc_rest GET "$path"' in joined
+    assert 'cc_rest DELETE "/pods/${POD_ID}"' in POD_DOWN.read_text(encoding="utf-8")
+    assert 'cc_rest DELETE "/pods/${RUNPOD_POD_ID}"' in joined
+    assert 'cc_rest GET "/pods/${POD_ID}"' in WAIT_JOB.read_text(encoding="utf-8")
+
+
+def test_cc_rest_uses_v2_base_url(tmp_path: Path) -> None:
+    hits = tmp_path / "curl.log"
+    curl = tmp_path / "curl"
+    curl.write_text(
+        f"""#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "{hits}"
+out=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [[ -n "$out" ]]; then
+  printf '%s\\n' '{{"id":"reg-1","name":"ghcr"}}' >"$out"
+fi
+printf '200'
+exit 0
+""",
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+    listed = _run(
+        ["bash", "-c", f"source {LIB} && cc_rest GET /pods"],
+        env={"RUNPOD_API_KEY": "ok-key"},
+        bin_dir=tmp_path,
+    )
+    assert listed.returncode == 0, listed.stderr
+    registry = _run(
+        ["bash", "-c", f"source {LIB} && cc_rest GET /registries/reg-1"],
+        env={"RUNPOD_API_KEY": "ok-key"},
+        bin_dir=tmp_path,
+    )
+    assert registry.returncode == 0, registry.stderr
+    log = hits.read_text(encoding="utf-8")
+    assert "https://api.runpod.io/v2/pods" in log
+    assert "https://api.runpod.io/v2/registries/reg-1" in log
+    assert "rest.runpod.io" not in log
+    assert "/v1/" not in log
+
+
+def test_pod_up_retries_one_gpu_type_at_a_time(tmp_path: Path) -> None:
+    hits = tmp_path / "curl.log"
+    curl = tmp_path / "curl"
+    curl.write_text(
+        f"""#!/usr/bin/env bash
+method=GET
+out=""
+body=""
+url=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -X) method="$2"; shift 2 ;;
+    -o) out="$2"; shift 2 ;;
+    -d) body="$2"; shift 2 ;;
+    https://*) url="$1"; shift ;;
+    *) shift ;;
+  esac
+done
+printf 'method=%s url=%s\\n' "$method" "$url" >> "{hits}"
+if [[ -n "$body" ]]; then
+  printf '%s\\n' "$body" >> "{hits}"
+fi
+status="500"
+resp='{{"title":"Error","status":500,"detail":"unmapped"}}'
+if [[ "$method" == "GET" && "$url" == *"/registries/"* ]]; then
+  status="200"
+  resp='{{"id":"cmvhzigy8002b13z5y84jqc73","name":"ghcr"}}'
+elif [[ "$method" == "POST" && "$url" == *"/pods" ]]; then
+  gpu="$(printf '%s' "$body" | jq -r '.gpu.id // empty')"
+  printf 'gpu=%s\\n' "$gpu" >> "{hits}"
+  if printf '%s' "$body" | jq -e '.interruptible or .gpuTypeIds or .cloudType' >/dev/null; then
+    status="422"
+    resp='{{"title":"Unprocessable Entity","status":422,"detail":"v1 field"}}'
+  elif [[ "$gpu" == "NVIDIA L4" ]]; then
+    status="400"
+    resp='{{"title":"Bad Request","status":400,"detail":"no capacity"}}'
+  elif [[ "$gpu" == "NVIDIA RTX 2000 Ada Generation" ]]; then
+    status="201"
+    resp='{{"id":"pod-from-ada","status":"PROVISIONING"}}'
+  fi
+fi
+if [[ -n "$out" ]]; then
+  printf '%s\\n' "$resp" >"$out"
+fi
+printf '%s' "$status"
+exit 0
+""",
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+    result = _run(
+        [str(POD_UP), "--job", "gpu_tests", "--ref", SHA40],
+        env={"RUNPOD_API_KEY": "ok-key"},
+        bin_dir=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "pod_id=pod-from-ada" in result.stdout
+    log = hits.read_text(encoding="utf-8")
+    assert log.count("method=POST url=https://api.runpod.io/v2/pods") == 2
+    assert "gpu=NVIDIA L4" in log
+    assert "gpu=NVIDIA RTX 2000 Ada Generation" in log
+    assert log.index("gpu=NVIDIA L4") < log.index("gpu=NVIDIA RTX 2000 Ada Generation")
+    assert "rest.runpod.io" not in log
+    assert "interruptible" not in log
+
+
+def test_pod_ls_follows_v2_pagination(tmp_path: Path) -> None:
+    hits = tmp_path / "curl.log"
+    curl = tmp_path / "curl"
+    curl.write_text(
+        f"""#!/usr/bin/env bash
+out=""
+url=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    https://*) url="$1"; shift ;;
+    *) shift ;;
+  esac
+done
+printf '%s\\n' "$url" >> "{hits}"
+if [[ "$url" == *cursor=* ]]; then
+  body='{{"pods":[{{"id":"pod-2","name":"b","status":"RUNNING"}}],"pagination":{{"hasNextPage":false,"nextCursor":null}}}}'
+else
+  body='{{"pods":[{{"id":"pod-1","name":"a","status":"RUNNING"}}],"pagination":{{"hasNextPage":true,"nextCursor":"page-2"}}}}'
+fi
+if [[ -n "$out" ]]; then
+  printf '%s\\n' "$body" >"$out"
+fi
+printf '200'
+exit 0
+""",
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+    result = _run(
+        [str(POD_LS)],
+        env={"RUNPOD_API_KEY": "ok-key"},
+        bin_dir=tmp_path,
+    )
+    assert result.returncode == 3
+    assert "pod-1" in result.stdout
+    assert "pod-2" in result.stdout
+    log = hits.read_text(encoding="utf-8")
+    assert "https://api.runpod.io/v2/pods?limit=1000" in log
+    assert "cursor=page-2" in log
+    assert "rest.runpod.io" not in log
 
 
 def _fake_curl_routes(tmp_path: Path, routes: dict[str, tuple[str, str]]) -> Path:
@@ -1524,7 +1731,7 @@ def test_pod_up_allows_latest_image_with_override() -> None:
     )
     assert result.returncode == 0, result.stderr
     payload = _payload(result.stdout)
-    assert payload["imageName"] == "ghcr.io/littlesadfox/climbing-coach-gpu:latest"
+    assert payload["image"] == "ghcr.io/littlesadfox/climbing-coach-gpu:latest"
 
 
 def test_pod_up_accepts_image_digest() -> None:
@@ -1538,7 +1745,7 @@ def test_pod_up_accepts_image_digest() -> None:
     )
     assert result.returncode == 0, result.stderr
     payload = _payload(result.stdout)
-    assert payload["imageName"] == digest
+    assert payload["image"] == digest
 
 
 def _docker_inspect(tmp_path: Path, *, ok: bool, log: Path | None = None) -> Path:
@@ -1889,7 +2096,10 @@ def test_pod_up_keeps_caller_volume_id() -> None:
     )
     assert result.returncode == 0, result.stderr
     payload = _payload(result.stdout)
-    assert payload["networkVolumeId"] == "from-caller"
+    mounts = payload["mounts"]
+    assert isinstance(mounts, dict)
+    assert mounts["network"] == [{"volumeId": "from-caller", "path": "/workspace"}]
+    assert "networkVolumeId" not in payload
 
 
 def test_pod_up_registry_get_refuses_on_401(tmp_path: Path) -> None:
@@ -1900,7 +2110,8 @@ def test_pod_up_registry_get_refuses_on_401(tmp_path: Path) -> None:
         bin_dir=tmp_path,
     )
     assert result.returncode != 0
-    assert "containerregistryauth" in result.stderr
+    assert "registries" in result.stderr
+    assert "containerregistryauth" not in result.stderr
     assert "pod_id=" not in result.stdout
 
 
@@ -1985,7 +2196,7 @@ def test_wait_job_passed_does_not_exit_zero_if_pod_remains(tmp_path: Path) -> No
         metrics_body='{\n  "job": "gpu_tests",\n  "status": "passed"\n}\n',
         expected_bucket="vol-1",
     )
-    _fake_curl(tmp_path, "200", '{"id":"pod-abc","desiredStatus":"RUNNING"}')
+    _fake_curl(tmp_path, "200", '{"id":"pod-abc","status":"RUNNING"}')
     result = _run(
         [str(WAIT_JOB), "job-1", "--pod-id", "pod-abc"],
         env={
@@ -2036,6 +2247,9 @@ def test_pod_up_omits_allowed_cuda_by_default() -> None:
     assert result.returncode == 0, result.stderr
     payload = _payload(result.stdout)
     assert "allowedCudaVersions" not in payload
+    gpu_obj = payload["gpu"]
+    assert isinstance(gpu_obj, dict)
+    assert "allowedCudaVersions" not in gpu_obj
 
 
 def test_pod_up_allowed_cuda_opt_in() -> None:
@@ -2045,7 +2259,10 @@ def test_pod_up_allowed_cuda_opt_in() -> None:
     )
     assert result.returncode == 0, result.stderr
     payload = _payload(result.stdout)
-    assert payload["allowedCudaVersions"] == ["12.8", "12.9", "13.0"]
+    assert "allowedCudaVersions" not in payload
+    gpu_obj = payload["gpu"]
+    assert isinstance(gpu_obj, dict)
+    assert gpu_obj["allowedCudaVersions"] == ["12.8", "12.9", "13.0"]
 
 
 def test_pod_up_missing_flag_value_does_not_swallow_next_flag() -> None:
@@ -2061,7 +2278,7 @@ def test_pod_up_missing_flag_value_does_not_swallow_next_flag() -> None:
     assert missing_ttl.returncode != 0
     assert "--ttl requires a value" in missing_ttl.stderr
     missing_gpu = _run(
-        [str(POD_UP), "--job", "gpu_tests", "--ref", SHA40, "--gpu", "--spot", "--dry-run"],
+        [str(POD_UP), "--job", "gpu_tests", "--ref", SHA40, "--gpu", "--ttl", "--dry-run"],
     )
     assert missing_gpu.returncode != 0
     assert "--gpu requires a value" in missing_gpu.stderr
@@ -2080,7 +2297,7 @@ def test_pod_gone_detects_404(tmp_path: Path) -> None:
 
 
 def test_pod_gone_detects_terminated(tmp_path: Path) -> None:
-    _fake_curl(tmp_path, "200", '{"id":"pod-abc","desiredStatus":"TERMINATED"}')
+    _fake_curl(tmp_path, "200", '{"id":"pod-abc","status":"TERMINATED"}')
     result = _run(
         ["bash", "-c", f"source {LIB} && cc_pod_gone pod-abc"],
         env={"RUNPOD_API_KEY": "ok-key"},
@@ -2274,7 +2491,12 @@ exit 0
 
 
 def test_pod_ls_exits_3_when_pods_exist(tmp_path: Path) -> None:
-    _fake_curl(tmp_path, "200", '[{"id":"pod-1","name":"n","desiredStatus":"RUNNING"}]')
+    _fake_curl(
+        tmp_path,
+        "200",
+        '{"pods":[{"id":"pod-1","name":"n","status":"RUNNING"}],'
+        '"pagination":{"hasNextPage":false,"nextCursor":null}}',
+    )
     result = _run(
         [str(POD_LS)],
         env={"RUNPOD_API_KEY": "ok-key"},
@@ -2398,7 +2620,7 @@ def test_pod_down_exited_after_failed_delete_is_not_gone(tmp_path: Path) -> None
         tmp_path,
         {
             "DELETE": ("500", '{"error":"busy"}'),
-            "GET": ("200", '{"id":"pod-abc","desiredStatus":"EXITED"}'),
+            "GET": ("200", '{"id":"pod-abc","status":"EXITED"}'),
         },
     )
     result = _run(
@@ -2412,7 +2634,7 @@ def test_pod_down_exited_after_failed_delete_is_not_gone(tmp_path: Path) -> None
 
 
 def test_pod_gone_treats_exited_as_early_exit(tmp_path: Path) -> None:
-    _fake_curl(tmp_path, "200", '{"id":"pod-abc","desiredStatus":"EXITED"}')
+    _fake_curl(tmp_path, "200", '{"id":"pod-abc","status":"EXITED"}')
     result = _run(
         ["bash", "-c", f"source {LIB} && cc_pod_gone pod-abc"],
         env={"RUNPOD_API_KEY": "ok-key"},
@@ -2423,7 +2645,7 @@ def test_pod_gone_treats_exited_as_early_exit(tmp_path: Path) -> None:
 
 
 def test_pod_deleted_rejects_exited(tmp_path: Path) -> None:
-    _fake_curl(tmp_path, "200", '{"id":"pod-abc","desiredStatus":"EXITED"}')
+    _fake_curl(tmp_path, "200", '{"id":"pod-abc","status":"EXITED"}')
     result = _run(
         ["bash", "-c", f"source {LIB} && cc_pod_deleted pod-abc"],
         env={"RUNPOD_API_KEY": "ok-key"},
@@ -2441,7 +2663,7 @@ def test_pod_deleted_accepts_404_or_terminated(tmp_path: Path) -> None:
     )
     assert missing.returncode == 0, missing.stderr
     assert "missing" in missing.stdout
-    _fake_curl(tmp_path, "200", '{"id":"pod-abc","desiredStatus":"TERMINATED"}')
+    _fake_curl(tmp_path, "200", '{"id":"pod-abc","status":"TERMINATED"}')
     gone = _run(
         ["bash", "-c", f"source {LIB} && cc_pod_deleted pod-abc"],
         env={"RUNPOD_API_KEY": "ok-key"},
@@ -2449,6 +2671,27 @@ def test_pod_deleted_accepts_404_or_terminated(tmp_path: Path) -> None:
     )
     assert gone.returncode == 0, gone.stderr
     assert "TERMINATED" in gone.stdout
+
+
+def test_pod_gone_treats_error_as_early_exit(tmp_path: Path) -> None:
+    _fake_curl(tmp_path, "200", '{"id":"pod-abc","status":"ERROR"}')
+    result = _run(
+        ["bash", "-c", f"source {LIB} && cc_pod_gone pod-abc"],
+        env={"RUNPOD_API_KEY": "ok-key"},
+        bin_dir=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "ERROR" in result.stdout
+
+
+def test_pod_deleted_rejects_error_status(tmp_path: Path) -> None:
+    _fake_curl(tmp_path, "200", '{"id":"pod-abc","status":"ERROR"}')
+    result = _run(
+        ["bash", "-c", f"source {LIB} && cc_pod_deleted pod-abc"],
+        env={"RUNPOD_API_KEY": "ok-key"},
+        bin_dir=tmp_path,
+    )
+    assert result.returncode != 0
 
 
 def test_run_job_fails_fast_without_repo_token(tmp_path: Path) -> None:

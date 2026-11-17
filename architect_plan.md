@@ -85,7 +85,7 @@ isProject: false
 - RunPod template: the GHCR image, container disk 20 GB, network volume mounted at `/workspace`, TCP port 22 exposed, env `CC_JOB`, `CC_GIT_REF`, `CC_JOB_ID`, `CC_WEBHOOK_URL`, `RUNPOD_API_KEY`, `CC_MODELS_DIR=/workspace/models`, `CC_LIBRARY_DIR=/workspace/library`.
 
 ### Pod settings per job
-- Cloud: Secure Cloud always (needed for the volume). On-Demand for `train_events`, `tune_align`, `eval`, `finetune_pose`. Spot/interruptible allowed for `gpu_tests` and `pose_bench`, where a restart is cheap.
+- Cloud: Secure Cloud always (needed for the volume). On-Demand for every job. Spot/interruptible was dropped on 2026-11-17. REST v2 has no spot pods.
 - GPU: `pod_up.sh` takes an ordered preference list; default `RTX 4090` then `A40` then `RTX A5000` for tests and the small Phase 4 models; `A40` then `A100 80GB` for `finetune_pose`.
 - Interactive pods get a hard `--ttl` (default 2 h); job pods terminate themselves.
 
@@ -107,7 +107,7 @@ sequenceDiagram
   Hook-->>Bot: routine run wakes bot
   Bot->>Vol: read runs/id via S3 API (wait_job.sh fallback)
 ```
-- `scripts/gpu/pod_up.sh --job <name> --ref <sha> [--gpu ...] [--interactive] [--spot]` wraps `runpodctl pod create --image ... --network-volume-id ... --gpu-id ... --env ...` and prints the pod id and job id.
+- `scripts/gpu/pod_up.sh --job <name> --ref <sha> [--gpu ...] [--interactive]` wraps REST v2 `POST /v2/pods` (one GPU type per create, with a client-side fallback list) and prints the pod id and job id.
 - `scripts/gpu/run_job.sh`: clone at `CC_GIT_REF`, resolve the job through `ml/jobs.py`, run it with output tee'd to `runs/<id>/log.txt`, write `metrics.json` and `status`, POST to `CC_WEBHOOK_URL`, then call the RunPod API to terminate the pod. Any failure still writes `status=failed` and pings the webhook before terminating.
 - `scripts/gpu/wait_job.sh <job_id>` polls `runs/<id>/status` through the S3 API; `pod_down.sh <pod_id>` terminates an interactive pod.
 - Jobs (`ml/jobs.py`): `gpu_tests` (all pytest tiers), `pose_bench` (fps per `CC_POSE_MODE` on CUDA), `train_events`, `tune_align`, `eval`, `finetune_pose`.

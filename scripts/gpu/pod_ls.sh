@@ -30,14 +30,13 @@ if [[ "$DRY_RUN" == "1" ]]; then
 fi
 
 cc_require_bot_api_key
-RESPONSE=""
-if ! RESPONSE="$(cc_rest GET '/pods')"; then
+ITEMS=""
+if ! ITEMS="$(cc_list_pods)"; then
   if command -v runpodctl >/dev/null 2>&1; then
     runpodctl get pod || runpodctl pod list
   fi
   cc_fail "Runpod GET /pods failed."
 fi
-ITEMS="$(cc_pods_from_response "$RESPONSE")"
 COUNT="$(jq 'length' <<<"$ITEMS")"
 NOW="$(date -u +%s)"
 if [[ "$COUNT" -eq 0 ]]; then
@@ -48,9 +47,9 @@ printf '%s\n' "$ITEMS" | jq -r --argjson now "$NOW" '
   .[] | [
     (.id // .podId // "-"),
     (.name // "-"),
-    (.desiredStatus // .status // "-"),
+    (.status // .desiredStatus // "-"),
     (
-      (.lastStartedAt // .createdAt // empty) as $raw
+      (.startedAt // .lastStartedAt // .createdAt // empty) as $raw
       | if $raw == "" then "-"
         else
           (($raw | sub("\\.[0-9]+Z$"; "Z") | strptime("%Y-%m-%dT%H:%M:%SZ") | mktime) as $c
